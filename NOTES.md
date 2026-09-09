@@ -2605,3 +2605,65 @@ touches no Python code path the tests exercise).
   ever built -- the risk is a plausible-looking wrong formula compiling
   silently, which is strictly worse than the loud crash bug #1 above
   actually was.
+
+**2026-09-09, new branch `wasm-rate-formula-drift-check`: made the
+transcription-drift check from the previous entry permanent instead of
+a one-off scratch script.** Asked to go explore the single-source-of-
+truth idea further (edge-case count, how invasive a real fix would be)
+before deciding what to build; the answer landed on three options ranging
+from "just detect drift" (cheap, no invasiveness) up to "rewrite
+primordial_rates.py into a shared declarative schema" (a real
+single source of truth, but touches the one file the actual solver
+depends on). Decision: do the cheap one now, nothing else yet.
+
+New `tests/test_wasm_rate_formulas.py`, wired into the normal `pytest`
+run (no separate script to remember to invoke): for every reaction (and
+every k13/k22 threebody preset) in `wasm/reaction_rates.py`, evaluates
+its Vega formula string directly in Python -- a small evaluator handles
+the one real syntax gap (Vega's `cond ? a : b` ternary has no Python
+equivalent, so it's rewritten to `a if cond else b`; everything else in
+these formulas, arithmetic/comparisons/`pow`/`exp`/`log`/`sqrt`/`min`/
+`max`/dotted attribute access, is valid Python already) -- and compares
+it against the real `dengo.reaction_classes.reaction_registry[name]
+.coeff_fn(state)` output across T = 10 to 1e8 K. Fails loudly, by
+design, on anything more than 1e-6 relative error (with a floor for
+both-effectively-zero comparisons, matching the tolerance already used
+in the one-off verification scripts from the previous entry). Confirmed
+it actually catches drift, not just passes trivially: temporarily
+mutated one formula's exponent by hand and reran -- correctly failed
+with the mismatching values named in the assertion message; restored
+and reran clean.
+
+Building this surfaced one genuine (if practically harmless) latent bug
+of its own: k13 and k22's top-level `"formula"` field -- meant as the
+fallback for reactions with no presets -- had been transcribed as
+whichever threebody branch happened to come first in the original
+if/elif chain (`threebody=0`) rather than the network's actual default
+(`threebody=4`, `default_preset` in the same dict). `rates.js` never
+actually hits that fallback for these two reactions (it sets
+`SELECTED_PRESET` to `default_preset` immediately on card build, before
+ever reading `activeFormula()`), so this was dead-in-practice, not a
+UI-visible bug -- but it's exactly the kind of quiet inconsistency this
+whole check exists to prevent, so fixed both to literally equal
+`presets["threebody=4"]`, removing the need for the test to special-
+case them.
+
+Verified: `uv run pytest` -- 120/120 (86 original + 34 new: 22 plain
+formulas + 12 threebody presets). Real Emscripten rebuild of all three
+fiducial networks + headless-browser pass (light/dark): zero console
+errors, k13's preset dropdown/default unchanged, and confirmed directly
+that the default-shown k13 formula in the browser is now actually the
+threebody=4 expression (previously it would have shown threebody=0's
+text on first load before any preset interaction, momentarily
+inconsistent with the dropdown already reading "threebody=4").
+
+Deliberately not done: this is option "C" from the exploration -- two
+copies of each formula still exist (real `coeff_fn` and
+`reaction_rates.py`), just with drift now impossible to miss. The AST-
+transpiler idea (mechanically deriving the Vega formula from the real
+Python source, the actual single-source-of-truth option, with its edge
+cases already catalogued: non-`vals`-named accumulators, sequential
+reassignment/dead-code overwrites, local-variable clamps, mask-variable
+name reuse, the threebody-switch-vs-T-branch classification) and the
+declarative-schema rewrite option remain unbuilt, per explicit
+instruction to stop here for now.
