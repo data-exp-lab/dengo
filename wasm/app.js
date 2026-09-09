@@ -24,10 +24,22 @@ const AXIS_LATEX = {
   time: "t\\ (\\mathrm{s})",
   density: "n\\ (\\mathrm{cm^{-3}})",
   T: "T\\ (\\mathrm{K})",
-  ion: "\\mathrm{H^+} / \\mathrm{H_{tot}}",
+  ionfrac: "X / \\mathrm{H_{tot}}",
   species: "n_i\\ (\\mathrm{cm^{-3}})",
   massfrac: "X_i",
   ge: "\\varepsilon\\ (\\mathrm{erg\\ g^{-1}})",
+};
+
+// Ionized fraction is important, but so is molecular fraction -- both are
+// "fraction of total hydrogen", so they share one chart/y-axis instead of
+// H2 only getting a mention in the status line. Small, fixed 2-series
+// legend, so (unlike the species-abundance chart's dynamic set) a plain
+// Vega-Lite legend is the right amount of machinery here -- no toggle
+// checkboxes needed.
+const ION_H2_LABELS = { ion: "H⁺ / H_tot", h2: "H₂ / H_tot" };
+const ION_H2_COLORS = {
+  light: { ion: "#3366cc", h2: "#e07b00" },
+  dark: { ion: "#8ab4ff", h2: "#ffb454" },
 };
 
 // d3's category10, fixed to a stable per-species assignment (see
@@ -237,7 +249,7 @@ function runFreefall(nH, T, fractions, logNTarget, safetyFactor = 0.01, maxSteps
   return { x: nHist, t: tHist, dt: dtHist, T: THist, ion: ionHist, h2: h2Hist, s: sHist, xKey: "density" };
 }
 
-const FIELD_TITLE = { T: "T (K)", ion: "H⁺ / H_tot", ge: "ε (erg/g)" };
+const FIELD_TITLE = { T: "T (K)", ge: "ε (erg/g)" };
 
 function chartSpec(field, xKey, data, extra, extraTooltip) {
   // Point markers double as an annotation of *where* the adaptive
@@ -282,6 +294,56 @@ function chartSpec(field, xKey, data, extra, extraTooltip) {
         },
       },
     ],
+  };
+}
+
+// Ionized fraction and molecular (H2) fraction together, long-format
+// (one row per (step, quantity) pair, `quantity` already holding the
+// human-readable legend label) -- see ION_H2_LABELS/ION_H2_COLORS above.
+// h2 rows are simply absent for a network with no H2 species (rather
+// than plotting a bogus flat line), same graceful-degradation as the
+// status line's H2/H_tot readout.
+function ionizationChartSpec(xKey, rows) {
+  const n = rows.length;
+  const pointSize = Math.max(4, Math.min(30, 2000 / Math.max(n, 1)));
+  const palette = isDarkMode() ? ION_H2_COLORS.dark : ION_H2_COLORS.light;
+  // Built from what's actually *present* in `rows`, not unconditionally
+  // both labels -- a hardcoded domain would draw a legend entry for H2
+  // even on a network with no H2 species at all (no h2 rows are ever
+  // pushed for one; see redraw()), which is misleading on its own.
+  const present = new Set(rows.map((r) => r.quantity));
+  const domain = [ION_H2_LABELS.ion, ION_H2_LABELS.h2].filter((label) => present.has(label));
+  const range = domain.map((label) => (label === ION_H2_LABELS.ion ? palette.ion : palette.h2));
+  return {
+    $schema: "https://vega.github.io/schema/vega-lite/v5.json",
+    width: 600, height: 220, background: null,
+    config: vlConfig(),
+    data: { values: rows },
+    mark: { type: "line", point: { filled: true, size: pointSize, opacity: 0.9 } },
+    encoding: {
+      x: {
+        field: "x", type: "quantitative", scale: { type: "log" },
+        axis: {
+          title: null, labelOverlap: "greedy",
+          labelAngle: xKey === "time" ? -40 : 0,
+          labelExpr: xKey === "time" ? TIME_LABEL_EXPR : undefined,
+        },
+      },
+      y: { field: "value", type: "quantitative", scale: { type: "log" }, axis: { title: null } },
+      color: {
+        field: "quantity", type: "nominal",
+        scale: { domain, range },
+        legend: { title: null, orient: "top-right" },
+      },
+      tooltip: [
+        { field: "quantity", title: "quantity", type: "nominal" },
+        { field: "i", title: "step", type: "quantitative" },
+        { field: "x", title: xKey === "time" ? "t (s)" : "n (cm⁻³)", type: "quantitative", format: ".3~g" },
+        { field: "tHuman", title: "t", type: "nominal" },
+        { field: "dt", title: "step Δt (s)", type: "quantitative", format: ".3~g" },
+        { field: "value", title: "fraction", type: "quantitative", format: ".4~g" },
+      ],
+    },
   };
 }
 
@@ -399,11 +461,20 @@ function redraw() {
   const tempField = temperatureDisplayMode === "ge" ? "ge" : "T";
   vegaEmbed("#chart-T", chartSpec(tempField, result.xKey, rows, tempField === "T" ? [band] : [], gammaTooltip),
             { actions: false, renderer: "svg" });
-  vegaEmbed("#chart-ion", chartSpec("ion", result.xKey, rows),
+  const ionRows = [];
+  for (let i = 0; i < result.x.length; i++) {
+    const base = { x: result.x[i], i, dt: result.dt[i], tHuman: formatTimeAuto(result.t[i]) };
+    ionRows.push({ ...base, quantity: ION_H2_LABELS.ion, value: result.ion[i] });
+    const h2v = result.h2[i];
+    if (h2v !== null && h2v !== undefined && h2v > 0) {
+      ionRows.push({ ...base, quantity: ION_H2_LABELS.h2, value: h2v });
+    }
+  }
+  vegaEmbed("#chart-ion", ionizationChartSpec(result.xKey, ionRows),
             { actions: false, renderer: "svg" });
   renderLatex("ylabel-T", tempField);
   renderLatex("xlabel-T", result.xKey);
-  renderLatex("ylabel-ion", "ion");
+  renderLatex("ylabel-ion", "ionfrac");
   renderLatex("xlabel-ion", result.xKey);
 
   const massFracMode = speciesDisplayMode === "massfrac";

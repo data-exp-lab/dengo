@@ -1997,3 +1997,97 @@ free-fall despite starting from very different states, and
 `hydrogen_minimal` (a network with zero cooling terms by construction)
 shows essentially no temperature change from the protostellar-disk
 preset in constant-density mode, as it should.
+
+**2026-09-09, new branch `wasm-panel-layout`: molecular fraction gets
+equal billing, sliders panel stays reachable while charts stay visible.**
+Two asks: molecular (H2) fraction was only ever a status-line footnote,
+not plotted; and a long sliders panel (IC presets, mode, nH/T, 6-9
+per-species sliders, dtf/target, status) meant dragging a lower slider
+scrolled the charts above it out of view. Explicitly asked to evaluate
+switching to a reactive UI framework/toolkit (SvelteKit/Skeleton/etc)
+before doing anything -- recommended against it and said why: the
+layout/scroll problem isn't a reactivity problem (redraw-on-every-drag
+already works exactly as wanted), it's a CSS layout problem; adopting a
+framework would mean a Node/npm build step added to a currently pure
+Python+Emscripten CI job, a bundler, and converting ~500 lines of plain
+JS into components, for zero benefit to the actual complaint. User agreed
+("Yeah, do this") to the proposed cheaper plan instead:
+
+- **Ionization & molecular fraction, one chart.** Both are "fraction of
+  total hydrogen", so instead of adding a *fourth* chart panel (which
+  would make the scrolling problem worse, working against the rest of
+  this), folded H2 fraction into the existing Ionization chart as a
+  second line (`ionizationChartSpec()`, long-format rows with a
+  `quantity` field holding the actual legend label string). Real
+  Vega-Lite legend used here (not the species chart's checkbox-legend
+  pattern) since the set is small and fixed -- two known series, not a
+  dynamic per-network list.
+  **Bug caught by testing, not assumed away**: the color scale's
+  `domain` was originally hardcoded to both labels unconditionally,
+  which drew an "H₂ / H_tot" legend entry even on `primordial_atomic`/
+  `hydrogen_minimal` (no H2 species, no h2 rows ever pushed) -- a legend
+  entry for a line that's never drawn. Fixed by building `domain` from
+  the labels actually present in that call's `rows`.
+- **Collapsible species-fraction sliders.** Wrapped in a native
+  `<details>`/`<summary>` (`.species-details` in `generate_site.py`) --
+  zero JS, built into every browser, no new dependency. Open by default
+  so nothing changes for anyone who never notices it; the single biggest
+  contributor to panel height, so collapsing it does the most to shrink
+  the panel when you don't need it.
+- **Sliders panel is now an independently-scrolling sticky sidebar**
+  (`position: sticky` + `max-height: calc(100vh - 32px)` +
+  `overflow-y: auto` on `.panel`), reset to normal static flow on the
+  existing narrow-screen media query. First attempt was `position:
+  sticky` on the *charts* column instead (the originally-stated ask,
+  "still see some of the charts") -- verified with real height
+  measurements in a headless browser that this did nothing at all: sticky
+  only has room to act while its grid row is taller than the sticky item,
+  and the charts column turns out to *be* the taller column here (three
+  chart boxes vs. a sliders panel), so it was already at its natural
+  position with no slack to hold onto. Making the *shorter* column
+  (the panel) the sticky+capped+internally-scrolling one instead gives a
+  strictly better result than the original ask: not only do the charts
+  stay put while scrolling to a lower slider, the *sliders panel* also
+  stays put while scrolling down to see a lower chart -- both panels
+  visible/reachable simultaneously regardless of which one you're
+  scrolling.
+
+Verified: real Emscripten build of all three fiducial networks,
+headless-browser pass (light + dark) confirming (a) real height/position
+measurements (not just visual impression) proving the sticky-panel
+approach actually holds its position while the page scrolls and the
+naive sticky-charts attempt didn't, (b) the bottom-most slider (`dtf`)
+is reachable via the panel's own internal scroll while the page is
+scrolled to show the last chart, and the panel stays visible throughout,
+(c) the ion/H2 chart legend matches what's actually plotted on every
+network (fixed after being wrong), (d) `<details>` collapse verified by
+screenshot after `getComputedStyle().display`/`offsetParent` checks gave
+false negatives (modern Chrome doesn't hide `<details>` content via a
+plain `display: none` on the child -- an internal UA mechanism handles
+it, so those specific DOM checks aren't reliable evidence either way;
+the rendered pixels are), (e) zero console errors, (f) same physics
+results as every prior check in this file. Full `pytest` suite (86/86)
+also passes.
+
+**2026-09-09, same branch: `generate_site.py` fail-fast fix (found while
+walking the user through testing locally).** User followed the
+"build locally" instructions in `wasm/README.md` and got a bare
+directory listing (`app.js` and friends, no page) when serving
+`wasm/_site/`. Root cause: `em++` wasn't on `PATH` in the shell they ran
+`generate_site.py` from (hadn't re-sourced `emsdk_env.sh`), and
+`find_emxx()` calls `sys.exit(1)` when that happens -- `SystemExit`
+isn't an `Exception`, so it wasn't caught by `main()`'s per-network
+`try/except Exception`, and the whole process died immediately after
+finishing `primordial`'s *codegen* but before compiling it (confirmed:
+`wasm/_site/primordial/` had the generated `.C`/`.h`/`.bin` files but no
+`dengo_wasm.js`/`.wasm`, and no `index.html` anywhere -- `primordial_atomic`/
+`hydrogen_minimal` were never attempted). The script did print a clear
+"install/activate the Emscripten SDK" message, but to stderr, easy to
+miss, and by then a half-built, confusing `_site/` already existed.
+
+Fixed by calling `find_emxx()` once at the very top of `main()`, before
+`out_dir` is even created -- verified this now fails fast with nothing
+written at all (rather than a partial build) when `em++` is missing, and
+still builds all three networks correctly (confirmed `index.html`
+present at every level, including the landing page) when it's present.
+Full `pytest` suite (86/86) still passes.

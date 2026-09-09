@@ -80,7 +80,10 @@ PAGE_TEMPLATE = """<!doctype html>
       <label>T (K) <span class="val" id="T-val"></span></label>
       <input type="range" id="T" min="1" max="4.7" step="0.05" value="3">
     </div>
-    <div id="species-sliders"></div>
+    <details class="species-details" open>
+      <summary>Initial species fractions</summary>
+      <div id="species-sliders"></div>
+    </details>
     <div class="row" id="dtf-row">
       <label>total time: 10<sup>x</sup> s <span class="val" id="dtf-val"></span></label>
       <input type="range" id="dtf" min="6" max="17" step="0.1" value="13">
@@ -107,7 +110,7 @@ PAGE_TEMPLATE = """<!doctype html>
       <div class="axis-x" id="xlabel-T"></div>
     </div>
     <div class="chart-box">
-      <div class="chart-title">Ionization</div>
+      <div class="chart-title">Ionization &amp; molecular fraction</div>
       <div class="chart-row">
         <div class="axis-y" id="ylabel-ion"></div>
         <div id="chart-ion"></div>
@@ -218,6 +221,17 @@ def build_one(name, cfg, out_dir, repo):
 def main():
     out_dir = sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, "_site")
     repo = os.environ.get("GITHUB_REPOSITORY", "data-exp-lab/dengo")
+    # Fail fast, before creating/touching out_dir at all. find_emxx() calls
+    # sys.exit(1) if em++ isn't on PATH -- SystemExit isn't an Exception,
+    # so it isn't caught by the per-network try/except below; left
+    # unchecked here, that meant the whole process died partway through
+    # the *first* network (right after codegen, before compiling it),
+    # leaving a half-built out_dir/ with generated .C files but no
+    # compiled .js/.wasm and no index.html anywhere, including no landing
+    # page -- confusing (looks like a bare directory listing when served)
+    # rather than the clear "install/activate the Emscripten SDK" message
+    # that was actually printed.
+    find_emxx()
     os.makedirs(out_dir, exist_ok=True)
 
     shutil.copy(os.path.join(HERE, "app.js"), out_dir)
