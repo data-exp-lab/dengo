@@ -99,6 +99,53 @@ def test_primordial_network_conserves_helium_nuclei(primordial_solver):
     assert total_He_final == pytest.approx(total_He_initial, rel=1e-3)
 
 
+def test_step_inplace_matches_step(primordial_solver):
+    """`step_inplace()` (zero dict/array marshaling per call, writes/reads
+    `solver.state`/`solver.T` directly -- see NOTES.md) has to reach
+    exactly the same state as the dict-based `step()`, since both funnel
+    through the same `_advance()` core; run the same evolution both ways
+    from the same initial condition and compare."""
+    network, mod = primordial_solver
+    ics = primordial_ics()
+    dtf = 3.15e13
+
+    with mod.Solver(1) as solver:
+        final, _ = solver.step(ics, dtf=dtf, niter=10000, intermediate=False)
+
+    with mod.Solver(1) as solver:
+        for name, arr in ics.items():
+            solver.state[:, mod.SPECIES_INDEX[name]] = arr
+        converged, t = solver.step_inplace(dtf=dtf, niter=10000)
+        assert converged == final["converged"]
+        assert t == pytest.approx(final["t"])
+        assert float(solver.T[0]) == pytest.approx(final["T"][0], rel=1e-10)
+        for name in mod.SPECIES_NAMES:
+            assert solver.state[0, mod.SPECIES_INDEX[name]] == pytest.approx(
+                final[name][0], rel=1e-10
+            ), name
+
+
+def test_solver_state_view_is_persistent_and_writable(primordial_solver):
+    """`solver.state`/`solver.T` should be the same ndarray object across
+    calls (a real zero-copy view onto the persistent buffer, not
+    something recomputed/reallocated per access) and directly writable,
+    e.g. to apply a compression step in place between calls."""
+    network, mod = primordial_solver
+    ics = primordial_ics()
+    with mod.Solver(1) as solver:
+        state_ref = solver.state
+        T_ref = solver.T
+        for name, arr in ics.items():
+            solver.state[:, mod.SPECIES_INDEX[name]] = arr
+        assert solver.state is state_ref
+        assert solver.T is T_ref
+        # a plain in-place rescale, as a free-fall compression step would do
+        h2_idx = mod.SPECIES_INDEX["H2_1"]
+        before = solver.state[0, h2_idx]
+        solver.state[:, h2_idx] *= 2.0
+        assert solver.state[0, h2_idx] == pytest.approx(2.0 * before)
+
+
 def test_zero_abundance_species_does_not_produce_nan(primordial_solver):
     """Regression test: He_2 = He_3 = 0 (fully neutral helium) used to
     poison the whole solver with NaN via BE_chem_solve's 1/scale

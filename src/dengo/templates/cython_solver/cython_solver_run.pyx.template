@@ -54,6 +54,7 @@ SPECIES_NAMES = [
     "{{ s.name }}",
     {%- endfor %}
 ]
+SPECIES_INDEX = {name: i for i, name in enumerate(SPECIES_NAMES)}
 
 
 cdef class Solver:
@@ -92,6 +93,8 @@ cdef class Solver:
     cdef double *_diag_jac
     cdef readonly int dims
     cdef bint _closed
+    cdef readonly object state
+    cdef readonly object T
 
     def __cinit__(self, int dims, table_file=None, double redshift=0.0):
         cdef int n = NSPECIES
@@ -119,6 +122,26 @@ cdef class Solver:
         self._diag_input = <double *> malloc(n * sizeof(double))
         self._diag_rhs   = <double *> malloc(n * sizeof(double))
         self._diag_jac   = <double *> malloc(n * n * sizeof(double))
+
+        # Zero-copy numpy views straight onto the persistent `_input`/
+        # `Ts` buffers, built once here and reused for the life of this
+        # Solver -- `self.state`/`self.T` always name the *same* ndarray
+        # object, so a caller can grab it once outside a hot loop
+        # (`buf = solver.state`) and read/write it directly every
+        # iteration with no dict, no np.array()/ascontiguousarray() call,
+        # no per-call allocation at all. See `step_inplace()`. Columns of
+        # `state` are ordered per SPECIES_NAMES/SPECIES_INDEX; `T` is
+        # read-only in practice (the solver writes it, nothing reads a
+        # caller's writes to it).
+        #
+        # Not safe to use after close(): these wrap the same raw buffers
+        # that close() frees, and nothing revokes a numpy array's
+        # underlying memory out from under it.
+        cdef double[:, ::1] state_view = <double[:dims, :n]> self._input
+        cdef double[::1] T_view = <double[:dims]> self._data.Ts
+        self.state = np.asarray(state_view)
+        self.T = np.asarray(T_view)
+
         self._closed = False
 
     def __dealloc__(self):
@@ -152,28 +175,25 @@ cdef class Solver:
     def redshift(self, double value):
         self._data.current_z = value
 
-    def step(self, state, double dtf, int niter=10000,
-             double reltol=1.0e-5, double floor_value=1.0e-20,
-             bint adaptive_step=True, bint intermediate=True):
-        """Evolve `state` forward by `dtf` seconds, in place semantics:
-        reads `state` in, returns the evolved (final, trajectory_or_None)
-        -- same contract as `run_{{ solver_name }}`, just reusing this
-        handle's tables/buffers instead of setting up and tearing down
-        fresh ones. See `run_{{ solver_name }}`'s docstring for the
-        parameters; they're identical here minus `table_file`/`redshift`
-        (set once, at construction, via the `redshift` property).
+    cdef (double, int) _advance(self, double dtf, int niter, double reltol,
+                                 double floor_value, bint adaptive_step,
+                                 bint intermediate, dict traj_dict,
+                                 object T_traj, object t_traj, object ok_traj):
+        """Shared core of `step()`/`step_inplace()`: run BE_chem_solve
+        adaptively, from whatever is currently in `self._input`, until
+        `dtf` is covered or `niter` is exhausted. Neither reads nor
+        writes any Python dict for the state itself -- callers are
+        responsible for getting the input into `self._input` (via
+        `self.state`) beforehand and reading the result back out the
+        same way; `intermediate=True` still records a trajectory (that
+        needs `traj_dict`/`T_traj`/`t_traj`/`ok_traj` preallocated by the
+        caller), since only `step()` ever asks for one.
         """
-        if self._closed:
-            raise RuntimeError("this Solver has already been closed")
         cdef int dims = self.dims
         cdef int n = NSPECIES
         cdef int i, s_idx, it
-
-        cdef double[::1] arr_view
-        for s_idx, name in enumerate(SPECIES_NAMES):
-            arr_view = np.ascontiguousarray(state[name], dtype=np.float64).reshape(-1)
-            for i in range(dims):
-                self._input[i * n + s_idx] = arr_view[i]
+        cdef double dt, ttot
+        cdef int rv
 
         ensure_electron_consistency(self._input, dims, n)
         for i in range(dims * n):
@@ -186,19 +206,8 @@ cdef class Solver:
             self._scale[i] = max(abs(self._input[i]), floor_value)
             self._prev[i] = self._input[i]
 
-        traj_dict = {}
-        T_traj = None
-        t_traj = None
-        ok_traj = None
-        if intermediate:
-            traj_dict = {name: np.zeros((dims, niter)) for name in SPECIES_NAMES}
-            T_traj = np.zeros((dims, niter))
-            t_traj = np.zeros(niter)
-            ok_traj = np.zeros(niter, dtype=bool)
-
-        cdef double dt = dtf / niter
-        cdef double ttot = 0.0
-        cdef int rv
+        dt = dtf / niter
+        ttot = 0.0
         it = 0
         while it < niter and ttot < dtf:
             rv = BE_chem_solve(calculate_rhs_{{ solver_name }}, calculate_jacobian_{{ solver_name }},
@@ -233,10 +242,83 @@ cdef class Solver:
                 if dt < 1.0e-15 * dtf:
                     break
 
-        final = {}
+        return ttot, it
+
+    def step_inplace(self, double dtf, int niter=10000, double reltol=1.0e-5,
+                      double floor_value=1.0e-20, bint adaptive_step=True):
+        """Evolve `self.state` forward by `dtf` seconds, in place -- zero
+        Python-object marshaling in either direction, unlike `step()`.
+        Write the current abundances into `self.state` (shape
+        `(dims, NSPECIES)`, columns ordered per SPECIES_NAMES /
+        SPECIES_INDEX) yourself before calling this -- e.g.
+        `solver.state[:, SPECIES_INDEX["H2_1"]] *= density_ratio` -- and
+        read the result back from that same array and `self.T`
+        afterward; both are persistent views onto this handle's buffers
+        (see `__cinit__`), not copies, so there is nothing to re-fetch.
+
+        This is the calling convention a tight repeated-call loop should
+        use (a free-fall/collapse driver, or a hydro code's per-timestep
+        chemistry coupling): profiling this project's own free-fall
+        scripts (see NOTES.md) found `step()`'s dict-in/dict-out
+        marshaling -- fresh `np.ascontiguousarray()`/`reshape()` calls
+        and a fresh dict of arrays every call -- dominating actual solve
+        cost by orders of magnitude at `dims=1`, because none of that
+        Python/NumPy object overhead shrinks with problem size. No
+        trajectory recording here (see `step()` for that); returns just
+        `(converged, t)`.
+        """
+        if self._closed:
+            raise RuntimeError("this Solver has already been closed")
+        cdef double ttot
+        cdef int it
+        ttot, it = self._advance(dtf, niter, reltol, floor_value, adaptive_step,
+                                  False, {}, None, None, None)
+        return (ttot >= dtf), ttot
+
+    def step(self, state, double dtf, int niter=10000,
+             double reltol=1.0e-5, double floor_value=1.0e-20,
+             bint adaptive_step=True, bint intermediate=True):
+        """Evolve `state` forward by `dtf` seconds, in place semantics:
+        reads `state` in, returns the evolved (final, trajectory_or_None)
+        -- same contract as `run_{{ solver_name }}`, just reusing this
+        handle's tables/buffers instead of setting up and tearing down
+        fresh ones. See `run_{{ solver_name }}`'s docstring for the
+        parameters; they're identical here minus `table_file`/`redshift`
+        (set once, at construction, via the `redshift` property).
+
+        Convenience wrapper around `step_inplace()` for callers who'd
+        rather hand in/get back a plain dict of arrays than deal with
+        `self.state` directly -- see `step_inplace()` if you're calling
+        this repeatedly and the dict marshaling cost matters.
+        """
+        if self._closed:
+            raise RuntimeError("this Solver has already been closed")
+        cdef int dims = self.dims
+        cdef int s_idx
+
         for s_idx, name in enumerate(SPECIES_NAMES):
-            final[name] = np.array([self._input[i * n + s_idx] for i in range(dims)])
-        final["T"] = np.array([self._data.Ts[i] for i in range(dims)])
+            self.state[:, s_idx] = state[name]
+
+        traj_dict = {}
+        T_traj = None
+        t_traj = None
+        ok_traj = None
+        if intermediate:
+            traj_dict = {name: np.zeros((dims, niter)) for name in SPECIES_NAMES}
+            T_traj = np.zeros((dims, niter))
+            t_traj = np.zeros(niter)
+            ok_traj = np.zeros(niter, dtype=bool)
+
+        cdef double ttot
+        cdef int it
+        ttot, it = self._advance(dtf, niter, reltol, floor_value, adaptive_step,
+                                  intermediate, traj_dict, T_traj, t_traj, ok_traj)
+
+        # `self.state`/`self.T` are this handle's *persistent* buffers --
+        # the next step()/step_inplace() call overwrites them, so `final`
+        # has to be an independent copy, not a view.
+        final = {name: np.array(self.state[:, s_idx]) for s_idx, name in enumerate(SPECIES_NAMES)}
+        final["T"] = np.array(self.T)
         final["t"] = ttot
         final["converged"] = (ttot >= dtf)
 

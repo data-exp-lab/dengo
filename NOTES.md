@@ -700,3 +700,374 @@ than Grackle would -- the two free-fall scripts are testing the
 chemistry solvers under two different *prescribed* compression models,
 and the visible noise is a feature of one of those prescriptions, not of
 either solver's numerics.
+
+**2026-09-08, continued: does identifying the noise source answer "which
+solver produces better solutions"? No -- correctly pushed back on by the
+user.** That question needs two different experiments, both now done:
+
+1. *Convergence check, each code against itself* (`grackle_convergence.py`
+   in the scratchpad, mirroring the dengo convergence check from earlier
+   today): Grackle's own pressure-retarded free-fall at
+   safety_factor = 1e-2, 1e-3, 3e-4 gives final T = 2083.2, 2116.1,
+   2165.5 K and H2 nuclei fraction = 0.9597, 0.9501, 0.9375 -- **not
+   converged** at these step sizes; still drifting by several percent
+   between the two finest step sizes, an order of magnitude apart. This
+   contrasts with dengo's own convergence check (recorded earlier): T
+   changes only ~0.6% over the same safety_factor range. So at their
+   respective *default* step sizes, dengo's answer is the better-trusted
+   one on its own terms -- Grackle's free-fall driver would need a
+   noticeably smaller safety_factor than its 0.01 default to reach a
+   comparable level of convergence.
+
+2. *Decoupled comparison* (`run_decoupled.py`): drives dengo's `Solver`
+   and Grackle's `FluidContainer` through the *exact same* prescribed
+   plain free-fall compression (identical density_ratio, identical dt at
+   every step, computed once and applied to both) -- removing the
+   collapse-model confound entirely, so any remaining difference is
+   attributable only to the chemistry/cooling solve itself. Two real
+   bugs surfaced getting this running: (a) `fc["temperature"]` is never
+   auto-computed by `solve_chemistry()` -- it has to be refreshed with an
+   explicit `fc.calculate_temperature()` after every step, or it just
+   reads back whatever was last written (zero, initially); (b)
+   `fc.solve_chemistry(dt)` expects `dt` in Grackle's *code* time units
+   (`time_units`, here `sec_per_Myr`), not raw CGS seconds -- passing
+   dengo's cgs-second dt directly silently evolved Grackle by
+   ~1/3.16e13 of the intended physical interval every step (visible as
+   Grackle's temperature staying pinned near its 1 K floor). Fixed with
+   `dt / my_chemistry.time_units`.
+
+   Result (`decoupled_comparison.png`): the two solvers track within
+   ~2-10% of each other across most of the ~15 decades of density, but
+   **diverge to ~34% in final temperature** at the target density
+   (n=3e15 cm^-3: dengo T=1492 K, Grackle T=2004 K), with a non-monotonic
+   pattern -- a ~23% bump around n~1e13, narrowing to ~2-5% around
+   n~1e14, then widening again toward the end. H2 nuclei fraction agrees
+   much more closely throughout (both saturate to ~0.98-1.0 by the target
+   density). This is a genuine, chemistry/cooling-attributable
+   difference -- not a collapse-model artifact, since both codes were
+   driven by literally the same compression history here. Also notable:
+   small jaggedness is still visible in Grackle's curve even in this
+   decoupled test (where the noisy force-factor estimator is never
+   invoked), confirming the earlier finding's caveat that some jitter
+   also comes from Grackle's own internal chemistry substep/step-doubling
+   logic, not solely from the force-factor estimator.
+
+   This still isn't an absolute ground truth (neither curve is a known-
+   correct reference) -- pinning down *which* solver's ~1500-2500 K
+   answer at n~1e15 is more accurate would need comparing both against a
+   solve at much tighter tolerance/step size than either uses by default,
+   or against a third, independently-implemented reference (e.g. a raw
+   `scipy.integrate.solve_ivp(method="BDF")` run on dengo's own generated
+   RHS at very tight tolerance, extended to also drive Grackle's rate
+   tables through the same ODE for a true apples-to-apples check) --
+   noted here as an open question, not resolved in this session.
+
+**2026-09-08, continued: user's hunch was right -- a real gamma-treatment
+bug found and fixed, and it explains most of the 34% gap above.** The
+user asked to verify everything really is the same between the two
+codes, suspecting Grackle's H2 gamma might include "more accurate H2
+moments." Traced this by reading Grackle's actual C source
+(`calculate_gamma.c`/`calculate_pressure.c`): Grackle applies a
+composition- and temperature-dependent correction to its mixture
+adiabatic index whenever H2 is a non-negligible fraction of the gas,
+using the Omukai & Nishi (1998, ApJ 508, 141) partition-function formula
+for H2's roto-vibrational internal degrees of freedom (gamma_H2 -> 7/5
+at low T, -> 9/7 at high T as vibrational modes activate) --
+self-consistently, every time it converts internal_energy <-> T.
+
+Checking dengo's side turned up two real, independent bugs:
+
+1. **dengo's own generated solver was never applying an H2-specific
+   gamma at all**, even though the machinery for it (`interpolate_gamma_
+   species`, `species_gamma()`, a whole gamma-interpolation-table code
+   path in `cython_solver.C.template`) is fully implemented. The cause:
+   `ChemicalNetwork.add_collection()` (used by every example/comparison
+   script in this repo) calls `add_reaction(r, auto_add=False)`, and the
+   bookkeeping that populates `interpolate_gamma_species` lived only
+   inside `add_reaction`'s `auto_add=True` branch -- never reached via
+   `add_collection`. So `interpolate_gamma_species` was silently always
+   empty, the generated C template's `{%- if network.interpolate_gamma_
+   species | length > 0 %}` block never fired, and H2 fell back to the
+   flat `double gamma = 5.0/3.0` used for every other species -- a much
+   cruder approximation than Grackle's. **Fix**: moved the bookkeeping
+   into `add_species()` (the one method every code path funnels through
+   -- add_collection, add_reaction, and add_cooling's auto_add branches
+   were all changed to call it instead of touching `required_species`
+   directly), so it's populated regardless of how a species enters the
+   network. Verified directly: `network.interpolate_gamma_species` now
+   contains H2_1/H2_2, and the interpolated table gives gamma_H2(1500K) =
+   1.358, matching Grackle's own Omukai & Nishi value at that T exactly.
+
+2. Once (1) exposed the *other* fit dengo actually had switched on,
+   `species_gamma()`'s active formula for H2 turned out to be a
+   different (unattributed, no docstring/citation found anywhere in the
+   repo or git history back through the original pre-modernization
+   commits) 10-parameter empirical fit -- while the *same* Omukai & Nishi
+   formula Grackle uses was sitting right next to it, commented out,
+   unused, apparently since before this project's history begins.
+   Checked numerically: the two fits agree at T<~500K but diverge by
+   10-15% in (gamma-1) at T=1500-3000K -- squarely dead center of this
+   project's target regime. **Fix**: swapped which formula is active,
+   commenting out the unattributed 10-parameter fit instead (kept for
+   reference) and enabling the Omukai & Nishi formula, so dengo's and
+   Grackle's H2 gamma physics now agree by construction.
+
+   Fixing both (species_gamma() in `chemical_network.py`, plus a fresh
+   `sort(attribute="name", case_sensitive=true)` on the newly-reachable
+   `interpolate_gamma_species | sort` in `cython_solver.C.template` --
+   the exact same case-sensitivity footgun as the earlier dictsort bug,
+   dormant until now because the set was always empty -- and updating
+   `tests/test_codegen.py::test_tables_bin_contents_match_write_order`,
+   which had (correctly) started failing once the gamma tables actually
+   got written) all 62 tests still pass.
+
+   Rebuilt and reran the decoupled comparison
+   (`.grackle_compare/run_decoupled.py`) with the fix in place: final
+   temperature gap at n=3e15 dropped from **34% to 2.9%** (dengo 1998 K
+   vs. Grackle 1941 K, was 1492 K vs. 2004 K), and H2 nuclei fraction now
+   matches almost exactly (0.983 vs. 0.989, was 0.9998 vs. 0.9844). RMS
+   relative T difference across the whole ~15-decade run dropped from
+   double digits to 8.5%, with the *worst* remaining disagreement now at
+   very low density/H2 fraction (the initial cooldown phase, where this
+   gamma physics doesn't apply at all -- so likely a separate, smaller
+   effect, e.g. He ionization-state cooling curve differences, not
+   investigated further here). This is a good example of the decoupled-
+   comparison harness (built specifically in response to "which produces
+   better solutions") actually doing its job: it isolated a genuine,
+   fixable chemistry-solver bug, not a collapse-model artifact.
+
+**2026-09-08, continued: pinned down exactly why Grackle's curve is still
+noisier even with the gamma bug fixed and the force-factor estimator
+completely out of the picture.** User noticed the decoupled-test plot
+still shows visible jitter in Grackle's curve and asked about it directly.
+Quantified it first (n > 1e12 cm^-3, the visually-smooth-looking part of
+the plot): Grackle's T has ~15x higher local jitter than dengo's (1.10%
+RMS vs. 0.073%, relative to a local median-filtered baseline) and ~7x
+higher step-to-step variation (1.37% vs. 0.19% RMS).
+
+Read Grackle's actual solver algorithm (`solve_rate_cool_g.F`,
+`do iter = 1, itmax` subcycle loop) to find the real mechanism, rather
+than re-asserting the earlier (too narrow) force-factor-estimator
+explanation, which cannot apply here since the decoupled test never
+calls it at all. Grackle's Fortran core does its own *explicit*
+sub-cycling to advance through a single externally-given `dt`:
+`dtit(i) = min(0.1*de/dedot, 0.1*HI/HIdot, dt-ttot(i), 0.5*dt)`, grown by
+up to 1.5x per iteration after iter>10, accumulated into `ttot` until it
+closes `dt` (final sub-step truncated to fit exactly). This means the
+*number* of sub-cycles needed to cover a given external `dt` is an
+integer that can shift by +-1 as `dt` or the local state drifts even
+slightly step to step, and the size of the final truncated remainder
+sub-step varies non-smoothly too -- a structural, few-percent-level
+jitter floor baked into this closure rule itself, unrelated to the
+chemistry rates, the gamma physics, or the collapse model. Dengo's
+generated solver, by contrast, is a single implicit backward-Euler step
+per external `dt` with its own internal adaptive sub-stepping controlled
+against a real relative-error tolerance (verified converged earlier: T
+changes only ~0.6% across a 30x range in step size) -- no analogous
+"integer subcycle count to close a fixed target" discontinuity.
+
+Revised conclusion (supersedes the narrower one two entries up): dengo's
+smoother curve in these free-fall tests isn't solely because the
+force-factor estimator wasn't exercised -- dengo's adaptive-tolerance
+implicit integrator is inherently smoother per call than Grackle's fixed-
+fractional-timestep explicit subcycling, independent of the collapse
+model. Both effects are real and additive: the force-factor estimator
+adds jitter when a pressure-retarded free-fall model is used on top of
+this; this per-call subcycling jitter is present regardless of which
+free-fall model drives either solver.
+
+**2026-09-08, continued: speed tests in the high-density regime, both
+confounded (own free-fall driver) and controlled (decoupled, identical
+dt/step-count).** Reran `run_dengo.py`/`run_grackle.py` fresh (post gamma
+fix) and added per-step wall-clock instrumentation to
+`run_decoupled.py`'s free-fall phase (both `solver.step()` and
+`fc.solve_chemistry()` timed individually with `time.perf_counter()`).
+
+*Own-driver comparison* (each code's own free-fall model, safety_factor
+0.01 both): to cover n=[1e13, 3e15] cm^-3, dengo took 283 steps/0.57s,
+Grackle 1102 steps/0.11s -- Grackle ~5.3x less *total* wall time despite
+needing ~4x more calls, because it uses a pressure-retarded collapse
+model that takes smaller density steps (not a chemistry-solver
+difference -- see the two entries above on collapse-model confounds).
+
+*Decoupled comparison* (identical dt and step count for both --
+isolates pure per-call solver cost): dengo costs **~14x more per
+`solver.step()`/`solve_chemistry()` call than Grackle, consistently
+across all ~15 decades of density** (609us vs 43us/step at low density,
+1981us vs 139us/step at n=[1e13,3e15] -- the ratio holds essentially flat
+even as both sides' absolute cost grows ~3x with density). See
+`speed_comparison.png`.
+
+Traced roughly why: reran the decoupled test with dengo's `reltol`
+loosened from its default 1e-5 to 1e-2 (Grackle's own subcycling has no
+comparably strict convergence criterion, so this isn't a fully apples-
+to-apples control, just a diagnostic). Dengo's per-step cost dropped
+from 909us to 360us avg (final T barely moved, 1997.99 -> 1999.38 K) --
+tolerance explains roughly half of the gap in log terms, but a ~5.7x
+per-step disadvantage remains even at that loose tolerance. Most likely
+structural: dengo's vendored `BE_chem_solve.C` does an implicit backward-
+Euler solve with a dense Newton-iteration linear solve over the full
+~9-species+energy coupled system every internal sub-step, while
+Grackle's Fortran subcycling (see the entry above on its jitter) does
+semi-implicit, closed-form, per-species scalar updates with no matrix
+solve at all -- a cheaper but less rigorously-controlled update. This
+wasn't verified by direct instrumentation of Newton-iteration counts
+inside BE_chem_solve.C (would need adding a counter and rebuilding), so
+treat the "which piece of the ~5.7x floor is Newton-solve cost vs. other
+per-call overhead" attribution as reasoned-but-unconfirmed.
+
+Practical implication: dengo's OpenMP parallelism (per-cell, embarrassingly
+parallel) is the more relevant lever for a real grid-scale hydro
+coupling, not single-cell serial speed -- and there may be room to loosen
+dengo's default reltol somewhat (it's already known to be converged well
+past what 1e-5 requires, per the earlier convergence check) to recover
+some of this gap without sacrificing accuracy, not yet done here.
+
+**2026-09-08, continued: user asked to think carefully about cache misses
+in the table interpolation -- checked with a real profiler rather than
+reasoning about it, and the hypothesis doesn't hold up; something else
+does.** `perf` doesn't work in this sandbox (`perf_event_paranoid=4`
+blocks it even for own-process use), so used `valgrind --tool=cachegrind
+--cache-sim=yes` instead (a software cache simulator, no special kernel
+perms needed) on a minimal, isolated benchmark: 30 repeated
+`solver.step()` calls at a fixed high-density/high-H2 state (n=3e14,
+T~1800K), run directly against the venv's python (not through the `uv
+run` wrapper, which forks a child valgrind doesn't trace by default).
+
+Result: D1 (L1 data) miss rate over the whole run was 3.63% (144M/3.98B
+reads), with only ~14% of those D1 misses also missing the last-level
+cache -- an unremarkable, not-thrashing profile overall. But the
+per-function breakdown was the real finding: **the entire compiled
+solver core -- `BE_chem_solve.C`, which houses the Newton iteration,
+`Gauss_Elim`, and (via function pointers) every call into
+`interpolate_rates`/`calculate_rhs`/`calculate_jacobian` -- accounts for
+only ~0.1% of total instructions and 0.1% of D1 misses** across the
+whole benchmark. `primordial_interpolate_rates`/`calculate_rhs_
+primordial`/`calculate_jacobian_primordial` are confirmed present as
+named symbols in the built .so (`nm -C`), but don't appear as separate
+lines in cg_annotate's output at all -- most likely fully inlined into
+BE_chem_solve's call sites at `-O3`, which is consistent with (not
+contradicting) their combined cost being part of that same ~0.1%.
+
+Instead, >23% of total instructions (a conservative partial sum over
+just ~19 named functions; the true total including bytecode-dispatch
+stubs is considerably higher) is CPython object machinery: `PyDict_
+SetItem`, `PyDict_GetItemRef`, `PyObject_GenericGetAttr`, `dict_
+traverse`/`dictresize`, `_PyObject_Malloc`/`_Free`, and -- tellingly --
+`gc_collect_main` actually running periodically inside what should be a
+tight numerical loop. Reading `cython_solver_run.pyx.template`'s
+`Solver.step()` explains why: every single call does `np.
+ascontiguousarray(state[name], dtype=np.float64).reshape(-1)` for each
+of the ~10 species (fresh NumPy C-API calls + a fresh view object each,
+every call), then at the end builds a brand-new Python dict plus 10
+fresh `np.array(...)` objects for the return value -- all of this
+Python/NumPy-level object churn is fixed per-call overhead that doesn't
+shrink with `dims`, so at `dims=1` (a single cell, called in a tight
+Python loop -- exactly this project's free-fall driving scripts'
+pattern) there's no large numerical payload to amortize it against, and
+it dominates.
+
+Practical implication, revised from the earlier (reasoned-but-
+unconfirmed) Newton-solve-cost guess two entries up: the ~14x per-call
+cost gap vs. Grackle is much more likely dominated by this Python/Cython
+calling-convention overhead than by C-level table-interpolation cache
+behavior or even the Newton solve itself. The fix this points to is
+narrower and cheaper than a table-layout rework: give `Solver.step()` a
+lower-overhead path for the repeated-single-cell case (skip re-wrapping
+already-contiguous float64 arrays, avoid rebuilding a dict + 10 arrays
+every call), rather than restructuring how rate tables are stored. Not
+yet implemented -- flagged as the concrete next step if pursued.
+
+**2026-09-08, continued: implemented reuse/avoidance of the per-call
+Python/NumPy marshaling identified above -- then measured it honestly,
+which corrects that earlier finding rather than confirming it.**
+
+Added a low-overhead calling convention to `cython_solver_run.pyx.
+template`'s `Solver`: `self.state` (shape `(dims, NSPECIES)`) and
+`self.T` (shape `(dims,)`) are now zero-copy numpy views straight onto
+the persistent `_input`/`Ts` buffers, built once in `__cinit__` via
+Cython's pointer-to-memoryview cast (`<double[:dims, :n]> self._input`)
+and cached as the same ndarray object for the handle's whole lifetime --
+not recomputed/rewrapped on each access. A new `step_inplace(dtf, niter,
+reltol, ...)` reads/writes those directly and returns just `(converged,
+t)` -- no dict, no `np.array()`/`ascontiguousarray()` call, ever. The
+existing dict-based `step()` still works exactly as before (same tests
+pass unchanged) but is now a thin wrapper around the same shared core
+(factored into `_advance()`, a `cdef` method with a C-tuple return, used
+by both). `SPECIES_INDEX` (name -> column index) added at module level
+so callers don't have to hardcode column order. Two new tests
+(`test_step_inplace_matches_step`, `test_solver_state_view_is_persistent
+_and_writable`) confirm `step_inplace()` reaches bit-identical state to
+`step()` and that `solver.state`/`solver.T` really are the same,
+directly-writable ndarray object across calls, not a fresh wrapper each
+time. All 64 tests (62 previous + 2 new) pass.
+
+Caveat documented in the code: `solver.state`/`solver.T` are unsafe to
+use after `close()` -- they wrap the same raw buffers `close()` frees,
+and nothing revokes a numpy array's memory out from under it. Same
+general caveat as any zero-copy buffer view; not engineered around
+further since the intended caller (a driver holding the `Solver` open
+for its whole run) naturally avoids it.
+
+**Then measured the actual effect, and it does NOT match the earlier
+cachegrind-based conclusion two entries up -- that conclusion is hereby
+corrected, not just supplemented.** At `dims=1` (the free-fall scripts'
+actual usage), `step_inplace()` vs. the old `step()`: 574us vs. 612us
+per call -- only a ~6% reduction, not the order-of-magnitude the "96%+
+CPython object overhead" reading implied. At `dims=100000` (a
+grid-scale chunk, the actual "HPC case" this was meant to help): 13.84s
+vs. 13.95s per call -- again only ~1%. A second diagnostic (loosening
+the inner temperature-Newton convergence criterion in `calculate_
+temperature` 10000x, from 1e-8 to 1e-4, then reverted -- see
+`cython_solver.C.template`'s `Tdiff/Tnew` check) also only bought ~7%.
+
+Both hypotheses this session raised for "why is dengo's per-call cost
+so much higher than Grackle's" -- table-interpolation cache misses, and
+then Python/dict marshaling overhead -- turn out not to be it, once
+tested by actually removing each one rather than by profiling alone.
+The cachegrind run's "96%+ unresolved/CPython" attribution was most
+likely simply wrong: `primordial_interpolate_rates`/`calculate_rhs_
+primordial`/`calculate_jacobian_primordial` are confirmed present as
+named symbols in the built `.so` (`nm -C`) but never appeared anywhere
+in `cg_annotate`'s output under any name search -- a real profiler
+attribution failure for this build (cause not identified; not resolved
+by adding `-g`), not evidence those functions cost nothing. Retracting
+the specific "it's CPython overhead, not the C solve" claim; the honest
+current answer is that the per-call cost is real, legitimate numerical
+work: `BE_chem_solve`'s own outer adaptive-dt loop (~39-45 attempts to
+cover one external `dtf` at this density/tolerance) runs an inner Newton
+iteration of up to `sweeps=10` sub-iterations *each* (see `BE_chem_
+solve.C`), and every one of those needs a fresh `interpolate_rates` pass
+(~90 separate reaction/cooling/gamma tables) plus RHS and Jacobian
+assembly plus (now that H2's gamma is properly T-dependent) `calculate_
+temperature`'s own nested Newton solve -- on the order of a few hundred
+such evaluations per external `step()`/`step_inplace()` call. That is
+inherent to solving this stiff a system this tightly with a dense
+Newton method, not an artifact of how the table data is laid out or how
+Python hands state to the solver.
+
+Kept the fix anyway -- `step_inplace()`/`solver.state`/`solver.T` are
+still the architecturally right calling convention for any repeated-call
+use (no Python-object churn added on top of whatever the real solve
+costs, at any `dims`), and existing free-fall/comparison scripts should
+migrate to it -- but it should not be oversold as a major speed win on
+its own. The productive next lever for that, not attempted here, is
+reducing how much of that per-call numerical work is needed in the
+first place -- e.g. the original project plan's still-unimplemented
+partial-equilibrium/QSS treatment for fast species (H-, H2+, e-), which
+would cut the size/stiffness of the system BE_chem_solve has to Newton-
+iterate on, rather than making each iteration itself cheaper.
+
+   Remaining known inconsistency, not yet fixed: the *driving scripts'*
+   own compressional-heating formula (the ad hoc `thermodynamic_gamma()`
+   Python helper used to bump `ge`/`internal_energy` after each
+   compression step, before handing off to either solver) still uses a
+   simplified placeholder gamma on both sides (dengo driver: fixed 7/5
+   for H2 regardless of T; Grackle driver: fixed `my_chemistry.Gamma` =
+   5/3, matching gracklepy's own reference `evolve_freefall` utility) --
+   neither matches either solver's own (now-consistent) internal EOS.
+   This driving-script simplification is shared by both sides of the
+   comparison, so it's a smaller and more symmetric effect than the bug
+   just fixed, but replacing it with each solver's actual gamma (`fc.
+   calculate_gamma()` for Grackle; a call into dengo's own gamma table)
+   would be the natural next refinement.
