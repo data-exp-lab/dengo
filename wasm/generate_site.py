@@ -55,6 +55,18 @@ PAGE_TEMPLATE = """<!doctype html>
 
 <div class="layout">
   <div class="panel">
+    <div class="row">
+      <label>Initial conditions</label>
+      <select id="ic-preset" disabled>
+        <option value="">— custom —</option>
+        <option value="bg-z20">IGM background (z ≈ 20)</option>
+        <option value="bg-z1000">IGM background (z ≈ 1000)</option>
+        <option value="virial-shock">Virial shock (10⁶ M☉ minihalo)</option>
+        <option value="protostellar-disk">Primordial protostellar disk</option>
+      </select>
+      <p class="preset-note" id="preset-note"></p>
+    </div>
+
     <div class="modebar">
       <button id="mode-cool" class="active">Cool at constant density</button>
       <button id="mode-freefall">Free-fall collapse</button>
@@ -62,7 +74,7 @@ PAGE_TEMPLATE = """<!doctype html>
 
     <div class="row">
       <label>n<sub>H</sub> (cm<sup>-3</sup>) <span class="val" id="nH-val"></span></label>
-      <input type="range" id="nH" min="-2" max="17" step="0.1" value="4">
+      <input type="range" id="nH" min="-4" max="17" step="0.1" value="4">
     </div>
     <div class="row">
       <label>T (K) <span class="val" id="T-val"></span></label>

@@ -1888,3 +1888,112 @@ mode (not just hidden), (d) switching modes and back, plus running a full
 free-fall in the "thermal energy" + "mass fraction" combination, changes
 nothing about the underlying physics (same step counts/final T/ionized
 values as every prior check in this file), (e) zero console errors.
+
+**2026-09-09, feasibility only, not implemented: per-cooling-process
+breakdown of the energy budget.** User asked how hard it would be to see
+each named cooling/heating process's (ceHI, brem, compton, gloverabel08
+H2-line cooling, h2formation, cie_cooling, etc.) fractional contribution
+to the total `dge/dt`, rather than just the summed total. Investigated
+before writing any code (two background agents read the actual codegen
+pipeline and a freshly-generated `.C` file rather than guessing):
+
+- Every cooling process is already a separately-named, self-contained
+  sympy expression (`primordial_cooling.py`'s `@cooling_action`
+  decorator), registered individually in `ChemicalNetwork.cooling_actions`
+  with enough metadata (name, equation, species deps, rate-table names)
+  to regenerate per-term output cleanly.
+- The *only* place separability is destroyed is
+  `ChemicalNetwork.print_cooling()` (`chemical_network.py`), which sums
+  every term into one sympy expression *before* calling `ccode()` once --
+  confirmed by generating the real primordial `.C` file and reading the
+  emitted `ge` RHS: one fused `rhs[j] = -brem*(...) - ceHI*(...) - ... +
+  h2formation*(...);` statement, no per-term C variable survives codegen.
+  No CSE/algebraic fusion is involved (plain `sympy.sympify("0")`
+  accumulation then one `ccode()` call), so nothing structurally blocks
+  un-fusing it.
+- Assessed as **moderate effort**: (1) a sibling to `print_cooling()`
+  that calls `ccode()` per-term instead of summing first (small,
+  mechanical -- same conditional `cie_optical_depth_approx` logic just
+  applied per term); (2) the shared C template emits the per-term values
+  into a new output array alongside the existing summed `rhs[j]`, plus
+  one new exported wasm getter (boilerplate, mirrors the existing
+  `dengo_wasm_rhs_ptr()`); (3) JS/UI reuses the species-abundance chart's
+  existing pattern almost exactly (per-step snapshot, toggle checkboxes,
+  multi-series chart).
+- One real open design question, not a blocker: several terms have mixed
+  signs (`h2formation` is usually heating; `compton` flips sign depending
+  on gas T vs. T_CMB), so "fractional contribution to the cooling budget"
+  needs a choice -- split cooling/heating into two separately-normalized
+  stacked-area budgets (recommended -- matches the literal "cooling
+  budget" framing), or one signed chart of each term's share of net
+  `|dge/dt|`.
+
+User: "I'll hold off on it." Not implemented. Recorded here so the
+investigation (and the concrete plan) doesn't need to be redone if this
+comes back up later.
+
+**2026-09-09, same branch: a few sets of initial conditions to select
+from.**
+
+For this one: added an "Initial conditions" dropdown (`#ic-preset`,
+`applyPreset()` in `app.js`) with four presets -- IGM background at
+z≈20 and z≈1000 (mean cosmic density `n_H ∝ (1+z)³`, an adiabatic-cooling
+estimate for gas temperature at z=20 vs. the tightly Compton-coupled
+~T_CMB at z=1000), a virial shock (Barkana & Loeb 2001 T_vir fit and
+Δ_vir≈178× the cosmic mean, for a 10⁶ M☉ minihalo at z≈20 -- the classic
+first-star-forming halo scale), and a primordial protostellar disk
+(disk-forming density/temperature, mostly-molecular hydrogen). Each
+preset just sets the nH/T/species-fraction sliders to specific numbers
+and calls the existing redraw path -- no new solver-side machinery.
+
+**Redshift was intentionally *not* wired up as a live parameter.** The
+first design considered actually exposing `current_z` from the wasm
+wrapper (confirmed feasible -- the field already exists end-to-end,
+read by the `compton` cooling term, and the Cython path already exposes
+it via a `redshift` property/constructor arg; the wasm wrapper just never
+got a setter). User caught this before it was built: "I'm not sure I want
+to have it actually expose redshift. I just meant the background
+density. We don't need to add UV background etc." So a preset's "z" is
+just a label/note for where the density number came from, not a live
+knob -- the compton term still always runs at z=0, same as before this
+change; no new wasm export, no template change, no redshift slider.
+
+Two real things found and fixed along the way:
+- **Unphysical hydrogen budget on H2-less networks.** The protostellar
+  disk preset's `H_1=0.05` assumes ~0.74 more is locked up in `H2_1` --
+  fine for `primordial`, but `primordial_atomic`/`hydrogen_minimal` have
+  no H2 species to hold that mass, so applying it as-is would make ~74%
+  of the hydrogen budget just vanish. Fixed by folding molecular-hydrogen
+  fractions back into `H_1` whenever the current network has no
+  `sp-H2_1` slider (`applyPreset()`), landing on the same ~0.79 baseline
+  every other preset already uses.
+- **Solver diagnostic noise on stderr.** Presets that start further from
+  equilibrium than any default IC before them (expected -- that's the
+  point) pushed `BE_chem_solve.C`'s adaptive stepper into more
+  step-halving retries than this project had exercised before, each
+  logging a `dt < 1.0` "Unsolved[...]" progress line -- pre-existing
+  code (not introduced by this change), present in every build, not a
+  correctness issue (final results were sane throughout), but it was on
+  `fprintf(stderr, ...)`, which Emscripten routes to `console.error` --
+  breaking this project's own "zero console errors" verification bar for
+  the first time not because of a real bug, but because nothing had
+  stressed the solver into this path before. This is a genuine mid-sweep
+  progress message (the file's real hard-failure path, "unsolved case in
+  Gauss_Elim", correctly stays on stderr), and the file already uses
+  plain `printf`/stdout for its other debug output a few lines above, so
+  `stderr` here looks like a copy-paste inconsistency -- changed both
+  occurrences to `stdout`. This touches a file shared by every build
+  (Cython and wasm alike); reran the full `pytest` suite (86/86) after
+  the change to confirm nothing depends on it.
+
+Verified: real Emscripten build of all three fiducial networks, every
+preset applied and run in both modes on every network (24 combinations),
+confirming (a) sliders/notes update correctly and the dropdown starts
+disabled until the wasm module is ready, (b) zero console errors after
+the two fixes above (was noisy before them), (c) sane, cross-checkable
+physics -- e.g. `bg-z20`, `bg-z1000`, and the default IC all independently
+converge to the same ~2198K H2-cooling equilibrium at n≈10¹⁵ cm⁻³ during
+free-fall despite starting from very different states, and
+`hydrogen_minimal` (a network with zero cooling terms by construction)
+shows essentially no temperature change from the protostellar-disk
+preset in constant-density mode, as it should.

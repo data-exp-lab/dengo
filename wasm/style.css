@@ -27,6 +27,11 @@ a { color: var(--accent); }
 .row label { display: flex; justify-content: space-between; font-size: 0.9em; margin-bottom: 4px; }
 .row label span.val { font-variant-numeric: tabular-nums; color: var(--accent); font-weight: 600; }
 input[type=range] { width: 100%; }
+#ic-preset {
+  width: 100%; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border);
+  background: var(--bg); color: var(--fg); font-size: 0.9em;
+}
+.preset-note { font-size: 0.78em; color: var(--muted); margin: 6px 0 0; }
 .modebar { display: flex; gap: 6px; margin-bottom: 16px; }
 .modebar button {
   flex: 1; padding: 8px; border-radius: 6px; border: 1px solid var(--border);

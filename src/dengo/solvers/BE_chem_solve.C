@@ -253,7 +253,7 @@ int BE_chem_solve(rhs_f f, jac_f J,
           double tol = atol[ioff+ii] + rtol[ioff+ii] * fabs(u[ioff+ii]);
           if ( fabs(s[ioff+ii]) > tol) {
               if (dt < 1.0) {
-	              fprintf(stderr, "dt %0.5g, Sweep %d, Unsolved[%d]: nchem: %d change: % 0.8g sum tol: % 0.5g atol: % 0.5g rtol: % 0.5g value: % 0.5g\n",
+	              fprintf(stdout, "dt %0.5g, Sweep %d, Unsolved[%d]: nchem: %d change: % 0.8g sum tol: % 0.5g atol: % 0.5g rtol: % 0.5g value: % 0.5g\n",
 		                  dt, isweep, ix, ii, s[ioff+ii], atol[ioff+ii] + rtol[ioff+ii] * fabs(u[ioff+ii]), atol[ioff+ii], rtol[ioff+ii], u[ioff+ii]);
               }
               // Record this as the current worst-known violation (by
@@ -305,7 +305,7 @@ int BE_chem_solve(rhs_f f, jac_f J,
             printf("\n");
             #endif
             if (dt < 1.0) {
-	              fprintf(stderr, "dt %0.5g, Sweep %d, Unsolved[%d]: nchem: %d change: % 0.8g sum tol: % 0.5g atol: % 0.5g rtol: % 0.5g value: % 0.5g\n",
+	              fprintf(stdout, "dt %0.5g, Sweep %d, Unsolved[%d]: nchem: %d change: % 0.8g sum tol: % 0.5g atol: % 0.5g rtol: % 0.5g value: % 0.5g\n",
 		                  dt, isweep, ix, ii, s[ioff+ii], atol[ioff+ii] + rtol[ioff+ii] * fabs(u[ioff+ii]), atol[ioff+ii], rtol[ioff+ii], u[ioff+ii]);
             }
             fatal_error = 1;

@@ -454,6 +454,76 @@ function setMode(mode) {
   scheduleRedraw();
 }
 
+// A few physically-motivated starting points, so exploring the widget
+// doesn't have to start from dragging every slider by hand. Each entry
+// is just a (nH, T, per-species fraction) bundle -- no new solver-side
+// machinery: the "z" in a preset's label/note is baked into the density
+// number at authoring time (n_H(z) ~ n_H,0 (1+z)^3, mean cosmic
+// baryon/hydrogen density scaling), not a live redshift parameter, so
+// there's no UV-background/Compton-coupling physics implied here beyond
+// what the network already models (the compton cooling term always runs
+// at z=0 in this widget, same as before). Values are order-of-magnitude
+// illustrative, not a precision cosmological calculation -- see NOTES.md.
+const IC_PRESETS = {
+  "bg-z20": {
+    nH: 1.8e-3, T: 10,
+    fractions: { H_1: 0.9998, H_2: 2e-4, He_1: 0.063, He_2: 1e-7, He_3: 1e-12, H2_1: 2e-6, H2_2: 1e-12, H_m0: 1e-12 },
+    note: "Mean IGM density at z≈20 (n_H ∝ (1+z)³) and an adiabatically-cooled gas "
+      + "temperature well below T_CMB at that era; residual ionization x_e≈2×10⁻⁴, "
+      + "trace gas-phase H2≈2×10⁻⁶.",
+  },
+  "bg-z1000": {
+    nH: 190, T: 3000,
+    fractions: { H_1: 0.4, H_2: 0.39, He_1: 0.063, He_2: 1e-7, He_3: 1e-12, H2_1: 1e-12, H2_2: 1e-12, H_m0: 1e-12 },
+    note: "Mean IGM density at z≈1000 (n_H ∝ (1+z)³), near the peak of the "
+      + "recombination visibility function -- gas tightly Compton-coupled to "
+      + "T_CMB, hydrogen roughly half-ionized. Illustrative only: this network "
+      + "has no photoionizing background of its own.",
+  },
+  "virial-shock": {
+    nH: 0.3, T: 4000,
+    fractions: { H_1: 0.79, H_2: 2e-4, He_1: 0.063, He_2: 1e-7, He_3: 1e-12, H2_1: 1e-6, H2_2: 1e-12, H_m0: 1e-12 },
+    note: "Post-shock virial temperature (Barkana & Loeb 2001 fit) and density "
+      + "(Δ_vir≈178× the cosmic mean at z≈20) for a 10⁶ M☉ minihalo -- the "
+      + "classic first-star-forming halo scale, with a trace H2 seed so H2 "
+      + "cooling can trigger collapse.",
+  },
+  "protostellar-disk": {
+    nH: 1e13, T: 800,
+    fractions: { H_1: 0.05, H_2: 1e-8, He_1: 0.063, He_2: 1e-8, He_3: 1e-12, H2_1: 0.37, H2_2: 1e-6, H_m0: 1e-12 },
+    note: "Disk-forming-region density/temperature, hydrogen mostly molecular -- "
+      + "3-body H2 formation saturates near unity by this density, roughly "
+      + "where free-fall collapse from primordial conditions ends up.",
+  },
+};
+
+function applyPreset(key) {
+  const noteEl = document.getElementById("preset-note");
+  const preset = IC_PRESETS[key];
+  if (!preset) { noteEl.textContent = ""; return; }
+  document.getElementById("nH").value = Math.log10(preset.nH);
+  document.getElementById("T").value = Math.log10(preset.T);
+  // A network without H2 chemistry (primordial_atomic, hydrogen_minimal)
+  // has no sp-H2_1/sp-H2_2 slider to receive a preset's molecular-hydrogen
+  // fraction -- silently dropping it would make that much of the
+  // hydrogen budget just vanish (e.g. protostellar-disk's H_1=0.05
+  // assumes ~0.74 more is locked up in H2). Fold it back into atomic H
+  // instead, so the total hydrogen fraction stays physically sensible on
+  // every network rather than only on the one(s) that can represent H2.
+  const hasH2 = document.getElementById("sp-H2_1") !== null;
+  for (const name of plotableSpecies()) {
+    const el = document.getElementById("sp-" + name);
+    if (!el) continue; // this network doesn't have that species -- nothing to set
+    let frac = (preset.fractions && preset.fractions[name] !== undefined) ? preset.fractions[name] : 1e-12;
+    if (name === "H_1" && !hasH2 && preset.fractions) {
+      frac += 2 * ((preset.fractions.H2_1 || 0) + (preset.fractions.H2_2 || 0));
+    }
+    el.value = Math.log10(frac);
+  }
+  noteEl.textContent = preset.note;
+  scheduleRedraw();
+}
+
 function buildSpeciesSliders(config) {
   const container = document.getElementById("species-sliders");
   for (const name of speciesNames) {
@@ -523,6 +593,7 @@ function initPage(config) {
   document.getElementById("species-mode-massfrac").addEventListener("click", () => setSpeciesDisplayMode("massfrac"));
   document.getElementById("T-mode-T").addEventListener("click", () => setTemperatureDisplayMode("T"));
   document.getElementById("T-mode-ge").addEventListener("click", () => setTemperatureDisplayMode("ge"));
+  document.getElementById("ic-preset").addEventListener("change", (e) => applyPreset(e.target.value));
   for (const id of ["nH", "T", "dtf", "ntarget"]) {
     document.getElementById(id).addEventListener("input", scheduleRedraw);
   }
@@ -547,6 +618,7 @@ function initPage(config) {
     idx = Object.fromEntries(speciesNames.map((n, i) => [n, i]));
     buildSpeciesSliders(config);
     buildSpeciesToggle();
+    document.getElementById("ic-preset").disabled = false;
     document.getElementById("status").textContent = "ready";
     redraw();
   });
