@@ -97,6 +97,22 @@ PAGE_TEMPLATE = """<!doctype html>
         protostar -- the range goes further anyway so you can watch the
         chemistry network's own H2 collisional-dissociation reactions
         (H2 + H &rarr; 3H, H2 + H2 &rarr; 2H + H2) play out.</p>
+
+      <label>shock density: 10<sup>x</sup> cm<sup>-3</sup> <span class="val" id="nshock-val"></span></label>
+      <input type="range" id="nshock" min="10" max="20" step="0.1" value="14">
+      <label>shock Mach number <span class="val" id="mach-val"></span></label>
+      <input type="range" id="mach" min="1" max="100" step="0.5" value="5">
+      <p class="preset-note">Optional accretion-shock heating event, applied
+        once, the first time density crosses the shock density above --
+        a Rankine-Hugoniot jump (using the gas's own composition-weighted
+        &gamma; at that moment and the Mach number here) applied to both
+        density and thermal energy in a single step, on top of ordinary
+        free-fall compression. Set Mach to 1 to disable it (a Mach-1
+        "shock" is the zero-strength limit -- no jump at all). This
+        doesn't model a real accretion shock's radius/mass-dependent
+        infall speed -- Mach number is a free dial here, not derived --
+        so treat it as "how strong a shock would it take", not a
+        prediction of where or how strong a real one occurs.</p>
     </div>
 
     <div id="status">loading solver&hellip;</div>

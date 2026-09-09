@@ -2132,3 +2132,114 @@ zero console errors, same-as-ever physics below 10¹⁶, full `pytest`
 physics goal (seeing dissociation) is met, since the data doesn't show
 it yet at 10²⁰. Fixing that would mean improving the free-fall energy
 update itself, a separate, bigger piece of work not undertaken here.
+
+**2026-09-09, new branch `wasm-shock-heating`: parameterized accretion-
+shock heating in free-fall mode -- H2 dissociation is now actually
+visible.** Followed a speculative discussion (not logged per the user's
+"stop appending to NOTES for a bit, we're going to speculate" -- covered
+here in one entry now that it moved from speculation to implementation).
+
+**Diagnosis first**: checked whether the chemistry network itself
+correctly costs dissociation energy before assuming a driver-level fix
+was even the right lever. It does -- `primordial_cooling.py`'s
+`h2formation`/`h2formation_extra` cooling actions already have a
+correctly-signed `h2mcool`/`h2mcool_extra` term (energy sink, matching
+reactions k13/k23) alongside the formation-heating term. The gap is
+purely in the one-zone free-fall *driver*: its per-step compressional
+heating uses a caloric `thermodynamicGamma()` (just the H2-vs-atomic
+degrees-of-freedom mix) with no knowledge that dissociation is actively
+consuming that same compressional work as latent heat -- the classic
+"generalized adiabatic exponent Γ₁ dips during an ionization/dissociation
+zone" effect, well known in stellar structure, that a bare caloric gamma
+doesn't capture. That's why raising the free-fall target density alone
+(previous entry) never showed dissociation: the driver was always
+over-heating relative to a properly-coupled solve.
+
+**Feasibility confirmed before implementing**: this needn't touch the
+compiled solver at all. `calculate_rhs_*`/`BE_chem_solve` have no concept
+of free-fall, density, or heating laws -- they just integrate whatever
+state they're handed for a given `dt`. All of the free-fall-specific
+physics (today's compression law, and now the shock) lives entirely in
+`runFreefall()`, manipulating the exposed `statePtr()` buffer directly in
+JS before calling the existing `step()`.
+
+**Design, per user's own framing** (energy injection vs. a parameterized
+shock -- explicitly asked to evaluate both): recommended the shock. Pure
+energy injection would only make the over-heating worse, not fix it; the
+"correct" fix (folding latent heat into an effective gamma every step) is
+real physics work, not a quick exposed dial. A parameterized accretion
+shock at a chosen density is well-precedented for exactly this kind of
+one-zone exploration (Omukai & Nishi 1998; Ripamonti & Abel 2004 -- "free-
+fall until some density, then switch regime" instead of real radiation-
+hydrodynamics), and naturally has the two free parameters the user
+anticipated.
+
+**Implementation** (`runFreefall()`, `app.js`): standard (not strong-limit)
+Rankine-Hugoniot jump conditions for an ideal-gas shock, in terms of
+upstream Mach number and the gas's own composition-weighted gamma at that
+moment:
+```
+rhoRatio = (gamma+1)*M^2 / ((gamma-1)*M^2 + 2)
+TRatio   = (2*gamma*M^2 - (gamma-1)) * ((gamma-1)*M^2 + 2) / ((gamma+1)^2 * M^2)
+```
+correctly giving no jump at all at M=1 (the zero-strength/sonic limit --
+used as the "disable" state, no separate toggle needed) and a density
+ratio that saturates with Mach number while temperature keeps climbing
+(the real strong-shock behavior). Applied as a single-step multiplicative
+jump the first time ordinary free-fall compression would carry the gas
+across the shock density -- deliberately *not* smoothed out: a shock is a
+genuine mathematical discontinuity (that's what RH conditions describe),
+so a sharp jump is the physically honest choice, and `BE_chem_solve`
+already tolerates state jumps of this kind fine (ordinary free-fall
+compression hands it one every step already). Two new sliders: shock
+density (10¹⁰-10²⁰ cm⁻³, default 10¹⁴) and Mach number (1-100, default 5).
+Mach number is a free dial here, not derived from an actual radius/mass-
+dependent infall speed (this zero-dimensional density-only model has no
+way to compute one) -- the UI note says so explicitly, framed as "how
+strong a shock would it take", not a prediction of where/how strong a
+real one occurs.
+
+**Bug caught by a diagnostic sweep before calling it done**: the
+`shocked` flag was being set the moment a jump was *attempted*, before
+knowing whether the subsequent `step()` call would actually converge. A
+strong-enough jump can fail to converge on the first attempt (found this
+directly: `nshock=14, mach=60` and several `nshock=16` cases), and the
+loop then breaks immediately -- meaning the run stops *before* the
+density the flag claimed had been crossed. Fixed by only committing
+`shocked = true` (and the reported `shockTriggered`) after that step
+actually converges; verified the flag now correctly reads `false` for
+every case where the final recorded density is still below the
+requested shock density.
+
+**The physics goal is now demonstrably met**: a sweep over
+(shock density, Mach) found `nshock=1e14, mach=5` gives a clean, fully-
+converged run where H2/H_tot crashes from ~0.9 down to **1.3×10⁻²** right
+at the shock (visible directly in the default view, no parameter hunting
+needed) before re-forming as compression continues past it -- set as the
+new default. Also found the effect is genuinely non-monotonic in Mach
+number for this coupled nonlinear system (mach=5 gives a dramatic dip,
+mach=10 a partial one, mach=30 almost none, mach=60+ fails to converge
+at all at this shock density) -- not investigated further, but worth
+knowing before assuming "stronger shock = more dissociation" here.
+
+A vertical dashed marker at the shock density is drawn on the Temperature
+chart only (not the other two, to keep this well-scoped) when the shock
+actually fired, and the status line reports the density it crossed.
+
+Verified: real Emscripten build of all three fiducial networks,
+headless-browser pass (light + dark) confirming (a) `mach=1` reproduces
+the pre-existing free-fall behavior exactly (bit-for-bit same step count/
+final T/ionized/H2 as every prior check in this file) -- the "disabled"
+state is a genuine no-op, not an approximation, (b) the shock fires and
+is visible (screenshot-verified: the Temperature chart's jump and
+marker, and the Ionization & molecular fraction chart's H2 crash-and-
+recover, both line up at the shock density), (c) `shockTriggered`/the
+status line's "shock crossed" message only appear when the jump actually
+converged, (d) zero console errors, (e) full `pytest` suite (86/86)
+passes. One real process note: a rebuild step was believed complete
+(files present, `succeeded: [...]` printed) but had actually run *before*
+a source edit landed, serving stale slider defaults for a while --
+caught by comparing file mtimes against the edit timestamp rather than
+trusting `ls`/exit codes alone; worth remembering that `generate_site.py`
+must actually be re-invoked (and its exit code/output checked) after
+every source change, not just checked for output *existing*.
