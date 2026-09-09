@@ -2855,3 +2855,79 @@ errors. Downloaded and parsed the actual files with Python's `csv`
 module (not just eyeballing them): correct, consistent column count on
 every row, every numeric field parses as a float. Full `pytest`
 unaffected (120/120) -- pure `app.js`/HTML-template/CSS change.
+
+**2026-09-09, new branch `wasm-reusable-solver-shim`: `dengo-solver.js`,
+a reusable wrapper for using a compiled dengo wasm module outside this
+widget.** Asked to explore making the compiled wasm usable "in other
+modules" -- two options on the table: Emscripten's own `--emit-tsd`
+flag (auto-generates a `.d.ts` at compile time) plus switching the
+build's output to `.mjs` for real ES-module semantics, or a small
+hand-written reusable wrapper. Verified the first option directly
+before ruling anything out (real finding, not a guess): the currently-
+installed Emscripten (6.0.9) genuinely supports `--emit-tsd` for this
+project's plain `EXPORTED_FUNCTIONS` style (no embind needed), and
+`.mjs` output does produce a real `export default` module -- both
+confirmed by actually compiling `hydrogen_minimal` with each flag and
+inspecting the result. But it only types the raw `_dengo_wasm_step(...)`
+calling convention, not whatever `cwrap("dengo_wasm_step", ...)`
+produces (permanently `any`, since it's built from a runtime string),
+and needs `tsc` on the build machine -- a genuinely new toolchain
+dependency, low-cost (GH-hosted runners already have Node; `npx
+typescript` fetches `tsc` with no explicit setup step, verified
+locally) but new all the same. Asked which piece(s) to actually build;
+answer was the reusable shim only, explicitly not the compile-step
+changes -- this entry is just that.
+
+New `wasm/dengo-solver.js` (a real ES module, `export class
+DengoSolver`) + hand-written `wasm/dengo-solver.d.ts` (this project
+isn't running a TypeScript build step for `wasm/`, so there's no
+compiler to generate one, and the class is small enough that hand-
+maintaining the two in sync is the cheaper trade). One class covers
+every network dengo can generate a wasm solver for, not just this
+project's three fiducial ones -- the C API in `dengo_wasm.cpp.template`
+is identical across all of them (same 7 functions, same names always);
+only the species *names* differ, and those are already read at runtime
+via `dengo_wasm_species_names()`, not baked into any particular build.
+Wraps state access by species name (`readState()`/`writeState()`/`get()`/
+`set()`) plus a `bulkUpdate()` escape hatch for vectorized edits (e.g.
+scaling every species by a density ratio in one pass, the way
+`app.js`'s free-fall stepping already does) without forcing that
+through slower per-call object allocation. Two real gotchas in the
+underlying C API are preserved exactly as they behave, not silently
+smoothed over: `temperature()` still reads a cache only refreshed by
+`rhs()`/`step()` (documented prominently, the same gotcha this project
+hit and fixed earlier in `app.js` itself -- see the mean-molecular-
+weight entry above), and every method re-reads `mod.HEAPF64` fresh on
+each call rather than caching a reference, since Emscripten's typed-
+array view can be invalidated by WASM memory growth (`ALLOW_MEMORY_
+GROWTH=1`, needed for the larger networks) -- a real footgun a new
+consumer unfamiliar with Emscripten specifically wouldn't know to avoid.
+
+Copied once at the top level in `generate_site.py` (alongside `app.js`/
+`rates.js`/`style.css`), not duplicated per network, since nothing about
+it is network-specific.
+
+Deliberately not done, per the explicit answer to "which piece(s)":
+`app.js` itself was NOT migrated onto this class -- it keeps its own
+from-scratch `mod`/`idx`/`speciesNames` plumbing for now, so this file
+is currently unused by the widget itself. That does mean the class
+isn't exercised by this project's own production code path, which is
+exactly why verification here leaned unusually hard on independent
+cross-checks rather than "the existing app still works":
+
+Verified: (1) in Node (no browser at all -- a direct, real test of
+"usable in other modules"), built via the shim and, side by side, via
+hand-written raw `cwrap` calls mirroring `app.js`'s own approach exactly
+-- state after an identical sequence of set/rhs/step/bulkUpdate calls
+matched *bit-for-bit* between the two paths, including the `ge`/
+temperature cache-staleness behavior. (2) In a real headless-browser
+pass against the actual generated `primordial`/`primordial_atomic`/
+`hydrogen_minimal` pages, dynamically `import()`-ing `dengo-solver.js`
+alongside the page's already-loaded classic-script `dengo_wasm.js` and
+driving a full set/rhs/step/bulkUpdate/read sequence against each
+network's real compiled module -- zero console errors, correct
+species lists and counts for each. (3) Confirmed the existing widget
+pages themselves are completely unaffected (all three networks, both
+themes, zero console errors) -- adding two new unreferenced files
+changes nothing about what `app.js` does. Full `pytest` suite
+unaffected (120/120) -- no Python path touched.
