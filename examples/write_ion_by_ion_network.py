@@ -24,7 +24,7 @@ for atom in ["H", "O", "He"]:
     ion_by_ion.add_collection(s, c, r)
     #ion_by_ion.add_collection(s, [], r)
 
-ion_by_ion.add_cooling('compton')
+# ion_by_ion.add_cooling('compton')
 
 #s, c, r = setup_primordial()
 #ion_by_ion.add_collection(s, c, r)
@@ -73,7 +73,7 @@ else:
                     ion.ioneqOne()
                     ion_frac = ion.IoneqOne
                     init_values[s.name] = ion_frac * init_array * ion.Abundance
-                
+
                 # in case something is negative or super small:
                 init_values[s.name][init_values[s.name] < tiny] = tiny
 

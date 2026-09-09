@@ -4,21 +4,21 @@ from dengo.chemical_network import \
     cooling_registry
 import dengo.primordial_rates, dengo.primordial_cooling
 from dengo.chemistry_constants import tiny, kboltz, mh
-from dengo.known_species import *
+# from dengo.known_species import *
 
 # If only a subset of species are wanted put them here
 # and change the commented lines below
 want = ("HI", "HII", "de", "ge")
 
 primordial = ChemicalNetwork()
-primordial.add_energy_term()
+#primordial.add_energy_term()
 
 # Set to false if intermediate solution output is not wanted
 primordial.write_intermediate_solutions = True
 
-for ca in cooling_registry.values():
+#for ca in cooling_registry.values():
     #if not all(sp.name in want for sp in ca.species): continue
-    primordial.add_cooling(ca)
+#    primordial.add_cooling(ca)
 
 for i, rname in enumerate(sorted(reaction_registry)):
     s = reaction_registry[rname]
@@ -49,14 +49,12 @@ if generate_initial_conditions:
     init_values['H2II']    = init_array * tiny
     init_values['de'] = init_array * 0.0
 
-    total_density = primordial.calculate_total_density(init_values, ("HI",))
+    total_density = primordial.calculate_total_density(init_values)
     init_values["HI"] = init_array.copy() - total_density
     init_values = primordial.convert_to_mass_density(init_values)
     init_values['de'] = primordial.calculate_free_electrons(init_values)
     init_values['density'] = primordial.calculate_total_density(init_values)
     number_density = primordial.calculate_number_density(init_values)
-
-    # set up initial temperatures values used to define ge
     temperature = np.logspace(2, 4, NCELLS)
     temperature[:] = 1e3
     init_values['T'] = temperature

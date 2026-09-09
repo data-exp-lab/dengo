@@ -1,0 +1,94 @@
+name: Deploy WASM demo to GitHub Pages
+
+# Fully regenerates every fiducial network's solver (codegen + Emscripten
+# compile) and redeploys on every push -- not just republishing whatever
+# .wasm/.js happen to be sitting in the repo. Chosen deliberately over
+# the cheaper "just publish the committed build" option: this project's
+# own history (see NOTES.md) has repeatedly found real, previously-
+# silent bugs in the generated solver, and a demo site that could
+# silently show stale/incorrect physics after a fix landed -- because
+# nobody remembered to re-run the build and commit new binaries -- is a
+# worse failure mode than a few extra minutes of CI time per push. A
+# GitHub-hosted runner easily affords the cost: three small single-cell
+# networks, each a few seconds of codegen + a few seconds of em++, well
+# under a minute total.
+#
+# Requires GitHub Pages to be enabled for this repo with source ==
+# "GitHub Actions" (Settings -> Pages) -- a one-time manual step, not
+# something this workflow can turn on itself.
+#
+# NOTE: triggers on pushes to `wasm-solver` (where this work currently
+# lives) -- update the branch name below once this merges to whatever
+# this repo's default/long-lived branch ends up being.
+on:
+  push:
+    branches: [wasm-solver]
+    paths:
+      - "wasm/**"
+      - "src/dengo/**"
+      - ".github/workflows/gh-pages.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+env:
+  EMSCRIPTEN_VERSION: "6.0.9"  # pinned to what this was developed/verified against
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Install Python dependencies
+        run: uv sync
+
+      - name: Cache Emscripten SDK
+        uses: actions/cache@v4
+        id: emsdk-cache
+        with:
+          path: emsdk
+          key: emsdk-${{ env.EMSCRIPTEN_VERSION }}-${{ runner.os }}
+
+      - name: Install Emscripten SDK
+        if: steps.emsdk-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 https://github.com/emscripten-core/emsdk.git emsdk
+          cd emsdk
+          ./emsdk install ${{ env.EMSCRIPTEN_VERSION }}
+
+      - name: Activate Emscripten SDK
+        run: |
+          cd emsdk
+          ./emsdk activate ${{ env.EMSCRIPTEN_VERSION }}
+          echo "$PWD/upstream/emscripten" >> "$GITHUB_PATH"
+          echo "EM_CONFIG=$PWD/.emscripten" >> "$GITHUB_ENV"
+
+      - name: Generate the site (codegen + compile every fiducial network)
+        run: uv run python wasm/generate_site.py wasm/_site
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: wasm/_site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
