@@ -158,13 +158,22 @@ PAGE_TEMPLATE = """<!doctype html>
 <details class="sweep-section">
   <summary>Parameter sweep -- compare several starting conditions at once</summary>
   <p class="preset-note">Holds every other slider at its current setting,
-    runs the current mode (cool/free-fall) once per value below, and
-    overlays all of them -- e.g. several starting temperatures, to see
-    whether/when the gas "forgets" where it started. Not live -- a sweep
-    is several full runs, not one, so it only runs when asked.</p>
+    runs the current mode (cool/free-fall) once per value in the range
+    below, and overlays all of them -- e.g. several starting
+    temperatures, to see whether/when the gas "forgets" where it
+    started. Not live -- a sweep is several full runs, not one, so it
+    only runs when asked. Picking a parameter disables its regular
+    slider (it's driven by the range below for the sweep instead) and
+    re-enables it once you switch to sweeping something else.</p>
   <div class="row sweep-controls">
     <label>sweep over</label>
     <select id="sweep-param"></select>
+    <label>from</label>
+    <input type="number" id="sweep-start" step="any">
+    <label>to</label>
+    <input type="number" id="sweep-stop" step="any">
+    <label>count</label>
+    <input type="number" id="sweep-count" min="2" max="12" step="1" value="6">
     <button type="button" id="run-sweep" disabled>Run sweep</button>
     <span id="sweep-status" class="preset-note"></span>
   </div>

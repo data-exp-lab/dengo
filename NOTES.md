@@ -2313,3 +2313,40 @@ field, (c) legend entries render in ascending physical-value order, (d)
 the single-point-track visibility fix (screenshot-verified: those tracks
 now show as small dots), (e) zero console errors across all three
 networks/both themes/both modes, (f) full `pytest` suite (86/86) passes.
+
+**2026-09-09, same branch: made the sweep's slider-to-range mapping
+explicit instead of implicit.** User pushback, and a good catch: the
+first version silently sampled the swept slider's *entire* min/max range
+regardless of what it was actually set to -- correct once you know that,
+but nothing in the UI said so, and it threw away whatever value you'd
+carefully set. Fixed exactly as proposed: picking a sweep parameter now
+disables its regular slider (visibly, via a plain `input:disabled`
+dimming rule -- it's genuinely not readable from that slider while the
+sweep drives it) and reveals an explicit from/to/count range, pre-filled
+with that slider's own min/max in physical units (a visible, editable
+default, not a hidden one) rather than requiring the user to already
+know what range they wanted before touching anything.
+
+Reworked `SWEEP_PARAMS` so every entry carries both `toPhysical` and
+`toRaw` (physical <-> slider-raw-unit conversion) plus a `logSpace`
+flag; `sweepValues()` now reads the visible from/to/count inputs
+(always physical units, e.g. actual Kelvin, not log10(Kelvin)) and
+produces evenly-log-spaced or evenly-linear-spaced raw values between
+them, converting only at the boundary. This also *simplified* the Mach
+special-case from the previous entry: since the user now sets Mach's
+own from/to explicitly, the sweep no longer needs to hardcode "always
+sample 1-100" -- log-spacing within whatever range is actually entered
+covers the same "resolve the low-Mach transition" need without a
+hardcoded range.
+
+Verified: real Emscripten build, headless-browser pass across all three
+networks/both themes confirming (a) the initially-selected parameter's
+slider is disabled and its range pre-filled immediately on page load
+(not only after touching the dropdown once), (b) switching the sweep
+parameter re-enables the previous slider and disables/re-fills the new
+one, (c) a narrowed custom range (500-2000 K, count=4) produces exactly
+the 4 expected log-spaced legend values -- not the old full-range
+behavior -- confirming the fix actually changes behavior, not just the
+label, (d) a full 21-decade n_H sweep (10⁻⁴ to 10¹⁷ cm⁻³) still runs
+cleanly, (e) zero console errors, (f) full `pytest` suite (86/86)
+passes.

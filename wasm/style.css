@@ -113,6 +113,12 @@ input[type=range] { width: 100%; }
   padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border);
   background: var(--bg); color: var(--fg); font-size: 0.9em;
 }
+#sweep-start, #sweep-stop, #sweep-count {
+  padding: 5px 6px; border-radius: 6px; border: 1px solid var(--border);
+  background: var(--bg); color: var(--fg); font-size: 0.85em; width: 90px;
+}
+#sweep-count { width: 55px; }
+input:disabled { opacity: 0.5; }
 #run-sweep {
   padding: 6px 14px; border-radius: 6px; border: 1px solid var(--border);
   background: var(--accent); color: white; cursor: pointer; font-size: 0.85em;
