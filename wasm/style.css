@@ -22,7 +22,23 @@ p.sub { color: var(--muted); margin: 0 0 20px; }
 a { color: var(--accent); }
 .layout { display: grid; grid-template-columns: 320px 1fr; gap: 24px; align-items: start; }
 @media (max-width: 760px) { .layout { grid-template-columns: 1fr; } }
-.panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+.panel {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px;
+  /* Independently-scrolling sidebar: pinned to the viewport (not the
+     page), capped to fit it, scrolling internally past that -- so
+     dragging a slider near the bottom never scrolls the charts (in the
+     other column, and usually taller than this one) out of view. Plain
+     `position: sticky` alone doesn't get you this: it only has room to
+     do anything while its grid row is taller than the sticky item
+     itself, which isn't reliably true here (the charts column is often
+     the taller one). Reset for the single-column mobile layout below --
+     a short scrolling box stacked above a much taller chart section
+     isn't the right reading order there. */
+  position: sticky; top: 16px; max-height: calc(100vh - 32px); overflow-y: auto;
+}
+@media (max-width: 760px) {
+  .panel { position: static; max-height: none; overflow-y: visible; }
+}
 .row { margin-bottom: 16px; }
 .row label { display: flex; justify-content: space-between; font-size: 0.9em; margin-bottom: 4px; }
 .row label span.val { font-variant-numeric: tabular-nums; color: var(--accent); font-weight: 600; }
@@ -40,6 +56,16 @@ input[type=range] { width: 100%; }
 .modebar button.active { background: var(--accent); color: white; border-color: var(--accent); }
 #status { font-size: 0.85em; color: var(--muted); margin-top: 10px; min-height: 1.2em; }
 #charts { display: flex; flex-direction: column; gap: 8px; }
+/* Species-fraction sliders are the single biggest contributor to panel
+   height (6-9 rows on top of everything else) -- collapsible so the
+   panel can be kept short when you're not tweaking them. Open by
+   default: nothing changes for anyone who never notices the toggle. */
+.species-details { margin-bottom: 16px; }
+.species-details > summary {
+  cursor: pointer; font-size: 0.9em; color: var(--fg); margin-bottom: 8px;
+}
+.species-details > summary::marker { color: var(--muted); }
+.species-details[open] > summary { margin-bottom: 12px; }
 .chart-box { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 8px; }
 .chart-title { font-size: 0.85em; font-weight: 600; color: var(--fg); margin: 2px 4px 4px; }
 .chart-row { display: flex; align-items: stretch; }
@@ -52,7 +78,7 @@ input[type=range] { width: 100%; }
 /* KaTeX ships its own (light-mode-only) text color; make it follow the
    page theme instead so axis labels stay legible in dark mode too. */
 .katex { color: inherit; }
-#species-sliders { border-top: 1px solid var(--border); padding-top: 4px; margin-top: 4px; }
+#species-sliders { padding-top: 4px; }
 .mini-modebar { display: flex; gap: 6px; margin: 0 4px 8px; }
 .mini-modebar button {
   font-size: 0.78em; padding: 3px 10px; border-radius: 6px; border: 1px solid var(--border);

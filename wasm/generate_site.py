@@ -80,7 +80,10 @@ PAGE_TEMPLATE = """<!doctype html>
       <label>T (K) <span class="val" id="T-val"></span></label>
       <input type="range" id="T" min="1" max="4.7" step="0.05" value="3">
     </div>
-    <div id="species-sliders"></div>
+    <details class="species-details" open>
+      <summary>Initial species fractions</summary>
+      <div id="species-sliders"></div>
+    </details>
     <div class="row" id="dtf-row">
       <label>total time: 10<sup>x</sup> s <span class="val" id="dtf-val"></span></label>
       <input type="range" id="dtf" min="6" max="17" step="0.1" value="13">
@@ -107,7 +110,7 @@ PAGE_TEMPLATE = """<!doctype html>
       <div class="axis-x" id="xlabel-T"></div>
     </div>
     <div class="chart-box">
-      <div class="chart-title">Ionization</div>
+      <div class="chart-title">Ionization &amp; molecular fraction</div>
       <div class="chart-row">
         <div class="axis-y" id="ylabel-ion"></div>
         <div id="chart-ion"></div>
