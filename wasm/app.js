@@ -16,6 +16,8 @@ let currentMode = "cool";
 let speciesDisplayMode = "density"; // "density" (cm^-3) or "massfrac" (X_i, dimensionless)
 let temperatureDisplayMode = "T"; // "T" (K) or "ge" (specific internal energy, erg/g)
 let temperatureZoomEnabled = false; // opt-in: drag-to-zoom detail view under the Temperature chart
+let lastResult = null; // the current mode's most recent full run (redraw()'s own result), for CSV export
+let pageTitle = "dengo"; // network title, for the exported CSV's filename only
 
 // -- LaTeX axis labels (rendered via KaTeX, not Vega-Lite's own plain-text
 // titles -- see NOTES.md for why: Vega-Lite axis titles are just SVG
@@ -868,6 +870,61 @@ function redraw() {
   if (finalTime !== undefined) statusText += `, elapsed t=${formatTimeAuto(finalTime)} (${finalTime.toExponential(2)} s)`;
   if (result.shockTriggered) statusText += `, shock crossed at n=${result.nShock.toExponential(2)} cm⁻³`;
   document.getElementById("status").textContent = statusText;
+
+  lastResult = result;
+  document.getElementById("download-csv").disabled = false;
+}
+
+function csvCell(v) {
+  if (v === null || v === undefined) return "";
+  // Plain String(), not one of the display-only .toFixed()/.toExponential()
+  // formatters used elsewhere -- this is a data export, so it gets full
+  // double precision (JS's own shortest round-trip representation), not
+  // whatever a handful of significant figures a tooltip needs.
+  const s = String(v);
+  return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
+// The full step-by-step history of the current mode's most recent run
+// (redraw()'s own `result`, cached in `lastResult`) -- every species'
+// number density plus the derived quantities already shown on the
+// charts (T, gamma, ionized/H2 fraction), one row per solver step.
+// Deliberately just the one run: a sweep is several of these overlaid,
+// not a single result, and exporting all of them together would need a
+// different shape entirely -- out of scope here, this is "the results
+// on screen right now".
+function resultsToCsv(result) {
+  const species = plotableSpecies(); // excludes "ge" -- already its own column below
+  const header = [
+    "step", "x", "x_kind", "t_s", "t_human", "dt_s",
+    "T_K", "ge_erg_per_g", "gamma", "ion_frac", "h2_frac",
+    ...species,
+  ];
+  const lines = [header.map(csvCell).join(",")];
+  for (let i = 0; i < result.x.length; i++) {
+    const s = result.s[i];
+    const row = [
+      i, result.x[i], result.xKey, result.t[i], formatTimeAuto(result.t[i]), result.dt[i],
+      result.T[i], s.ge, thermodynamicGamma(s), result.ion[i], result.h2[i],
+      ...species.map((name) => s[name]),
+    ];
+    lines.push(row.map(csvCell).join(","));
+  }
+  return lines.join("\n");
+}
+
+function downloadResultsCsv() {
+  if (!lastResult) return;
+  const csv = resultsToCsv(lastResult);
+  const blob = new Blob([csv], { type: "text/csv" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${pageTitle.replace(/\s+/g, "_")}_${currentMode}_results.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
 function setMode(mode) {
@@ -1182,7 +1239,9 @@ function buildSpeciesToggle() {
 function initPage(config) {
   document.getElementById("page-title").textContent = config.title;
   document.getElementById("T").value = Math.log10(config.default_T);
+  pageTitle = config.title;
 
+  document.getElementById("download-csv").addEventListener("click", downloadResultsCsv);
   document.getElementById("mode-cool").addEventListener("click", () => setMode("cool"));
   document.getElementById("mode-freefall").addEventListener("click", () => setMode("freefall"));
   document.getElementById("species-mode-density").addEventListener("click", () => setSpeciesDisplayMode("density"));

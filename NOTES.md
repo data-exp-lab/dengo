@@ -2815,3 +2815,43 @@ render actual point-mark elements, one per data point, not just a
 line); clicking an empty area clears the selection and both views
 revert to the same full range. Full `pytest` unaffected (120/120) --
 pure `app.js`/HTML-template/CSS change.
+
+**2026-09-09, new branch `wasm-csv-export`: "Download CSV" button for
+the current run's full step-by-step history.** A "Download CSV" button
+next to the status line, enabled once the first run completes (matches
+the existing disabled-until-ready pattern already used for the IC
+preset dropdown and the sweep button), exports every step of whichever
+run (cool or free-fall) is currently on screen -- explicitly the single
+run, not a sweep's several overlaid ones, which has a different shape
+entirely and would need its own export design; the button's tooltip
+says so directly.
+
+One column per plotted species (whatever that network actually has --
+`plotableSpecies()`, so hydrogen_minimal's 3-column file and
+primordial's 9-column one both fall out of the same code with no
+per-network special-casing), plus T, ge, gamma, ionized fraction, H2
+fraction (blank, not a bogus zero, on networks without H2 chemistry --
+same graceful-degradation convention as the status line and charts
+already use), the step index, x (whatever's plotted -- density or
+time), elapsed time in both seconds and human units, and the step size.
+Values are plain `String()`, not any of the `.toFixed()`/
+`.toExponential()` display formatters used elsewhere on this page --
+this is a data export, so it keeps full double precision rather than
+the handful of significant figures a tooltip needs.
+
+Confirmed directly (not just assumed from reading the code) that this
+covers what was actually asked: the full time series, not a final-state
+snapshot -- row count matches step count exactly on every network/mode
+tested (e.g. 1230 data rows for a 1230-step free-fall run) -- and that
+row 0 is genuinely the initial condition (`dt_s=0`, T matching the
+requested value exactly), not the first *solved* step, inheriting that
+for free from the same "IC is history entry 0" convention `runFreefall`/
+`runConstantDensity` already established earlier in this file.
+
+Verified: real Emscripten rebuild, headless-browser pass across all
+three networks, both themes, both modes, after running a sweep (button
+still exports the single run underneath it, unaffected) -- zero console
+errors. Downloaded and parsed the actual files with Python's `csv`
+module (not just eyeballing them): correct, consistent column count on
+every row, every numeric field parses as a float. Full `pytest`
+unaffected (120/120) -- pure `app.js`/HTML-template/CSS change.
