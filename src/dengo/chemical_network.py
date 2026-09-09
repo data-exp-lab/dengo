@@ -106,6 +106,17 @@ class ChemicalNetwork(object):
     def add_species(self, species):
         sp = species_registry.get(species, species)
         self.required_species.add(sp)
+        # H2 needs a T-dependent gamma (roto-vibrational internal degrees
+        # of freedom -- see species_gamma()); this is the one method every
+        # species passes through regardless of whether it arrived via
+        # add_collection's species_names, a reaction, or a cooling term,
+        # so it's the right place for this bookkeeping (previously
+        # duplicated -- and only reachable -- in add_reaction's auto_add
+        # branch, which add_collection never takes, silently leaving
+        # interpolate_gamma_species empty and H2 falling back to the
+        # generic constant gamma=5/3 in the generated solver).
+        if sp.name in self.interpolate_gamma_species_name:
+            self.interpolate_gamma_species.add(sp)
 
     def add_reaction(self, reaction, auto_add=True):
         reaction = reaction_registry.get(reaction, reaction)
@@ -113,15 +124,9 @@ class ChemicalNetwork(object):
             raise RuntimeError
         if auto_add:
             for n, s in reaction.left_side:
-                self.required_species.add(s)
-
-                if s.name in self.interpolate_gamma_species_name:
-                    self.interpolate_gamma_species.add(s)
+                self.add_species(s)
             for n, s in reaction.right_side:
-                self.required_species.add(s)
-
-                if s.name in self.interpolate_gamma_species_name:
-                    self.interpolate_gamma_species.add(s)
+                self.add_species(s)
         else:
             for n, s in reaction.left_side:
                 if s not in self.required_species:
@@ -137,7 +142,8 @@ class ChemicalNetwork(object):
         if cooling_term.name in self.cooling_actions:
             raise RuntimeError
         if auto_add:
-            self.required_species.update(cooling_term.species)
+            for s in cooling_term.species:
+                self.add_species(s)
         else:
             for s in cooling_term.species:
                 if s not in self.required_species:
@@ -440,32 +446,40 @@ class ChemicalNetwork(object):
                 # goes into the analytical differntiation for energy
                 f_gammaH2 = sympy.Function("gamma%s" % sp_name)(T)
                 return f_gammaH2
-            elif temp and ~name:
-                # x = 6100.0/T
-                # expx = sympy.exp(x)
-                # gammaH2_expr = 2.0 / (5.0 + 2.0*x*x*expx / (expx - 1 )**2.0 ) + 1
+            elif temp and not name:
+                # Omukai & Nishi (1998, ApJ 508, 141) fit for H2's
+                # temperature-dependent adiabatic index: a rigid-rotor +
+                # harmonic-oscillator partition-function approximation,
+                # gamma_H2 -> 7/5 at low T (rotation only) and -> 9/7 at
+                # high T (rotation + vibration). This is also the formula
+                # Grackle uses internally (calculate_gamma.c/
+                # calculate_pressure.c) for its own H2-corrected mixture
+                # gamma -- used here (rather than the alternate 10-
+                # parameter empirical fit below, kept for reference) so
+                # dengo's and Grackle's internal EOS agree on this piece
+                # of physics; a decoupled dengo-vs-Grackle comparison
+                # (.grackle_compare/run_decoupled.py, see NOTES.md) found
+                # the two fits disagree by ~10-15% in (gamma-1) at
+                # T=1500-3000K -- squarely the H2-formation-heating regime
+                # this project targets -- which was a real, unexplained
+                # source of the temperature mismatch between the two
+                # codes on identical compression histories.
+                x = 6100.0 / T
+                expx = sympy.exp(x)
+                gammaH2_expr = 2.0 / (5.0 + 2.0 * x * x * expx / (expx - 1) ** 2.0) + 1
 
-                T0 = T ** (1 / 6.5)
-                a0 = 64.2416
-                a1 = -9.36334
-                a2 = -0.377266
-                a3 = 69.8091
-                a4 = 0.0493452
-                a5 = 2.28021
-                a6 = 0.115357
-                a7 = 0.114188
-                a8 = 2.90778
-                a9 = 0.689708
-
-                gammaH2_expr = (
-                    sympy.exp(-a0 * T0 ** a1) * (a2 + T0 ** -a3)
-                    + a4 * sympy.exp(-((T0 - a5) ** 2) / a6)
-                    + a7 * sympy.exp(-((T0 - a8) ** 2) / a9)
-                    + 5.0 / 3.0
-                )
-                # x = 6100.0/T
-                # expx = sympy.exp(x)
-                # gammaH2_expr = 2.0 / (5.0 + 2.0*x*x*expx / (expx - 1 )**2.0 ) + 1
+                # Alternate empirical fit (unattributed provenance, present
+                # in dengo since before this modernization pass) -- kept
+                # for reference, not used by default; see the note above.
+                # T0 = T ** (1 / 6.5)
+                # a0, a1, a2, a3, a4 = 64.2416, -9.36334, -0.377266, 69.8091, 0.0493452
+                # a5, a6, a7, a8, a9 = 2.28021, 0.115357, 0.114188, 2.90778, 0.689708
+                # gammaH2_expr = (
+                #     sympy.exp(-a0 * T0 ** a1) * (a2 + T0 ** -a3)
+                #     + a4 * sympy.exp(-((T0 - a5) ** 2) / a6)
+                #     + a7 * sympy.exp(-((T0 - a8) ** 2) / a9)
+                #     + 5.0 / 3.0
+                # )
 
                 return gammaH2_expr
             else:

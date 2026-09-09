@@ -99,7 +99,7 @@ static void {{ solver_name }}_read_tables({{ solver_name }}_data *data, const ch
     nread += fread(data->c_{{ name }}_{{ name2 }}, sizeof(double), n, f);
     {%- endfor %}
     {%- endfor %}
-    {%- for sp in network.interpolate_gamma_species | sort %}
+    {%- for sp in network.interpolate_gamma_species | sort(attribute="name", case_sensitive=true) %}
     nread += fread(data->g_gamma{{ sp.name }}, sizeof(double), n, f);
     nread += fread(data->g_dgamma{{ sp.name }}_dT, sizeof(double), n, f);
     {%- endfor %}

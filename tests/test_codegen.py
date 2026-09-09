@@ -75,6 +75,13 @@ def test_tables_bin_contents_match_write_order(tmp_path):
             expected = action.tables[tab](network).astype("float64")
             assert np.allclose(raw[offset:offset + n], expected, rtol=1e-10), (name, tab)
             offset += n
+    for sp in sorted(network.interpolate_gamma_species):
+        expected = network.interpolate_species_gamma(sp).astype("float64")
+        assert np.allclose(raw[offset:offset + n], expected, rtol=1e-10), (sp.name, "gamma")
+        offset += n
+        expected = network.interpolate_species_gamma(sp, deriv=True).astype("float64")
+        assert np.allclose(raw[offset:offset + n], expected, rtol=1e-10), (sp.name, "dgamma_dT")
+        offset += n
     assert offset == len(raw)
 
     # Also confirm the *generated C source's* fread order textually
@@ -89,6 +96,11 @@ def test_tables_bin_contents_match_write_order(tmp_path):
             "c_%s_%s" % (name, tab)
             for name, action in sorted(network.cooling_actions.items())
             for tab in sorted(action.tables)
+        ]
+        + [
+            name
+            for sp in sorted(network.interpolate_gamma_species)
+            for name in ("g_gamma%s" % sp.name, "g_dgamma%s_dT" % sp.name)
         ]
     )
     assert read_order == expected_order
