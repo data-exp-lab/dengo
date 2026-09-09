@@ -217,10 +217,30 @@ function runConstantDensity(nH, T, fractions, logDtf, safetyFactor = 0.1, maxSte
   return { x: tHist, t: tHist, dt: dtHist, T: THist, ion: ionHist, h2: h2Hist, s: sHist, xKey: "time" };
 }
 
-function runFreefall(nH, T, fractions, logNTarget, safetyFactor = 0.01, maxSteps = 10000) {
+// Rankine-Hugoniot jump conditions for a plane, ideal-gas shock at
+// upstream Mach number `mach` and (composition-weighted) adiabatic
+// index `gammaAd` -- standard closed-form result, not the strong-shock
+// limit, so it correctly gives no jump at all at mach=1 (the
+// zero-strength/sonic limit) and saturates the density ratio (but not
+// the temperature ratio, which keeps growing) as mach -> infinity.
+// mach is a free dial here, not derived from an actual radius/enclosed-
+// mass infall-speed calculation this zero-dimensional (density-only)
+// model has no way to provide -- see the note in generate_site.py.
+function shockJumpFactors(gammaAd, mach) {
+  const m2 = mach * mach;
+  const rhoRatio = ((gammaAd + 1) * m2) / ((gammaAd - 1) * m2 + 2);
+  const TRatio = ((2 * gammaAd * m2 - (gammaAd - 1)) * ((gammaAd - 1) * m2 + 2))
+    / ((gammaAd + 1) * (gammaAd + 1) * m2);
+  return { rhoRatio, TRatio };
+}
+
+function runFreefall(nH, T, fractions, logNTarget, logNShock, machShock, safetyFactor = 0.01, maxSteps = 10000) {
   setIcs(nH, T, fractions);
   const nTarget = Math.pow(10, logNTarget);
+  const nShock = Math.pow(10, logNShock);
   let nCurrent = nH, t = 0;
+  let shocked = nCurrent >= nShock; // already past it at t=0 -- don't fire mid-run
+  let shockApplied = false; // only set once the post-shock step actually converges -- see below
   const nHist = [], THist = [], ionHist = [], h2Hist = [], tHist = [], dtHist = [], sHist = [];
   for (let i = 0; i < maxSteps; i++) {
     if (nCurrent >= nTarget) break;
@@ -228,17 +248,40 @@ function runFreefall(nH, T, fractions, logNTarget, safetyFactor = 0.01, maxSteps
     const tFf = Math.sqrt(3 * Math.PI / (32 * G_GRAV * rho));
     const dt = safetyFactor * tFf;
     const rhoNew = Math.pow(Math.pow(rho, -0.5) - Math.sqrt(32 * G_GRAV / (3 * Math.PI)) * dt, -2);
-    const densityRatio = rhoNew / rho;
+    let densityRatio = rhoNew / rho;
 
     const ptr = statePtr() >> 3;
+    const gammaAd = thermodynamicGamma(getScalar());
+    let tempRatio = 1 + (gammaAd - 1) * (densityRatio - 1);
+
+    // Fires (at most) once per run, the first step whose ordinary
+    // free-fall compression would carry the gas across nShock. A shock
+    // is a genuine mathematical discontinuity -- that's what the RH jump
+    // conditions describe -- so a single-step jump is the physically
+    // honest way to represent one here, not a numerical shortcut to
+    // smooth over; BE_chem_solve already tolerates state jumps of this
+    // kind fine (ordinary free-fall compression already hands it one
+    // every step). `shocked` only becomes permanent once this step's
+    // step() call below actually converges -- a strong-enough jump can
+    // fail to converge on the first attempt, and if it does, this isn't
+    // "the shock happened", it's "the run stopped before the shock could
+    // be applied" (see shockTriggered below).
+    let attemptingShock = false;
+    if (!shocked && machShock > 1 && nCurrent * densityRatio >= nShock) {
+      const { rhoRatio, TRatio } = shockJumpFactors(gammaAd, machShock);
+      densityRatio *= rhoRatio;
+      tempRatio *= TRatio;
+      attemptingShock = true;
+    }
+
     for (const name of speciesNames) {
       if (name !== "ge") mod.HEAPF64[ptr + idx[name]] *= densityRatio;
     }
-    const gammaAd = thermodynamicGamma(getScalar());
-    mod.HEAPF64[ptr + idx.ge] *= (1 + (gammaAd - 1) * (densityRatio - 1));
+    mod.HEAPF64[ptr + idx.ge] *= tempRatio;
 
     const converged = step(dt, 200, 1e-5);
     if (!converged) break;
+    if (attemptingShock) { shocked = true; shockApplied = true; }
     t += dt;
     const s = getScalar();
     nCurrent = 0;
@@ -246,7 +289,10 @@ function runFreefall(nH, T, fractions, logNTarget, safetyFactor = 0.01, maxSteps
     nHist.push(nCurrent); THist.push(temperature()); ionHist.push(ionizedFraction(s)); h2Hist.push(h2Fraction(s));
     tHist.push(t); dtHist.push(dt); sHist.push(s);
   }
-  return { x: nHist, t: tHist, dt: dtHist, T: THist, ion: ionHist, h2: h2Hist, s: sHist, xKey: "density" };
+  return {
+    x: nHist, t: tHist, dt: dtHist, T: THist, ion: ionHist, h2: h2Hist, s: sHist, xKey: "density",
+    shockTriggered: shockApplied, nShock,
+  };
 }
 
 const FIELD_TITLE = { T: "T (K)", ge: "ε (erg/g)" };
@@ -432,7 +478,11 @@ function redraw() {
   if (currentMode === "freefall") {
     const logNTarget = parseFloat(document.getElementById("ntarget").value);
     document.getElementById("ntarget-val").textContent = logNTarget.toFixed(1);
-    result = runFreefall(nH, T, fractions, logNTarget);
+    const logNShock = parseFloat(document.getElementById("nshock").value);
+    const machShock = parseFloat(document.getElementById("mach").value);
+    document.getElementById("nshock-val").textContent = logNShock.toFixed(1);
+    document.getElementById("mach-val").textContent = machShock.toFixed(1);
+    result = runFreefall(nH, T, fractions, logNTarget, logNShock, machShock);
   } else {
     const logDtf = parseFloat(document.getElementById("dtf").value);
     document.getElementById("dtf-val").textContent = logDtf.toFixed(1);
@@ -459,7 +509,18 @@ function redraw() {
     encoding: { y: { field: "y0", type: "quantitative" }, y2: { field: "y1" } },
   };
   const tempField = temperatureDisplayMode === "ge" ? "ge" : "T";
-  vegaEmbed("#chart-T", chartSpec(tempField, result.xKey, rows, tempField === "T" ? [band] : [], gammaTooltip),
+  const tempExtra = tempField === "T" ? [band] : [];
+  if (result.shockTriggered) {
+    // A real shock is a discontinuity, and this one only ever fires
+    // once -- marking exactly where lets the jump in the curve read as
+    // "the shock" rather than looking like a numerical glitch.
+    tempExtra.push({
+      data: { values: [{ x: result.nShock }] },
+      mark: { type: "rule", strokeDash: [4, 3], opacity: 0.8, color: isDarkMode() ? "#ff8a80" : "#cc3333" },
+      encoding: { x: { field: "x", type: "quantitative" } },
+    });
+  }
+  vegaEmbed("#chart-T", chartSpec(tempField, result.xKey, rows, tempExtra, gammaTooltip),
             { actions: false, renderer: "svg" });
   const ionRows = [];
   for (let i = 0; i < result.x.length; i++) {
@@ -513,6 +574,7 @@ function redraw() {
     + `ionized=${finalIon ? finalIon.toExponential(2) : "?"}`;
   if (finalH2 !== null && finalH2 !== undefined) statusText += `, H2/H_tot=${finalH2.toExponential(2)}`;
   if (finalTime !== undefined) statusText += `, elapsed t=${formatTimeAuto(finalTime)} (${finalTime.toExponential(2)} s)`;
+  if (result.shockTriggered) statusText += `, shock crossed at n=${result.nShock.toExponential(2)} cm⁻³`;
   document.getElementById("status").textContent = statusText;
 }
 
@@ -665,7 +727,7 @@ function initPage(config) {
   document.getElementById("T-mode-T").addEventListener("click", () => setTemperatureDisplayMode("T"));
   document.getElementById("T-mode-ge").addEventListener("click", () => setTemperatureDisplayMode("ge"));
   document.getElementById("ic-preset").addEventListener("change", (e) => applyPreset(e.target.value));
-  for (const id of ["nH", "T", "dtf", "ntarget"]) {
+  for (const id of ["nH", "T", "dtf", "ntarget", "nshock", "mach"]) {
     document.getElementById(id).addEventListener("input", scheduleRedraw);
   }
   // Charts bake current colors into the Vega-Lite spec at render time
