@@ -27,6 +27,11 @@ a { color: var(--accent); }
 .row label { display: flex; justify-content: space-between; font-size: 0.9em; margin-bottom: 4px; }
 .row label span.val { font-variant-numeric: tabular-nums; color: var(--accent); font-weight: 600; }
 input[type=range] { width: 100%; }
+#ic-preset {
+  width: 100%; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border);
+  background: var(--bg); color: var(--fg); font-size: 0.9em;
+}
+.preset-note { font-size: 0.78em; color: var(--muted); margin: 6px 0 0; }
 .modebar { display: flex; gap: 6px; margin-bottom: 16px; }
 .modebar button {
   flex: 1; padding: 8px; border-radius: 6px; border: 1px solid var(--border);
@@ -48,6 +53,12 @@ input[type=range] { width: 100%; }
    page theme instead so axis labels stay legible in dark mode too. */
 .katex { color: inherit; }
 #species-sliders { border-top: 1px solid var(--border); padding-top: 4px; margin-top: 4px; }
+.mini-modebar { display: flex; gap: 6px; margin: 0 4px 8px; }
+.mini-modebar button {
+  font-size: 0.78em; padding: 3px 10px; border-radius: 6px; border: 1px solid var(--border);
+  background: var(--bg); color: var(--fg); cursor: pointer;
+}
+.mini-modebar button.active { background: var(--accent); color: white; border-color: var(--accent); }
 .species-toggle { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; margin: 0 4px 8px; }
 .species-toggle label {
   display: inline-flex; align-items: center; gap: 4px;
