@@ -217,7 +217,7 @@ function runConstantDensity(nH, T, fractions, logDtf, safetyFactor = 0.1, maxSte
   return { x: tHist, t: tHist, dt: dtHist, T: THist, ion: ionHist, h2: h2Hist, s: sHist, xKey: "time" };
 }
 
-function runFreefall(nH, T, fractions, logNTarget, safetyFactor = 0.01, maxSteps = 5000) {
+function runFreefall(nH, T, fractions, logNTarget, safetyFactor = 0.01, maxSteps = 10000) {
   setIcs(nH, T, fractions);
   const nTarget = Math.pow(10, logNTarget);
   let nCurrent = nH, t = 0;

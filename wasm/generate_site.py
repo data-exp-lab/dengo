@@ -90,7 +90,13 @@ PAGE_TEMPLATE = """<!doctype html>
     </div>
     <div class="row" id="ntarget-row" style="display:none">
       <label>target n: 10<sup>x</sup> cm<sup>-3</sup> <span class="val" id="ntarget-val"></span></label>
-      <input type="range" id="ntarget" min="2" max="18" step="0.1" value="15">
+      <input type="range" id="ntarget" min="2" max="20" step="0.1" value="15">
+      <p class="preset-note">Beyond ~10¹⁶ cm⁻³ this single-zone free-fall
+        model (no hydrostatic core support, no shock/radiative-transfer
+        physics) is no longer a realistic dynamical model of an actual
+        protostar -- the range goes further anyway so you can watch the
+        chemistry network's own H2 collisional-dissociation reactions
+        (H2 + H &rarr; 3H, H2 + H2 &rarr; 2H + H2) play out.</p>
     </div>
 
     <div id="status">loading solver&hellip;</div>

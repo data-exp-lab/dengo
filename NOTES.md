@@ -2091,3 +2091,44 @@ written at all (rather than a partial build) when `em++` is missing, and
 still builds all three networks correctly (confirmed `index.html`
 present at every level, including the landing page) when it's present.
 Full `pytest` suite (86/86) still passes.
+
+**2026-09-09, new branch `wasm-freefall-target-density`: configurable
+free-fall target density, up to 10²⁰ cm⁻³.** Ask: widen the free-fall
+mode's target-density slider (previously capped at 10¹⁸) up to 10²⁰,
+explicitly past the point where the simple single-zone free-fall model
+is a realistic dynamical model, to try to resolve H2's collisional-
+dissociation phase. Delivered: slider `max` raised 18→20,
+`runFreefall()`'s `maxSteps` bumped 5000→10000 (headroom -- reaching
+10²⁰ takes ~1870 steps from the default IC, comfortably under either
+cap but not the original one by a huge margin), and a note under the
+slider explaining the ~10¹⁶ cm⁻³ physics-relevance caveat and naming the
+actual dissociation reactions (`H2 + H -> 3H`, `H2 + H2 -> 2H + H2`,
+i.e. `k13`/`k23` in `primordial_rates.py`) so it's concrete, not vague.
+
+**Important finding, reported rather than papered over**: a diagnostic
+sweep (`runFreefall()` called directly at logNTarget = 15 through 23,
+bypassing the slider) shows this simplified model does *not* actually
+resolve H2 dissociation by 10²⁰ cm⁻³ -- H2/H_tot is still ~99.6%
+molecular there (T≈2808K), and the trend from 10¹⁵ up through 10²¹ is H2
+fraction *climbing* toward ~99.9%, not collapsing toward dissociation.
+This is very plausibly because the free-fall loop's energetics are a
+bare adiabatic-index heating estimate (`thermodynamicGamma()`-weighted
+PdV work) with no shock/radiative-transfer treatment -- real "second
+collapse" H2-dissociation physics (Palla, Salpeter & Stahler 1983;
+Omukai 2000; Yoshida et al. 2006) relies on the dissociation reaction
+itself acting as a thermostat that absorbs compressional heating over a
+huge density range, which this simple energy-update doesn't capture.
+Separately, the same sweep found the integration stops advancing at all
+beyond logNTarget≈21.17 (n≈1.49×10²¹, identical final state whether
+logNTarget=22 or 23 was requested) -- `!converged` from `step()` is
+presumably firing and breaking the loop permanently; not investigated
+further, since it's past what was actually asked for (10²⁰), but worth
+knowing this model has a real ceiling near there regardless of slider
+range.
+
+Delivered exactly what was asked (10²⁰ now reachable, converges cleanly,
+zero console errors, same-as-ever physics below 10¹⁶, full `pytest`
+86/86) -- but flagged this to the user rather than claiming the stated
+physics goal (seeing dissociation) is met, since the data doesn't show
+it yet at 10²⁰. Fixing that would mean improving the free-fall energy
+update itself, a separate, bigger piece of work not undertaken here.
