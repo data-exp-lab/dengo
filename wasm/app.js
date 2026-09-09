@@ -23,7 +23,32 @@ const AXIS_LATEX = {
   density: "n\\ (\\mathrm{cm^{-3}})",
   T: "T\\ (\\mathrm{K})",
   ion: "\\mathrm{H^+} / \\mathrm{H_{tot}}",
+  species: "n_i\\ (\\mathrm{cm^{-3}})",
 };
+
+// d3's category10, fixed to a stable per-species assignment (see
+// plotableSpecies()/speciesColor() below) so a species keeps the same
+// color whether or not its neighbors are toggled on -- and so the
+// per-species toggle checkboxes can carry a matching swatch and double
+// as the chart's legend (Vega-Lite's own legend is turned off for that
+// chart to avoid drawing the same information twice).
+const SPECIES_COLORS = [
+  "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+  "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
+];
+
+// The species actually worth plotting as an abundance: everything except
+// `ge` (specific internal energy, not a density -- already has its own
+// Temperature chart). `de` (electron density) is included; it's exactly
+// as physical as any other species here.
+function plotableSpecies() {
+  return speciesNames.filter((n) => n !== "ge");
+}
+
+function speciesColor(name) {
+  const i = plotableSpecies().indexOf(name);
+  return SPECIES_COLORS[i % SPECIES_COLORS.length];
+}
 
 function renderLatex(elId, key) {
   const el = document.getElementById(elId);
@@ -134,7 +159,7 @@ function runConstantDensity(nH, T, fractions, logDtf, safetyFactor = 0.1, maxSte
   setIcs(nH, T, fractions);
   const dtfTotal = Math.pow(10, logDtf);
   let t = 0;
-  const tHist = [], THist = [], ionHist = [], h2Hist = [], dtHist = [];
+  const tHist = [], THist = [], ionHist = [], h2Hist = [], dtHist = [], sHist = [];
   for (let i = 0; i < maxSteps; i++) {
     const dt = Math.min(safetyFactor * coolingTime(dtfTotal), dtfTotal - t);
     if (dt <= 0) break;
@@ -143,17 +168,17 @@ function runConstantDensity(nH, T, fractions, logDtf, safetyFactor = 0.1, maxSte
     t += dt;
     const s = getScalar();
     tHist.push(t); THist.push(temperature()); ionHist.push(ionizedFraction(s)); h2Hist.push(h2Fraction(s));
-    dtHist.push(dt);
+    dtHist.push(dt); sHist.push(s);
     if (t >= dtfTotal) break;
   }
-  return { x: tHist, t: tHist, dt: dtHist, T: THist, ion: ionHist, h2: h2Hist, xKey: "time" };
+  return { x: tHist, t: tHist, dt: dtHist, T: THist, ion: ionHist, h2: h2Hist, s: sHist, xKey: "time" };
 }
 
 function runFreefall(nH, T, fractions, logNTarget, safetyFactor = 0.01, maxSteps = 5000) {
   setIcs(nH, T, fractions);
   const nTarget = Math.pow(10, logNTarget);
   let nCurrent = nH, t = 0;
-  const nHist = [], THist = [], ionHist = [], h2Hist = [], tHist = [], dtHist = [];
+  const nHist = [], THist = [], ionHist = [], h2Hist = [], tHist = [], dtHist = [], sHist = [];
   for (let i = 0; i < maxSteps; i++) {
     if (nCurrent >= nTarget) break;
     const rho = nCurrent * MH;
@@ -176,9 +201,9 @@ function runFreefall(nH, T, fractions, logNTarget, safetyFactor = 0.01, maxSteps
     nCurrent = 0;
     for (const name of speciesNames) if (name !== "ge" && name !== "de") nCurrent += s[name];
     nHist.push(nCurrent); THist.push(temperature()); ionHist.push(ionizedFraction(s)); h2Hist.push(h2Fraction(s));
-    tHist.push(t); dtHist.push(dt);
+    tHist.push(t); dtHist.push(dt); sHist.push(s);
   }
-  return { x: nHist, t: tHist, dt: dtHist, T: THist, ion: ionHist, h2: h2Hist, xKey: "density" };
+  return { x: nHist, t: tHist, dt: dtHist, T: THist, ion: ionHist, h2: h2Hist, s: sHist, xKey: "density" };
 }
 
 const FIELD_TITLE = { T: "T (K)", ion: "H⁺ / H_tot" };
@@ -228,11 +253,64 @@ function chartSpec(field, xKey, data, extra) {
   };
 }
 
+// A multi-series companion to chartSpec(): one line+points per selected
+// species (long-format `rows`, one row per (step, species) pair), color
+// keyed to the same fixed per-species palette the toggle checkboxes use.
+// This is the direct answer to "I can't get an impression of the full
+// range of values" -- T and the H+/H_tot ratio were the only things
+// plotted before; nothing showed the actual per-species number densities
+// or how many decades they span.
+function speciesChartSpec(xKey, rows) {
+  const n = rows.length;
+  const pointSize = Math.max(4, Math.min(30, 2000 / Math.max(n, 1)));
+  const domain = plotableSpecies();
+  return {
+    $schema: "https://vega.github.io/schema/vega-lite/v5.json",
+    width: 600, height: 240, background: null,
+    config: vlConfig(),
+    data: { values: rows },
+    mark: { type: "line", point: { filled: true, size: pointSize, opacity: 0.9 } },
+    encoding: {
+      x: {
+        field: "x", type: "quantitative", scale: { type: "log" },
+        axis: {
+          title: null, labelOverlap: "greedy",
+          labelAngle: xKey === "time" ? -40 : 0,
+          labelExpr: xKey === "time" ? TIME_LABEL_EXPR : undefined,
+        },
+      },
+      y: { field: "value", type: "quantitative", scale: { type: "log" }, axis: { title: null } },
+      color: {
+        field: "species", type: "nominal",
+        scale: { domain, range: domain.map((n) => speciesColor(n)) },
+        legend: null, // the toggle checkboxes (with matching swatches) are the legend
+      },
+      tooltip: [
+        { field: "species", title: "species", type: "nominal" },
+        { field: "i", title: "step", type: "quantitative" },
+        { field: "x", title: xKey === "time" ? "t (s)" : "n (cm⁻³)", type: "quantitative", format: ".3~g" },
+        { field: "tHuman", title: "t", type: "nominal" },
+        { field: "dt", title: "step Δt (s)", type: "quantitative", format: ".3~g" },
+        { field: "value", title: "n_i (cm⁻³)", type: "quantitative", format: ".4~g" },
+      ],
+    },
+  };
+}
+
 let redrawQueued = false;
 function scheduleRedraw() {
   if (redrawQueued) return;
   redrawQueued = true;
   requestAnimationFrame(() => { redrawQueued = false; redraw(); });
+}
+
+function selectedSpeciesNames() {
+  const out = [];
+  for (const name of plotableSpecies()) {
+    const el = document.getElementById("toggle-" + name);
+    if (el && el.checked) out.push(name);
+  }
+  return out;
 }
 
 function currentFractions() {
@@ -286,6 +364,25 @@ function redraw() {
   renderLatex("ylabel-ion", "ion");
   renderLatex("xlabel-ion", result.xKey);
 
+  const selectedSpecies = selectedSpeciesNames();
+  const chartSpeciesEl = document.getElementById("chart-species");
+  if (selectedSpecies.length) {
+    const speciesRows = [];
+    for (let i = 0; i < result.x.length; i++) {
+      const tHuman = formatTimeAuto(result.t[i]);
+      for (const name of selectedSpecies) {
+        const v = result.s[i][name];
+        if (v > 0) speciesRows.push({ x: result.x[i], i, dt: result.dt[i], tHuman, species: name, value: v });
+      }
+    }
+    chartSpeciesEl.innerHTML = "";
+    vegaEmbed(chartSpeciesEl, speciesChartSpec(result.xKey, speciesRows), { actions: false, renderer: "svg" });
+  } else {
+    chartSpeciesEl.innerHTML = '<p class="chart-placeholder">Toggle one or more species above to plot them.</p>';
+  }
+  renderLatex("ylabel-species", "species");
+  renderLatex("xlabel-species", result.xKey);
+
   const finalT = result.T[result.T.length - 1];
   const finalIon = result.ion[result.ion.length - 1];
   const finalH2 = result.h2[result.h2.length - 1];
@@ -323,6 +420,33 @@ function buildSpeciesSliders(config) {
   }
 }
 
+function buildSpeciesToggle() {
+  const container = document.getElementById("species-toggle");
+  container.innerHTML = "";
+
+  const controls = document.createElement("div");
+  controls.className = "species-toggle-controls";
+  controls.innerHTML = `<button type="button" id="species-all">all</button><button type="button" id="species-none">none</button>`;
+  container.appendChild(controls);
+
+  for (const name of plotableSpecies()) {
+    const label = document.createElement("label");
+    label.innerHTML = `<input type="checkbox" id="toggle-${name}" checked>`
+      + `<span class="swatch" style="background:${speciesColor(name)}"></span>${name}`;
+    container.appendChild(label);
+    label.querySelector("input").addEventListener("change", scheduleRedraw);
+  }
+
+  document.getElementById("species-all").addEventListener("click", () => {
+    for (const name of plotableSpecies()) document.getElementById("toggle-" + name).checked = true;
+    scheduleRedraw();
+  });
+  document.getElementById("species-none").addEventListener("click", () => {
+    for (const name of plotableSpecies()) document.getElementById("toggle-" + name).checked = false;
+    scheduleRedraw();
+  });
+}
+
 function initPage(config) {
   document.getElementById("page-title").textContent = config.title;
   document.getElementById("T").value = Math.log10(config.default_T);
@@ -352,6 +476,7 @@ function initPage(config) {
     speciesNames = namesFn().split(",");
     idx = Object.fromEntries(speciesNames.map((n, i) => [n, i]));
     buildSpeciesSliders(config);
+    buildSpeciesToggle();
     document.getElementById("status").textContent = "ready";
     redraw();
   });

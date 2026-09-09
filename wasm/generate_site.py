@@ -98,6 +98,15 @@ PAGE_TEMPLATE = """<!doctype html>
       </div>
       <div class="axis-x" id="xlabel-ion"></div>
     </div>
+    <div class="chart-box">
+      <div class="chart-title">Species abundance</div>
+      <div class="species-toggle" id="species-toggle"></div>
+      <div class="chart-row">
+        <div class="axis-y" id="ylabel-species"></div>
+        <div id="chart-species"></div>
+      </div>
+      <div class="axis-x" id="xlabel-species"></div>
+    </div>
   </div>
 </div>
 

@@ -1805,3 +1805,40 @@ steps) -- confirming the tooltip/dt/t plumbing didn't touch the actual
 solver path, (c) KaTeX genuinely rendered (not left as raw LaTeX source
 or a red KaTeX error span), and (d) the angled tick-label fix by
 rendering and reading back actual tick text from the DOM.
+
+**2026-09-09, same branch: a third "species abundance" chart.** Follow-up
+ask -- T and the H+/H_tot ratio were the only plotted quantities, so
+there was no way to see actual per-species number densities or how many
+decades they span ("I can't really get an impression of the full range
+of values"). Added:
+
+- A per-step full-species snapshot (`getScalar()`'s result) is now kept
+  alongside the existing T/ion/h2/dt/t histories in both
+  `runConstantDensity()`/`runFreefall()` (`sHist`), not just the couple
+  of derived scalars those already computed.
+- A row of species-toggle checkboxes (`buildSpeciesToggle()`), one per
+  species except `ge` (which already has its own Temperature chart) --
+  "all"/"none" buttons plus individual toggles, defaulting to all on so
+  the initial view is the full dynamic range across every tracked
+  species, per the ask.
+- A third chart (`speciesChartSpec()`), long-format (one row per
+  step x selected-species) multi-series line/point plot, log-scale y so
+  the ~20+ decade spread between trace and dominant species is legible
+  in one view.
+- Each species gets a fixed color (`SPECIES_COLORS`, d3's category10,
+  indexed by a stable position in `plotableSpecies()` so a species keeps
+  its color regardless of which others are toggled on) that the toggle
+  checkboxes carry as a swatch -- the checkboxes double as the chart's
+  legend, so Vega-Lite's own legend is turned off (`legend: null`) rather
+  than showing the same mapping twice.
+
+Verified the same way as the rest of this branch: real Emscripten build
+of all three fiducial networks, headless-browser pass (light + dark)
+confirming (a) checkboxes are built from the actual compiled solver's
+species list (not hardcoded), (b) toggling "none" shows a placeholder and
+"all" restores the full multi-series plot, (c) toggling one species off
+and back on doesn't disturb the others or throw, (d) zero console errors,
+(e) same physics numbers as ever. `hydrogen_minimal`'s `H_2` and `de`
+lines visibly coincide in the screenshot -- expected, not a bug: in a
+pure H/H+/e- network, charge neutrality makes electron density exactly
+equal to H+ density.

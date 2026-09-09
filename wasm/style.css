@@ -48,6 +48,22 @@ input[type=range] { width: 100%; }
    page theme instead so axis labels stay legible in dark mode too. */
 .katex { color: inherit; }
 #species-sliders { border-top: 1px solid var(--border); padding-top: 4px; margin-top: 4px; }
+.species-toggle { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; margin: 0 4px 8px; }
+.species-toggle label {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 0.78em; color: var(--fg);
+  padding: 1px 8px 1px 6px; border: 1px solid var(--border); border-radius: 10px;
+  cursor: pointer; user-select: none;
+}
+.species-toggle label:has(input:not(:checked)) { color: var(--muted); opacity: 0.6; }
+.species-toggle .swatch { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
+.species-toggle input[type=checkbox] { margin: 0; }
+.species-toggle-controls { display: flex; gap: 4px; margin-right: 2px; }
+.species-toggle-controls button {
+  font-size: 0.72em; padding: 2px 8px; border-radius: 10px; border: 1px solid var(--border);
+  background: var(--bg); color: var(--muted); cursor: pointer;
+}
+.chart-placeholder { color: var(--muted); font-size: 0.85em; padding: 16px 8px; margin: 0; }
 .nav { margin-bottom: 20px; }
 .nav a { margin-right: 12px; }
 ul.network-list { list-style: none; padding: 0; }
