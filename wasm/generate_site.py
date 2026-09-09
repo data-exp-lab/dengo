@@ -155,6 +155,39 @@ PAGE_TEMPLATE = """<!doctype html>
   </div>
 </div>
 
+<details class="sweep-section">
+  <summary>Parameter sweep -- compare several starting conditions at once</summary>
+  <p class="preset-note">Holds every other slider at its current setting,
+    runs the current mode (cool/free-fall) once per value below, and
+    overlays all of them -- e.g. several starting temperatures, to see
+    whether/when the gas "forgets" where it started. Not live -- a sweep
+    is several full runs, not one, so it only runs when asked.</p>
+  <div class="row sweep-controls">
+    <label>sweep over</label>
+    <select id="sweep-param"></select>
+    <button type="button" id="run-sweep" disabled>Run sweep</button>
+    <span id="sweep-status" class="preset-note"></span>
+  </div>
+  <div id="sweep-charts">
+    <div class="chart-box">
+      <div class="chart-title">Temperature (sweep)</div>
+      <div class="chart-row">
+        <div class="axis-y" id="ylabel-sweep-T"></div>
+        <div id="chart-sweep-T"></div>
+      </div>
+      <div class="axis-x" id="xlabel-sweep-T"></div>
+    </div>
+    <div class="chart-box">
+      <div class="chart-title">H<sub>2</sub> fraction (sweep)</div>
+      <div class="chart-row">
+        <div class="axis-y" id="ylabel-sweep-h2"></div>
+        <div id="chart-sweep-h2"></div>
+      </div>
+      <div class="axis-x" id="xlabel-sweep-h2"></div>
+    </div>
+  </div>
+</details>
+
 <script src="https://cdn.jsdelivr.net/npm/vega@5"></script>
 <script src="https://cdn.jsdelivr.net/npm/vega-lite@5"></script>
 <script src="https://cdn.jsdelivr.net/npm/vega-embed@6"></script>

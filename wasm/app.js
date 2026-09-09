@@ -28,6 +28,7 @@ const AXIS_LATEX = {
   species: "n_i\\ (\\mathrm{cm^{-3}})",
   massfrac: "X_i",
   ge: "\\varepsilon\\ (\\mathrm{erg\\ g^{-1}})",
+  h2frac: "\\mathrm{H_2} / \\mathrm{H_{tot}}",
 };
 
 // Ionized fraction is important, but so is molecular fraction -- both are
@@ -437,6 +438,52 @@ function speciesChartSpec(xKey, rows, valueTitle) {
   };
 }
 
+// One line per swept-parameter value (long-format `rows`, each already
+// carrying a human-readable `label` -- e.g. "T0=1.0e+03 K" -- as the
+// literal color/legend field). Ordinal, not nominal: an explicit
+// `domain` in ascending physical order plus a sequential color scheme
+// (viridis) reads as "low to high" at a glance, which a fixed set of
+// starting conditions warrants and species names (nominal, no natural
+// order) didn't. Point markers are small but not optional here (unlike
+// the single-run charts, where "where are the steps" is a bonus, not a
+// visibility requirement): a run whose adaptive stepper's very first
+// step already reaches the requested end time -- legitimate, e.g. a
+// starting temperature so far from equilibrium that coolingTime() is
+// negligible next to the whole run -- produces exactly one point, and a
+// line mark with nothing to connect draws *nothing at all*. Without a
+// point, that track would just silently vanish from the chart.
+function sweepChartSpec(field, xKey, rows, domainLabels) {
+  return {
+    $schema: "https://vega.github.io/schema/vega-lite/v5.json",
+    width: 600, height: 240, background: null,
+    config: vlConfig(),
+    data: { values: rows },
+    mark: { type: "line", point: { filled: true, size: 12, opacity: 0.9 } },
+    encoding: {
+      x: {
+        field: "x", type: "quantitative", scale: { type: "log" },
+        axis: {
+          title: null, labelOverlap: "greedy",
+          labelAngle: xKey === "time" ? -40 : 0,
+          labelExpr: xKey === "time" ? TIME_LABEL_EXPR : undefined,
+        },
+      },
+      y: { field: field, type: "quantitative", scale: { type: "log" }, axis: { title: null } },
+      color: {
+        field: "label", type: "ordinal",
+        scale: { domain: domainLabels, scheme: "viridis" },
+        legend: { title: null, symbolLimit: domainLabels.length },
+      },
+      tooltip: [
+        { field: "label", title: "run", type: "nominal" },
+        { field: "x", title: xKey === "time" ? "t (s)" : "n (cm⁻³)", type: "quantitative", format: ".3~g" },
+        { field: "tHuman", title: "t", type: "nominal" },
+        { field: field, title: field === "T" ? "T (K)" : "H2/H_tot", type: "quantitative", format: ".4~g" },
+      ],
+    },
+  };
+}
+
 let redrawQueued = false;
 function scheduleRedraw() {
   if (redrawQueued) return;
@@ -657,6 +704,125 @@ function applyPreset(key) {
   scheduleRedraw();
 }
 
+// Parameter sweep: hold every slider at its current setting except one,
+// run the current mode (cool/free-fall) once per sampled value of that
+// one, overlay all of them. `sliderId` is read/written directly (same
+// elements redraw() itself reads), so this generalizes to any slider
+// with no per-parameter special-casing beyond how to *sample* it:
+// mach's slider is linear-in-Mach itself, so log-spaced physical samples
+// need computing explicitly; every other sweepable slider already
+// stores log10(physical value), so plain linear interpolation of its
+// own min/max *is* log-spaced physical sampling, no transform needed.
+const SWEEP_N = 6;
+const SWEEP_PARAMS = {
+  T: { sliderId: "T", label: "T₀", toPhysical: (v) => Math.pow(10, v), unit: "K" },
+  nH: { sliderId: "nH", label: "n_H,0", toPhysical: (v) => Math.pow(10, v), unit: "cm⁻³" },
+  "sp-H2_1": { sliderId: "sp-H2_1", label: "H2 frac₀", toPhysical: (v) => Math.pow(10, v), unit: "" },
+  mach: { sliderId: "mach", label: "shock Mach", toPhysical: (v) => v, unit: "", linear: true },
+  nshock: { sliderId: "nshock", label: "shock n", toPhysical: (v) => Math.pow(10, v), unit: "cm⁻³" },
+};
+
+function sweepFormat(param, physical) {
+  const s = param.unit === "" ? physical.toPrecision(3) : physical.toExponential(2);
+  return `${param.label}=${s}${param.unit ? " " + param.unit : ""}`;
+}
+
+function sweepValues(paramKey, slider) {
+  const min = parseFloat(slider.min), max = parseFloat(slider.max);
+  if (SWEEP_PARAMS[paramKey].linear) {
+    // mach: sample log-spaced *physical* Mach numbers (the interesting
+    // no-effect -> partial -> saturated transition happens over the
+    // first factor of ~10, not spread evenly across 1-100), but the
+    // slider itself is linear, so this is the one case that needs its
+    // own log-space construction rather than reusing the slider's.
+    const lo = Math.log10(Math.max(min, 1)), hi = Math.log10(max);
+    return Array.from({ length: SWEEP_N }, (_, i) => Math.pow(10, lo + (hi - lo) * i / (SWEEP_N - 1)));
+  }
+  return Array.from({ length: SWEEP_N }, (_, i) => min + (max - min) * i / (SWEEP_N - 1));
+}
+
+function buildSweepParamOptions() {
+  const select = document.getElementById("sweep-param");
+  select.innerHTML = "";
+  for (const [key, param] of Object.entries(SWEEP_PARAMS)) {
+    if (!document.getElementById(param.sliderId)) continue; // e.g. no H2 species on this network
+    const opt = document.createElement("option");
+    opt.value = key;
+    opt.textContent = param.label + (param.unit ? ` (${param.unit})` : "");
+    select.appendChild(opt);
+  }
+}
+
+function runSweep() {
+  const button = document.getElementById("run-sweep");
+  const statusEl = document.getElementById("sweep-status");
+  button.disabled = true;
+  statusEl.textContent = "running sweep…";
+  // Yield one frame so the browser actually paints the line above before
+  // the (synchronous, possibly multi-second) sweep loop blocks the main
+  // thread -- without this, "running..." would never be visible.
+  requestAnimationFrame(() => setTimeout(runSweepBody, 0));
+}
+
+function runSweepBody() {
+  const button = document.getElementById("run-sweep");
+  const statusEl = document.getElementById("sweep-status");
+  const paramKey = document.getElementById("sweep-param").value;
+  const param = SWEEP_PARAMS[paramKey];
+  const slider = document.getElementById(param.sliderId);
+  const savedValue = slider.value;
+  const values = sweepValues(paramKey, slider);
+
+  const t0 = performance.now();
+  const tRows = [], h2Rows = [];
+  const domainLabels = [];
+  let xKey = "time";
+  for (const v of values) {
+    slider.value = v;
+    const nH = Math.pow(10, parseFloat(document.getElementById("nH").value));
+    const T = Math.pow(10, parseFloat(document.getElementById("T").value));
+    const fractions = currentFractions();
+    let result;
+    if (currentMode === "freefall") {
+      const logNTarget = parseFloat(document.getElementById("ntarget").value);
+      const logNShock = parseFloat(document.getElementById("nshock").value);
+      const machShock = parseFloat(document.getElementById("mach").value);
+      result = runFreefall(nH, T, fractions, logNTarget, logNShock, machShock);
+    } else {
+      const logDtf = parseFloat(document.getElementById("dtf").value);
+      result = runConstantDensity(nH, T, fractions, logDtf);
+    }
+    xKey = result.xKey;
+    const label = sweepFormat(param, param.toPhysical(v));
+    domainLabels.push(label);
+    for (let i = 0; i < result.x.length; i++) {
+      const base = { x: result.x[i], label, tHuman: formatTimeAuto(result.t[i]) };
+      tRows.push({ ...base, T: result.T[i] });
+      const h2v = result.h2[i];
+      if (h2v !== null && h2v !== undefined && h2v > 0) h2Rows.push({ ...base, h2: h2v });
+    }
+  }
+  slider.value = savedValue; // restore -- a sweep looks at other conditions, it doesn't change this one
+
+  vegaEmbed("#chart-sweep-T", sweepChartSpec("T", xKey, tRows, domainLabels), { actions: false, renderer: "svg" });
+  const chartH2El = document.getElementById("chart-sweep-h2");
+  if (h2Rows.length) {
+    chartH2El.innerHTML = "";
+    vegaEmbed(chartH2El, sweepChartSpec("h2", xKey, h2Rows, domainLabels), { actions: false, renderer: "svg" });
+  } else {
+    chartH2El.innerHTML = '<p class="chart-placeholder">This network has no H2 species.</p>';
+  }
+  renderLatex("ylabel-sweep-T", "T");
+  renderLatex("xlabel-sweep-T", xKey);
+  renderLatex("ylabel-sweep-h2", "h2frac");
+  renderLatex("xlabel-sweep-h2", xKey);
+
+  const elapsed = performance.now() - t0;
+  statusEl.textContent = `${values.length} runs, ${elapsed.toFixed(0)} ms`;
+  button.disabled = false;
+  redraw(); // the loop above left nH/T/etc.'s underlying wasm state at the last swept run's -- put the primary charts back to what the sliders actually show
+}
+
 function buildSpeciesSliders(config) {
   const container = document.getElementById("species-sliders");
   for (const name of speciesNames) {
@@ -727,6 +893,7 @@ function initPage(config) {
   document.getElementById("T-mode-T").addEventListener("click", () => setTemperatureDisplayMode("T"));
   document.getElementById("T-mode-ge").addEventListener("click", () => setTemperatureDisplayMode("ge"));
   document.getElementById("ic-preset").addEventListener("change", (e) => applyPreset(e.target.value));
+  document.getElementById("run-sweep").addEventListener("click", runSweep);
   for (const id of ["nH", "T", "dtf", "ntarget", "nshock", "mach"]) {
     document.getElementById(id).addEventListener("input", scheduleRedraw);
   }
@@ -751,7 +918,9 @@ function initPage(config) {
     idx = Object.fromEntries(speciesNames.map((n, i) => [n, i]));
     buildSpeciesSliders(config);
     buildSpeciesToggle();
+    buildSweepParamOptions();
     document.getElementById("ic-preset").disabled = false;
+    document.getElementById("run-sweep").disabled = false;
     document.getElementById("status").textContent = "ready";
     redraw();
   });

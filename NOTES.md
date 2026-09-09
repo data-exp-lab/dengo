@@ -2243,3 +2243,73 @@ caught by comparing file mtimes against the edit timestamp rather than
 trusting `ls`/exit codes alone; worth remembering that `generate_site.py`
 must actually be re-invoked (and its exit code/output checked) after
 every source change, not just checked for output *existing*.
+
+**2026-09-09, new branch `wasm-parameter-sweep`: overlay several full
+runs at once, to compare starting conditions.** Discussed as a
+speculative "what if" first (not logged, per the same "we're going to
+speculate" pause as the shock-heating discussion) -- landed on comparing
+several *starting conditions* (the user's own motivating case: several
+initial temperatures, "to see differential evolution from initial
+conditions" -- does the gas forget where it started, or remember it)
+rather than my own first suggestion (sweeping the new shock Mach
+number), with lines-overlay recommended over a heatmap (a heatmap needs
+every track resampled onto a shared x-grid our adaptive, run-length-
+varying steppers don't naturally produce, and is better suited to a true
+2-parameter sweep anyway).
+
+**Design**: a new, collapsed-by-default `<details>` section below the
+existing three charts (`.sweep-section` in `generate_site.py`) -- holds
+every slider at its current value except one, samples `SWEEP_N=6` values
+of that one across its existing range, runs the current mode
+(cool/free-fall) once per value, overlays all of them on two new charts
+(Temperature, H2 fraction). Deliberately *not* live: a sweep is several
+full runs, not one (up to ~800ms for 6 free-fall runs to 10²⁰ in testing
+-- see below), so it's a "Run sweep" button, not another slider.
+Sweepable parameters (`SWEEP_PARAMS`): T₀, n_H,0, initial H2_1 fraction
+(only offered when the current network actually has that species),
+shock Mach, shock density -- adding a parameter to the picker means
+adding one entry to this table, no other code changes, since the sweep
+loop reads/writes whatever slider element the config points at exactly
+the way `redraw()` itself does. Sampling is log-spaced physical values
+for every log-scale slider (T, nH, H2 fraction, shock density already
+*store* log10(value), so linear interpolation of their own min/max
+already *is* log-spaced sampling) except Mach, whose slider is linear-
+in-Mach -- that one needs an explicit log-space construction, so the
+interesting no-effect-to-saturated transition (see the shock-heating
+entry above) gets more than one sample point instead of being spread
+evenly across 1-100.
+
+Colors: an *ordinal* (not nominal) scale with an explicit ascending-value
+domain and Vega-Lite's `viridis` scheme -- unlike species names, a swept
+parameter has a natural order, and a sequential palette shows "low to
+high" at a glance the way the species chart's arbitrary categorical
+palette shouldn't/doesn't need to.
+
+**Bug caught by looking at the actual per-track data, not just eyeballing
+the chart**: the first version had no point markers (species-chart-style
+reasoning: "steps are already shown on the single-run charts, this is
+about comparing shapes"), and several tracks in the default T-sweep
+(T₀=10K, 55K, 302K) rendered as *nothing at all* -- not a thin line, no
+data. Checked directly (calling `runConstantDensity()` for those exact
+values outside the UI) rather than assuming a rendering bug: each
+produces exactly **one** point. `coolingTime()`-based adaptive stepping
+legitimately jumps straight to the requested end time in a single step
+when the starting temperature is far enough from equilibrium that the
+estimated cooling/heating timescale dwarfs the whole run -- a correct,
+converged answer, just not a multi-point curve. A line mark with one
+point draws nothing, so that track silently vanished. Fixed by adding
+small point markers back (unlike the single-run charts, where they're a
+bonus annotation, here they're load-bearing: without one, a legitimately-
+one-point track has no visual representation at all).
+
+Verified: real Emscripten build of all three fiducial networks,
+headless-browser pass (light + dark) confirming (a) the sweep-parameter
+list correctly omits H2 fraction on the two H2-less networks, (b) every
+slider's value (and the main charts' displayed state) is correctly
+restored to its pre-sweep setting afterward -- confirmed by comparing
+full status-line text before/after (identical aside from the timing
+substring, i.e. bit-for-bit same physics), not just spot-checking one
+field, (c) legend entries render in ascending physical-value order, (d)
+the single-point-track visibility fix (screenshot-verified: those tracks
+now show as small dots), (e) zero console errors across all three
+networks/both themes/both modes, (f) full `pytest` suite (86/86) passes.
