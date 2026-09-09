@@ -33,3 +33,8 @@ examples/_*/
 .grackle/
 .grackle_compare/.venv/
 .grackle_compare/*.json
+.grackle_compare/_dengo_build/
+.grackle_compare/__pycache__/
+.grackle_compare/c_bench/_link/
+.grackle_compare/c_bench/grackle_bench
+.grackle_compare/c_bench/dengo_bench

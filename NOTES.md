@@ -1167,3 +1167,91 @@ tolerance-equivalent controls, and `max_iterations` is the only
 Grackle-side solver-tuning parameter actually honored (mapped to
 `niter`). Not a correctness issue, but a caller relying on Grackle's
 other iteration-control parameters won't find them respected.
+
+**2026-09-09, continued: user correctly pushed back on comparing any
+Python code at all -- "the thing we care about is what gets called by
+the HPC code."** Right: a real simulation calling dengo or Grackle
+never touches Python at runtime -- it links the compiled library and
+calls its C API directly. Built `.grackle_compare/c_bench/`: two
+standalone benchmarks with *no Python or Cython anywhere in the timed
+path*, on either side.
+
+- `grackle_bench.c`: adapted directly from Grackle's own reference
+  example (`.grackle/src/example/c_local_example.c`) -- calls
+  `local_initialize_chemistry_data()`/`local_solve_chemistry()` from
+  `<grackle.h>`, the exact entry points a real HPC code (Enzo, etc.)
+  uses. Linked directly against the prebuilt `libgrackle-3.4.1.so`
+  bundled in the gracklepy wheel already used throughout this
+  investigation (a `libgrackle.so` symlink, since `-lgrackle` needs the
+  unversioned name; the wheel only ships the versioned SONAME). Needed
+  one missing generated header, `grackle_float.h` (normally emitted by
+  Grackle's own build system from `grackle_float.h.in`, absent from a
+  bare source checkout) -- created by hand, `#define GRACKLE_FLOAT_8`,
+  confirmed correct by checking gracklepy's own Cython wrapper assumes
+  `gr_float` == `double` (`fluid_container.py`'s default `dtype=
+  "float64"`, `grackle_wrapper.pyx`'s `gr_float[::1] view = arr` cast).
+- `dengo_bench.cpp`: calls `primordial_setup_data()`/`BE_chem_solve()`
+  directly, compiled straight against the already-generated
+  `primordial_solver.C`/`BE_chem_solve.C` in `.grackle_compare/
+  _dengo_build/` -- no `.pyx`, no Cython, no `setuptools` build step at
+  all. The adaptive-dt loop is a line-for-line C++ translation of
+  `_advance()` in `cython_solver_run.pyx.template`.
+- `run_sweep.sh`: builds both and runs the same grid-size sweep as
+  yesterday's Python-level benchmark (dims = 1, 100, 2048, 100000),
+  same synthetic state (n=1e13 cm^-3, T=1500K, 10% molecular) and same
+  dt (1e-3 of the local free-fall time) as `benchmark_amortized.py`
+  used (kept for reference, superseded by this as the number that
+  actually matters).
+
+**Result, at the C level, no Python anywhere:**
+
+| dims    | dengo (us/cell) | grackle (us/cell) | ratio |
+|---------|------------------|--------------------|-------|
+| 1       | 588.2            | 110.6              | 5.3x  |
+| 100     | 322.3            | 45.9               | 7.0x  |
+| 2048    | 307.6            | 47.9               | 6.4x  |
+| 100000  | 110.1            | 66.3               | 1.7x  |
+
+These essentially match yesterday's Python-level numbers at every
+scale (e.g. dims=100000: 110.1 vs. yesterday's 101.1 us/cell for dengo,
+66.3 vs. 64.2 for grackle) -- confirming the Python/Cython layer's own
+overhead was *already* negligible for the calling conventions used
+(`Solver.step_inplace()`/`solver.state`, `FluidContainer.
+solve_chemistry()`), at every grid size tested, not just at scale. That
+also means `dengo.grackle_compat`'s own overhead (measured yesterday at
+~2x native dengo, from its Python-level unit-conversion `_push()`/
+`_pull()`) is real but *irrelevant to this question* -- no real HPC/AMR
+code embeds dengo through that shim's Python layer in a performance-
+critical inner loop; it exists for Python-level drop-in convenience
+(an analysis script, a Python-driven test), not for compiled
+simulation coupling, which is exactly why this second benchmark
+bypasses it entirely.
+
+**One-time setup, corrected**: yesterday's ~20s "one-time cost" for
+dengo was codegen + compilation -- a *build-time* cost in any real
+deployment (you compile the generated C++ into your simulation once,
+same as Grackle's own Fortran/C is already compiled into
+`libgrackle.so` once), not something paid at every simulation launch.
+The actual per-run cost -- reading the rate tables into memory once at
+startup -- is small for both and, notably, *smaller for dengo*:
+`primordial_setup_data()`'s flat-binary `fread()` takes 0.5-3ms;
+Grackle's `local_initialize_chemistry_data()` (parsing the Cloudy HDF5
+file) takes ~33ms, consistently, regardless of grid size.
+
+Per-cell cost still drops sharply with grid size for dengo (588 -> 111
+us/cell, OpenMP crossing DENGO_OMP_MIN_CELLS=2048) while Grackle (this
+wheel has no OpenMP compiled in -- confirmed via `ldd`/`nm -D` on
+`libgrackle-3.4.1.so`, no `libgomp`/`omp_get_*` symbols at all) stays
+roughly flat -- consistent with yesterday's explicit OMP_NUM_THREADS
+scaling check (1/4/24 threads: 526/192/118 us/cell, ~4.5x speedup on
+24x the cores, i.e. ~19% parallel efficiency). That scaling quality,
+not marshaling or setup cost, is the real remaining lever if closing
+the gap further at grid scale is wanted -- not attempted here.
+
+Caveats: single synthetic uniform-composition state at one density/
+temperature, not a validation across the full ~15-decade range this
+project otherwise targets; this specific prebuilt Grackle wheel has no
+OpenMP, a source build configured with `--enable-openmp` could behave
+differently at scale; dengo's `DENGO_OMP_MIN_CELLS=2048` threshold
+means grid patches smaller than that see none of the scaling benefit
+visible in the table above.

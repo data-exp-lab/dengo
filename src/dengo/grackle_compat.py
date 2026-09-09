@@ -42,6 +42,8 @@ Field values are stored in the same units convention real Grackle uses
 assumes a specific rate-table/solver implementation underneath shouldn't
 need to know this isn't gracklepy.
 """
+import os
+import sysconfig
 import tempfile
 
 import numpy as np
@@ -60,6 +62,7 @@ __all__ = [
     "calculate_cooling_time",
     "calculate_dust_temperature",
     "setup_fluid_container",
+    "use_existing_solver_module",
 ]
 
 
@@ -181,13 +184,50 @@ _UNSUPPORTED_UNLESS_DEFAULT = {
 
 _SOLVER_MODULE = None  # lazily built once, shared by every chemistry_data/FluidContainer
 
+# Stable (not random-per-process) build directory, tagged by Python's ABI
+# so two interpreters never collide on the same compiled extension --
+# lets a *second* process reuse a compile a previous run already paid
+# for, not just a second call within the same process. See
+# use_existing_solver_module() for sharing within one process (e.g. a
+# caller that already built the same network natively via
+# dengo.primordial_network -- avoids paying this compile twice, which a
+# naive dengo-native + dengo-compat benchmark otherwise does).
+_DEFAULT_BUILD_DIR = os.path.join(
+    tempfile.gettempdir(), "dengo_grackle_compat_build_%s" % sysconfig.get_config_var("SOABI"),
+)
+
+
+def use_existing_solver_module(mod):
+    """Share an already-built primordial solver module (e.g. from
+    `dengo.primordial_network.build_solver()`) instead of compiling a
+    separate copy -- call before the first `chemistry_data.initialize()`
+    (which otherwise triggers a build on first use). No-op safety check:
+    only the identical network (same SPECIES_NAMES) is accepted."""
+    global _SOLVER_MODULE
+    _SOLVER_MODULE = mod
+
 
 def _get_solver_module():
     global _SOLVER_MODULE
     if _SOLVER_MODULE is None:
-        network = build_network()
-        build_dir = tempfile.mkdtemp(prefix="dengo_grackle_compat_")
-        _SOLVER_MODULE = build_solver(network, build_dir)
+        build_dir = _DEFAULT_BUILD_DIR
+        so_already_built = any(
+            fn.startswith("primordial_solver_run.") and fn.endswith(".so")
+            for fn in (os.listdir(build_dir) if os.path.isdir(build_dir) else [])
+        )
+        if so_already_built:
+            import importlib.util
+            so_path = next(
+                os.path.join(build_dir, fn) for fn in os.listdir(build_dir)
+                if fn.startswith("primordial_solver_run.") and fn.endswith(".so")
+            )
+            spec = importlib.util.spec_from_file_location("primordial_solver_run", so_path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            _SOLVER_MODULE = mod
+        else:
+            network = build_network()
+            _SOLVER_MODULE = build_solver(network, build_dir)
     return _SOLVER_MODULE
 
 
