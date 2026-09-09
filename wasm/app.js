@@ -180,16 +180,63 @@ function thermodynamicGamma(s) {
   return nTotal / invGm1Sum + 1;
 }
 
+// Inverts the solver's own (black-box) ge -> T conversion for whatever
+// composition is *currently* in the state buffer, by bisecting on ge
+// until temperature() reports targetT -- rather than re-deriving or
+// guessing the solver's actual mean-molecular-weight/gamma(T) convention
+// in JS (risking a subtly wrong duplicate of logic we don't want to
+// maintain twice). ge -> T is monotonic (more thermal energy per unit
+// mass means higher temperature, for any fixed composition) even though
+// it isn't simply linear -- gamma itself varies with T for H2-bearing
+// gas (rovibrational degrees of freedom activating), which is exactly
+// why a closed-form inversion isn't a one-liner and bisection is the
+// pragmatic choice here. temperature()'s cache is left correctly
+// reflecting the returned ge (the last bisection step already wrote and
+// evaluated it), so callers don't need a separate refresh after this.
+function geForTemperature(targetT, tolerance = 1e-8, maxIter = 50) {
+  const ptr = statePtr() >> 3;
+  const geIdx = idx.ge;
+
+  function TAtGe(ge) {
+    mod.HEAPF64[ptr + geIdx] = ge;
+    rhsPtr(); // runs calculate_rhs, which refreshes the cached T-from-ge conversion as a side effect
+    return temperature();
+  }
+
+  // Bracket around the naive monatomic-hydrogen estimate, wide enough
+  // (2 decades either side) to comfortably contain the true root for
+  // any of these networks' actual mu (up to ~4x, pure He) and gamma
+  // (5/3 down to 7/5) range -- widened further below if that guess
+  // somehow isn't enough.
+  let lo = 0.01 * 1.5 * KB * targetT / MH;
+  let hi = 100 * 1.5 * KB * targetT / MH;
+  let TLo = TAtGe(lo), THi = TAtGe(hi);
+  for (let guard = 0; TLo > targetT && guard < 20; guard++) { lo *= 0.1; TLo = TAtGe(lo); }
+  for (let guard = 0; THi < targetT && guard < 20; guard++) { hi *= 10; THi = TAtGe(hi); }
+
+  let mid = 0.5 * (lo + hi);
+  for (let i = 0; i < maxIter; i++) {
+    mid = 0.5 * (lo + hi);
+    const Tmid = TAtGe(mid);
+    if (Math.abs(Tmid - targetT) < tolerance * targetT) break;
+    if (Tmid < targetT) lo = mid; else hi = mid;
+  }
+  return mid;
+}
+
 function setIcs(nH, T, fractions) {
   const ptr = statePtr() >> 3;
+  // ge depends on every other species (mean molecular weight, and for
+  // H2-bearing gas, temperature-dependent gamma too) -- set everything
+  // else first, then invert for the ge that actually gives T at *this*
+  // composition, rather than assuming pure monatomic hydrogen the way a
+  // direct ge = 1.5*k*T/m_H formula would.
   for (const name of speciesNames) {
-    if (name === "ge") {
-      mod.HEAPF64[ptr + idx.ge] = 1.5 * KB * T / MH;
-    } else {
-      const frac = fractions[name] !== undefined ? fractions[name] : 0.0;
-      mod.HEAPF64[ptr + idx[name]] = nH * frac;
-    }
+    if (name === "ge") continue;
+    const frac = fractions[name] !== undefined ? fractions[name] : 0.0;
+    mod.HEAPF64[ptr + idx[name]] = nH * frac;
   }
+  geForTemperature(T);
 }
 
 function coolingTime(dtfTotal) {

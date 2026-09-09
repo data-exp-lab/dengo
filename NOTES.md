@@ -2434,3 +2434,50 @@ of six was visible), (d) the initial-condition point now appears
 correctly on every chart, at the correct value once the cache-refresh
 fix landed, (e) zero console errors across all three networks/both
 themes, (f) full `pytest` suite (86/86) passes.
+
+**2026-09-09, new branch `wasm-invert-ge-from-temperature`: fixed the
+mean-molecular-weight bug flagged in the previous entry, per the user's
+own proposed approach.** Asked to gauge whether inverting the solver's
+own T-from-ge conversion needed a proper symbolic derivation (sympy
+producing a real f(T) -> ge for the actual state vector) versus
+something cheaper; user's own suggestion -- "a reasonably fast binary
+search to invert it... I don't know that we need to invert the
+equation" -- is exactly what got built, and for exactly the reason it's
+the right call here: `ge -> T` is monotonic (more thermal energy per
+unit mass means higher temperature, for any fixed composition) but not
+simply linear -- gamma itself varies with T for H2-bearing gas
+(rovibrational degrees of freedom activating), so a closed-form
+inversion isn't a one-liner, and re-deriving/guessing the solver's own
+mu/gamma(T) convention in JS risked exactly the "subtly wrong duplicate
+logic" concern raised when this bug was first flagged. Bisection
+sidesteps that entirely: it never needs to know the formula, only to
+evaluate it (already possible via `rhsPtr()` + `temperature()`).
+
+`geForTemperature(targetT)` (`app.js`) brackets around the old naive
+monatomic estimate (2 decades either side -- generous enough for these
+networks' actual mu range, up to ~4x for pure He, and gamma 5/3 down to
+7/5), widens further if that guess isn't enough (guarded, capped at 20
+expansions), then bisects (50 iterations, 1e-8 relative tolerance) by
+writing a candidate `ge` directly into the state buffer, calling
+`rhsPtr()` (runs `calculate_rhs`, refreshing the cached T-from-ge
+conversion as a side effect -- already relied on for the previous
+entry's cache-refresh fix), and reading `temperature()`. `setIcs()` now
+sets every other species first (needed for the composition the
+bisection evaluates against), then calls this instead of the old
+`ge = 1.5*KB*T/MH` one-liner.
+
+Verified: for the exact composition that read 1220K for a requested
+1000K before this fix (`primordial`'s default IC), initial T across
+10-50,000K now matches the requested value to ~1e-7% (bisection
+tolerance, effectively exact) -- down from the prior 22% miss. Real
+Emscripten build of all three fiducial networks, headless-browser pass
+(light + dark) across cool/free-fall modes, an IC preset, and a
+parameter sweep: zero console errors, full `pytest` suite (86/86)
+passes. Downstream "final T" values across the widget have shifted from
+every prior NOTES.md entry's reference numbers (e.g. primordial's
+default cool-mode run now ends at 273.4K, not the old 250.3K) --
+expected and correct, not a regression: the actual initial conditions
+were wrong before, so anything evolved from them legitimately changes
+once they're fixed. Any future entry citing a specific "final T"-style
+number should be re-verified against the current build, not assumed to
+still match an older entry in this file.
