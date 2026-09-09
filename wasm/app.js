@@ -13,6 +13,8 @@ const YEAR = 3.1557e7; // Julian year, seconds -- matches primordial_cooling.py'
 let mod, idx, speciesNames;
 let init, step, statePtr, rhsPtr, temperature;
 let currentMode = "cool";
+let speciesDisplayMode = "density"; // "density" (cm^-3) or "massfrac" (X_i, dimensionless)
+let temperatureDisplayMode = "T"; // "T" (K) or "ge" (specific internal energy, erg/g)
 
 // -- LaTeX axis labels (rendered via KaTeX, not Vega-Lite's own plain-text
 // titles -- see NOTES.md for why: Vega-Lite axis titles are just SVG
@@ -24,6 +26,8 @@ const AXIS_LATEX = {
   T: "T\\ (\\mathrm{K})",
   ion: "\\mathrm{H^+} / \\mathrm{H_{tot}}",
   species: "n_i\\ (\\mathrm{cm^{-3}})",
+  massfrac: "X_i",
+  ge: "\\varepsilon\\ (\\mathrm{erg\\ g^{-1}})",
 };
 
 // d3's category10, fixed to a stable per-species assignment (see
@@ -48,6 +52,33 @@ function plotableSpecies() {
 function speciesColor(name) {
   const i = plotableSpecies().indexOf(name);
   return SPECIES_COLORS[i % SPECIES_COLORS.length];
+}
+
+// Atomic/molecular mass, in amu, keyed by the base element symbol every
+// dengo species name starts with (the part before the first "_" --
+// "H2_1" -> "H2", "He_3" -> "He", "H_m0" -> "H"; "de" has no underscore
+// at all and is its own base). Covers every species the three fiducial
+// networks generate; an unrecognized base (some future network) just
+// can't be shown in mass-fraction mode -- see speciesMassAmu()/redraw().
+const SPECIES_MASS_AMU = { H: 1.00794, He: 4.002602, H2: 2.01588, de: 5.485799e-4 };
+
+function speciesMassAmu(name) {
+  return SPECIES_MASS_AMU[name.split("_")[0]];
+}
+
+// Total mass (amu * cm^-3, i.e. missing only the shared amu-to-gram
+// factor that cancels out of any mass *fraction*) summed over every
+// species with a known mass -- the denominator for mass-fraction mode.
+// Electrons are included for self-consistency with whatever's actually
+// tracked, though their mass contribution is of course negligible.
+function totalMassAmu(s) {
+  let total = 0;
+  for (const name of speciesNames) {
+    if (name === "ge") continue;
+    const m = speciesMassAmu(name);
+    if (m) total += s[name] * m;
+  }
+  return total;
 }
 
 function renderLatex(elId, key) {
@@ -206,9 +237,9 @@ function runFreefall(nH, T, fractions, logNTarget, safetyFactor = 0.01, maxSteps
   return { x: nHist, t: tHist, dt: dtHist, T: THist, ion: ionHist, h2: h2Hist, s: sHist, xKey: "density" };
 }
 
-const FIELD_TITLE = { T: "T (K)", ion: "H⁺ / H_tot" };
+const FIELD_TITLE = { T: "T (K)", ion: "H⁺ / H_tot", ge: "ε (erg/g)" };
 
-function chartSpec(field, xKey, data, extra) {
+function chartSpec(field, xKey, data, extra, extraTooltip) {
   // Point markers double as an annotation of *where* the adaptive
   // stepper actually placed a step -- their spacing on the log x-axis
   // directly shows the step-size ramp (small at first, growing ~2x per
@@ -246,6 +277,7 @@ function chartSpec(field, xKey, data, extra) {
             { field: "tHuman", title: "t", type: "nominal" },
             { field: "dt", title: "step Δt (s)", type: "quantitative", format: ".3~g" },
             { field: field, title: FIELD_TITLE[field] || field, type: "quantitative", format: ".4~g" },
+            ...(extraTooltip || []),
           ],
         },
       },
@@ -260,7 +292,7 @@ function chartSpec(field, xKey, data, extra) {
 // range of values" -- T and the H+/H_tot ratio were the only things
 // plotted before; nothing showed the actual per-species number densities
 // or how many decades they span.
-function speciesChartSpec(xKey, rows) {
+function speciesChartSpec(xKey, rows, valueTitle) {
   const n = rows.length;
   const pointSize = Math.max(4, Math.min(30, 2000 / Math.max(n, 1)));
   const domain = plotableSpecies();
@@ -291,7 +323,7 @@ function speciesChartSpec(xKey, rows) {
         { field: "x", title: xKey === "time" ? "t (s)" : "n (cm⁻³)", type: "quantitative", format: ".3~g" },
         { field: "tHuman", title: "t", type: "nominal" },
         { field: "dt", title: "step Δt (s)", type: "quantitative", format: ".3~g" },
-        { field: "value", title: "n_i (cm⁻³)", type: "quantitative", format: ".4~g" },
+        { field: "value", title: valueTitle, type: "quantitative", format: ".4~g" },
       ],
     },
   };
@@ -346,41 +378,60 @@ function redraw() {
   }
   const elapsed = performance.now() - t0;
 
+  // gamma (thermodynamicGamma) is exposed on every point's tooltip
+  // regardless of which of T/ge is plotted -- it's the thing that
+  // connects them (T = (gamma-1) * ge * mu / k_B), and it moves on its
+  // own as composition shifts (e.g. H2 formation dropping gamma from
+  // 5/3 toward 7/5), so this is the direct way to "see the impact of
+  // gamma": pick thermal energy mode (ge is what the solver actually
+  // conserves/evolves) and watch gamma in the tooltip while T bends.
   const rows = result.x.map((x, i) => ({
-    x, T: result.T[i], ion: result.ion[i],
+    x, T: result.T[i], ge: result.s[i].ge, ion: result.ion[i],
+    gamma: thermodynamicGamma(result.s[i]),
     i, dt: result.dt[i], tHuman: formatTimeAuto(result.t[i]),
   }));
+  const gammaTooltip = [{ field: "gamma", title: "gamma", type: "quantitative", format: ".4f" }];
   const band = {
     data: { values: [{ y0: 1500, y1: 2500 }] },
     mark: { type: "rect", opacity: isDarkMode() ? 0.25 : 0.15, color: "orange" },
     encoding: { y: { field: "y0", type: "quantitative" }, y2: { field: "y1" } },
   };
-  vegaEmbed("#chart-T", chartSpec("T", result.xKey, rows, [band]),
+  const tempField = temperatureDisplayMode === "ge" ? "ge" : "T";
+  vegaEmbed("#chart-T", chartSpec(tempField, result.xKey, rows, tempField === "T" ? [band] : [], gammaTooltip),
             { actions: false, renderer: "svg" });
   vegaEmbed("#chart-ion", chartSpec("ion", result.xKey, rows),
             { actions: false, renderer: "svg" });
-  renderLatex("ylabel-T", "T");
+  renderLatex("ylabel-T", tempField);
   renderLatex("xlabel-T", result.xKey);
   renderLatex("ylabel-ion", "ion");
   renderLatex("xlabel-ion", result.xKey);
 
-  const selectedSpecies = selectedSpeciesNames();
+  const massFracMode = speciesDisplayMode === "massfrac";
+  const selectedSpecies = massFracMode
+    ? selectedSpeciesNames().filter((name) => speciesMassAmu(name) !== undefined)
+    : selectedSpeciesNames();
   const chartSpeciesEl = document.getElementById("chart-species");
   if (selectedSpecies.length) {
     const speciesRows = [];
     for (let i = 0; i < result.x.length; i++) {
       const tHuman = formatTimeAuto(result.t[i]);
+      const denom = massFracMode ? totalMassAmu(result.s[i]) : 1;
       for (const name of selectedSpecies) {
-        const v = result.s[i][name];
+        let v = result.s[i][name];
+        if (massFracMode) v = (v * speciesMassAmu(name)) / denom;
         if (v > 0) speciesRows.push({ x: result.x[i], i, dt: result.dt[i], tHuman, species: name, value: v });
       }
     }
     chartSpeciesEl.innerHTML = "";
-    vegaEmbed(chartSpeciesEl, speciesChartSpec(result.xKey, speciesRows), { actions: false, renderer: "svg" });
+    const valueTitle = massFracMode ? "X_i (mass frac.)" : "n_i (cm⁻³)";
+    vegaEmbed(chartSpeciesEl, speciesChartSpec(result.xKey, speciesRows, valueTitle), { actions: false, renderer: "svg" });
+  } else if (massFracMode) {
+    chartSpeciesEl.innerHTML = '<p class="chart-placeholder">No selected species has a known mass -- '
+      + 'toggle one on, or switch back to number density.</p>';
   } else {
     chartSpeciesEl.innerHTML = '<p class="chart-placeholder">Toggle one or more species above to plot them.</p>';
   }
-  renderLatex("ylabel-species", "species");
+  renderLatex("ylabel-species", massFracMode ? "massfrac" : "species");
   renderLatex("xlabel-species", result.xKey);
 
   const finalT = result.T[result.T.length - 1];
@@ -420,6 +471,21 @@ function buildSpeciesSliders(config) {
   }
 }
 
+function setTemperatureDisplayMode(mode) {
+  temperatureDisplayMode = mode;
+  document.getElementById("T-mode-T").classList.toggle("active", mode === "T");
+  document.getElementById("T-mode-ge").classList.toggle("active", mode === "ge");
+  document.getElementById("chart-T-title").textContent = mode === "ge" ? "Thermal energy" : "Temperature";
+  scheduleRedraw();
+}
+
+function setSpeciesDisplayMode(mode) {
+  speciesDisplayMode = mode;
+  document.getElementById("species-mode-density").classList.toggle("active", mode === "density");
+  document.getElementById("species-mode-massfrac").classList.toggle("active", mode === "massfrac");
+  scheduleRedraw();
+}
+
 function buildSpeciesToggle() {
   const container = document.getElementById("species-toggle");
   container.innerHTML = "";
@@ -453,6 +519,10 @@ function initPage(config) {
 
   document.getElementById("mode-cool").addEventListener("click", () => setMode("cool"));
   document.getElementById("mode-freefall").addEventListener("click", () => setMode("freefall"));
+  document.getElementById("species-mode-density").addEventListener("click", () => setSpeciesDisplayMode("density"));
+  document.getElementById("species-mode-massfrac").addEventListener("click", () => setSpeciesDisplayMode("massfrac"));
+  document.getElementById("T-mode-T").addEventListener("click", () => setTemperatureDisplayMode("T"));
+  document.getElementById("T-mode-ge").addEventListener("click", () => setTemperatureDisplayMode("ge"));
   for (const id of ["nH", "T", "dtf", "ntarget"]) {
     document.getElementById(id).addEventListener("input", scheduleRedraw);
   }

@@ -1842,3 +1842,49 @@ and back on doesn't disturb the others or throw, (d) zero console errors,
 lines visibly coincide in the screenshot -- expected, not a bug: in a
 pure H/H+/e- network, charge neutrality makes electron density exactly
 equal to H+ density.
+
+**2026-09-09, same branch: mass fraction toggle + temperature/thermal
+energy toggle, both with gamma exposed.** Two more asks about the same
+widget:
+
+- **Species abundance: number density vs. mass fraction.** Added a
+  `SPECIES_MASS_AMU` table (H=1.00794, He=4.002602, H2=2.01588,
+  de=5.485799e-4) keyed by each species name's base element symbol (the
+  part before the first `_` -- `H2_1` -> `H2`, `He_3` -> `He`, `de` has
+  no underscore and is its own base; this parses cleanly for every
+  species the three fiducial networks produce). `X_i = n_i m_i / sum_j
+  n_j m_j`, denominator recomputed per step over every species with a
+  known mass (electrons included, for self-consistency, though
+  negligible). A species with no recognized mass (a hypothetical future
+  network) is silently excluded from mass-fraction mode rather than
+  breaking it. **Verified the definition, not just the code path**: summed
+  every plotable species' mass fraction at a fixed state across all three
+  networks and got 1.0 (to float precision) in every case.
+- **Temperature vs. thermal energy, with gamma drawn out.** Added a
+  second toggle switching the first chart's y-field between `T` (K) and
+  `ge`, the specific internal energy (erg/g) the solver actually
+  evolves -- `T` is a *derived* quantity via `T = (gamma-1) ge mu / k_B`,
+  so this is the direct way to see gamma's effect: `ge` alone doesn't
+  show composition changes bending the T trajectory (e.g. gamma easing
+  from 5/3 toward 7/5 as H2 forms), because ge's own trajectory doesn't
+  encode that ratio. To make gamma itself visible rather than just
+  implied, `thermodynamicGamma()` (already used internally to evolve
+  `ge` through a free-fall compression step) is now also computed per
+  plotted step and exposed as an extra tooltip field on every point,
+  regardless of which of T/ge is displayed. The target-temperature band
+  (1500-2500K) is correctly display-only for `T` mode -- it has no
+  meaningful equivalent in `ge` without redoing the gamma-dependent
+  conversion, so it's just omitted rather than shown misleadingly.
+- Both toggles reuse one small button-pair component (renamed
+  `.species-mode` -> `.mini-modebar` in `style.css` since it's no longer
+  species-specific) for a consistent look with the existing cool/free-fall
+  mode buttons.
+
+Verified the usual way: real Emscripten build of all three fiducial
+networks, headless-browser pass confirming (a) the mass-fraction identity
+above, (b) both toggles' button active-states and axis-label swaps land
+correctly, (c) the temperature-band layer is actually absent in `ge`
+mode (not just hidden), (d) switching modes and back, plus running a full
+free-fall in the "thermal energy" + "mass fraction" combination, changes
+nothing about the underlying physics (same step counts/final T/ionized
+values as every prior check in this file), (e) zero console errors.

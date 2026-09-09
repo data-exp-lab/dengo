@@ -83,7 +83,11 @@ PAGE_TEMPLATE = """<!doctype html>
 
   <div id="charts">
     <div class="chart-box">
-      <div class="chart-title">Temperature</div>
+      <div class="chart-title" id="chart-T-title">Temperature</div>
+      <div class="mini-modebar">
+        <button type="button" id="T-mode-T" class="active">temperature</button>
+        <button type="button" id="T-mode-ge">thermal energy</button>
+      </div>
       <div class="chart-row">
         <div class="axis-y" id="ylabel-T"></div>
         <div id="chart-T"></div>
@@ -100,6 +104,10 @@ PAGE_TEMPLATE = """<!doctype html>
     </div>
     <div class="chart-box">
       <div class="chart-title">Species abundance</div>
+      <div class="mini-modebar">
+        <button type="button" id="species-mode-density" class="active">number density</button>
+        <button type="button" id="species-mode-massfrac">mass fraction</button>
+      </div>
       <div class="species-toggle" id="species-toggle"></div>
       <div class="chart-row">
         <div class="axis-y" id="ylabel-species"></div>
