@@ -324,6 +324,33 @@ function shockJumpFactors(gammaAd, mach) {
   return { rhoRatio, TRatio };
 }
 
+// Right after a strong shock fires, the post-jump gas can sit in a
+// regime where radiative cooling and (density-cubed) three-body H2
+// formation are many orders of magnitude faster than the free-fall
+// timescale that sizes an ordinary step -- BE_chem_solve still
+// integrates all of that correctly in one big step (it subcycles
+// internally), but only the two endpoints get reported, hiding a real
+// spike-then-crash-then-partial-H2-reformation transient entirely
+// between two plotted points.
+//
+// SHOCK_COOLING_SAFETY * coolingTime() (the same instantaneous
+// ge/|dge/dt| estimate runConstantDensity's own adaptive dt already
+// uses), evaluated once right after the jump, estimates *when the
+// refined display should start* -- not a step size to keep re-deriving.
+// Re-deriving it every substep was tried first and doesn't work here:
+// this cooling curve is so steep near the post-shock temperature (order-
+// of-magnitude changes in the derivative itself within a single
+// estimated "cooling time") that a locally re-estimated step size keeps
+// shrinking out from under itself, chasing a moving target instead of
+// converging. Sampling SHOCK_DISPLAY_POINTS times, log-spaced from that
+// one starting estimate up to this step's ordinary dt, sidesteps that
+// entirely: BE_chem_solve already integrates an arbitrarily large dt
+// correctly in one call (that's the whole reason the transient was
+// hidden in the first place), so each checkpoint is just as reliable
+// however far apart they are -- this only asks for more of them.
+const SHOCK_COOLING_SAFETY = 0.05;
+const SHOCK_DISPLAY_POINTS = 40;
+
 function runFreefall(nH, T, fractions, logNTarget, logNShock, machShock, safetyFactor = 0.01, maxSteps = 10000) {
   setIcs(nH, T, fractions);
   const nTarget = Math.pow(10, logNTarget);
@@ -344,52 +371,93 @@ function runFreefall(nH, T, fractions, logNTarget, logNShock, machShock, safetyF
     nHist.push(nCurrent); THist.push(temperature()); ionHist.push(ionizedFraction(s0)); h2Hist.push(h2Fraction(s0));
     tHist.push(0); dtHist.push(0); sHist.push(s0);
   }
+
+  // Ordinary free-fall compression (density + adiabatic temperature
+  // change) for a step of duration `subDt`, then chemistry advanced by
+  // that same `subDt` -- factored out so both the outer per-step loop
+  // below and the finer post-shock refinement burst apply exactly the
+  // same physics per unit time, just at different step sizes. Returns
+  // whether step() converged; on success it also pushes one history
+  // point (so the refinement burst below shows up as several distinct
+  // points, not one).
+  function freefallStep(subDt) {
+    const rho = nCurrent * MH;
+    const rhoNew = Math.pow(Math.pow(rho, -0.5) - Math.sqrt(32 * G_GRAV / (3 * Math.PI)) * subDt, -2);
+    const densityRatio = rhoNew / rho;
+    const ptr = statePtr() >> 3;
+    const gammaAd = thermodynamicGamma(getScalar());
+    const tempRatio = 1 + (gammaAd - 1) * (densityRatio - 1);
+    for (const name of speciesNames) if (name !== "ge") mod.HEAPF64[ptr + idx[name]] *= densityRatio;
+    mod.HEAPF64[ptr + idx.ge] *= tempRatio;
+    if (!step(subDt, 200, 1e-5)) return false;
+    t += subDt;
+    const s = getScalar();
+    nCurrent = 0;
+    for (const name of speciesNames) if (name !== "ge" && name !== "de") nCurrent += s[name];
+    nHist.push(nCurrent); THist.push(temperature()); ionHist.push(ionizedFraction(s)); h2Hist.push(h2Fraction(s));
+    tHist.push(t); dtHist.push(subDt); sHist.push(s);
+    return true;
+  }
+
   for (let i = 0; i < maxSteps; i++) {
     if (nCurrent >= nTarget) break;
     const rho = nCurrent * MH;
     const tFf = Math.sqrt(3 * Math.PI / (32 * G_GRAV * rho));
     const dt = safetyFactor * tFf;
-    const rhoNew = Math.pow(Math.pow(rho, -0.5) - Math.sqrt(32 * G_GRAV / (3 * Math.PI)) * dt, -2);
-    let densityRatio = rhoNew / rho;
+    const rhoNewOrdinary = Math.pow(Math.pow(rho, -0.5) - Math.sqrt(32 * G_GRAV / (3 * Math.PI)) * dt, -2);
+
+    // Would *this* step's ordinary free-fall compression carry us across
+    // nShock? A shock is a genuine mathematical discontinuity -- that's
+    // what the RH jump conditions describe -- so applying it as an
+    // instantaneous jump (not blended into one ordinary compression
+    // step) is the physically honest way to represent one here.
+    if (shocked || machShock <= 1 || nCurrent * (rhoNewOrdinary / rho) < nShock) {
+      if (!freefallStep(dt)) break;
+      continue;
+    }
 
     const ptr = statePtr() >> 3;
     const gammaAd = thermodynamicGamma(getScalar());
-    let tempRatio = 1 + (gammaAd - 1) * (densityRatio - 1);
+    const { rhoRatio, TRatio } = shockJumpFactors(gammaAd, machShock);
+    for (const name of speciesNames) if (name !== "ge") mod.HEAPF64[ptr + idx[name]] *= rhoRatio;
+    mod.HEAPF64[ptr + idx.ge] *= TRatio;
+    nCurrent *= rhoRatio;
 
-    // Fires (at most) once per run, the first step whose ordinary
-    // free-fall compression would carry the gas across nShock. A shock
-    // is a genuine mathematical discontinuity -- that's what the RH jump
-    // conditions describe -- so a single-step jump is the physically
-    // honest way to represent one here, not a numerical shortcut to
-    // smooth over; BE_chem_solve already tolerates state jumps of this
-    // kind fine (ordinary free-fall compression already hands it one
-    // every step). `shocked` only becomes permanent once this step's
-    // step() call below actually converges -- a strong-enough jump can
-    // fail to converge on the first attempt, and if it does, this isn't
-    // "the shock happened", it's "the run stopped before the shock could
-    // be applied" (see shockTriggered below).
-    let attemptingShock = false;
-    if (!shocked && machShock > 1 && nCurrent * densityRatio >= nShock) {
-      const { rhoRatio, TRatio } = shockJumpFactors(gammaAd, machShock);
-      densityRatio *= rhoRatio;
-      tempRatio *= TRatio;
-      attemptingShock = true;
+    // The jump itself is instantaneous -- record the state right after
+    // it, before any chemistry has had time to respond at all, as its
+    // own point (same t as just before the shock, genuinely zero
+    // elapsed time, but a new density -- so it plots as a distinct point
+    // showing the raw post-jump temperature this run would otherwise
+    // never display). rhsPtr() refreshes temperature()'s cache, which
+    // the jump's direct buffer writes don't trigger themselves.
+    rhsPtr();
+    const sJump = getScalar();
+    nHist.push(nCurrent); THist.push(temperature()); ionHist.push(ionizedFraction(sJump)); h2Hist.push(h2Fraction(sJump));
+    tHist.push(t); dtHist.push(0); sHist.push(sJump);
+
+    // Then resolve however it relaxes from there, log-spaced from the
+    // estimated start of that relaxation up to this step's ordinary dt
+    // (see the constants' comment above for why log-spaced-from-one-
+    // estimate beats re-deriving a step size every substep here).
+    // `firstOk`/`allOk` mirror the non-shock branch's own convergence
+    // handling: the shock only counts as having "happened" if its first
+    // post-jump step actually converged, and any later failure still
+    // halts the whole run, same as everywhere else in this file.
+    const tStart = Math.min(Math.max(SHOCK_COOLING_SAFETY * coolingTime(dt), dt * 1e-8), dt);
+    const decades = Math.max(Math.log10(dt / tStart), 0);
+    let elapsed = 0, firstOk = null, allOk = true;
+    for (let k = 0; k < SHOCK_DISPLAY_POINTS; k++) {
+      const frac = (k + 1) / SHOCK_DISPLAY_POINTS;
+      const target = tStart * Math.pow(10, decades * frac);
+      const subDt = Math.min(target, dt) - elapsed;
+      if (subDt <= 0) continue;
+      const ok = freefallStep(subDt);
+      if (firstOk === null) firstOk = ok;
+      if (!ok) { allOk = false; break; }
+      elapsed += subDt;
     }
-
-    for (const name of speciesNames) {
-      if (name !== "ge") mod.HEAPF64[ptr + idx[name]] *= densityRatio;
-    }
-    mod.HEAPF64[ptr + idx.ge] *= tempRatio;
-
-    const converged = step(dt, 200, 1e-5);
-    if (!converged) break;
-    if (attemptingShock) { shocked = true; shockApplied = true; }
-    t += dt;
-    const s = getScalar();
-    nCurrent = 0;
-    for (const name of speciesNames) if (name !== "ge" && name !== "de") nCurrent += s[name];
-    nHist.push(nCurrent); THist.push(temperature()); ionHist.push(ionizedFraction(s)); h2Hist.push(h2Fraction(s));
-    tHist.push(t); dtHist.push(dt); sHist.push(s);
+    if (firstOk) { shocked = true; shockApplied = true; }
+    if (!allOk) break;
   }
   return {
     x: nHist, t: tHist, dt: dtHist, T: THist, ion: ionHist, h2: h2Hist, s: sHist, xKey: "density",

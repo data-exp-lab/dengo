@@ -2691,3 +2691,69 @@ headless-browser check (light + dark) confirming the note renders under
 the chart on every network, reads correctly against both themes, and
 zero console errors. Full `pytest` unaffected (120/120) -- this only
 touches the HTML template, no path any Python test exercises.
+
+**2026-09-09, new branch `wasm-shock-refinement`: free-fall's shock
+event now resolves and displays the actual post-shock relaxation,
+instead of hiding it inside one step.** A strong accretion shock (e.g.
+Mach 5 fired from a mostly-atomic, H2-poor pre-shock state -- the
+"virial-shock" preset with the shock density lowered to 1e11 was the
+case that surfaced this) can heat the gas by 3-4 orders of magnitude
+instantly, into a regime where radiative cooling and (density-cubed)
+three-body H2 formation are many orders of magnitude faster than the
+free-fall timescale that sizes an ordinary step. `BE_chem_solve`
+already integrates all of that correctly in a single big step (that's
+the whole point of an implicit, stiffness-tolerant solver) -- but only
+the step's two endpoints were ever recorded, so a real, fast spike-then-
+crash-then-partial-H2-reformation transient was completely invisible on
+the chart, reading instead as "the shock causes an inexplicable drop in
+T and rise in H2 fraction," backwards from what the Rankine-Hugoniot
+jump itself actually does (always heats, for any Mach>1).
+
+Confirmed the mechanism directly before changing anything: manually
+sub-stepping through the same total elapsed time the single big step
+would have covered showed the real trajectory -- instant post-jump
+T≈56,300 K (matching the RH jump prediction exactly for that state),
+crashing to ≈1,400 K within a small fraction of the step, then a slow
+climb back to ≈2,040 K (the well-known H2-cooling-floor regime) as
+three-body H2 formation proceeds, finally continuing the ordinary
+free-fall track. This confirmed it's a real, correctly-integrated
+physical result being hidden by output resolution, not a solver bug.
+
+Implementation (`app.js`, `runFreefall`): the shock is still applied as
+an instantaneous jump (a real discontinuity, not blended into one
+compression step, as before), but the state right after the jump is now
+recorded as its own point (capturing the true instant post-jump value,
+which the old code never displayed), and the remainder of that step's
+elapsed time is covered by `SHOCK_DISPLAY_POINTS` (40) checkpoints,
+log-spaced from an estimated relaxation start time up to the full
+step's ordinary dt. That starting estimate is `SHOCK_COOLING_SAFETY`
+(0.05) times `coolingTime()` -- the same instantaneous ge/|dge/dt|
+estimate `runConstantDensity`'s own adaptive stepping already uses --
+evaluated once, right after the jump.
+
+That "once" is deliberate, and cost a false start: the first attempt
+re-derived a cooling-time-based step size *every* substep (the more
+obviously "adaptive" design), and it doesn't work here -- this cooling
+curve is so steep near the post-shock temperature that the derivative
+itself changes by orders of magnitude within a single estimated
+"cooling time," so each re-estimate immediately invalidated the last,
+chasing a moving target instead of converging (observed directly:
+substep sizes collapsing from ~1s to ~3e-4s in a single subsequent
+step, never completing even at 3000 allowed substeps). Log-spacing from
+one initial estimate up to the known total sidesteps this entirely --
+it doesn't need the local derivative to stay still, only asks
+BE_chem_solve for values at more, arbitrary-sized times than before,
+which it was already proven able to give correctly (that's the reason
+the transient was hidden in the first place).
+
+Verified: real Emscripten rebuild, headless-browser pass across all
+three fiducial networks, both themes, both display modes (T/thermal
+energy), the parameter sweep (which also calls `runFreefall`), and
+several IC presets -- zero console errors throughout. Confirmed the
+extreme end of the Mach slider (100) still fails to converge on this
+same preset+density, exactly as the pre-existing single-big-step code
+already did on the identical state (checked directly, side by side) --
+not a regression, a pre-existing, already-documented limit of how
+strong a shock the solver can resolve at all, from a state this
+extreme. Full `pytest` suite unaffected (120/120) -- pure `app.js`
+change, no Python path touched.
