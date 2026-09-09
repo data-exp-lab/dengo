@@ -116,7 +116,10 @@ PAGE_TEMPLATE = """<!doctype html>
         prediction of where or how strong a real one occurs.</p>
     </div>
 
-    <div id="status">loading solver&hellip;</div>
+    <div class="status-row">
+      <div id="status">loading solver&hellip;</div>
+      <button type="button" id="download-csv" disabled title="every step of the run currently on screen (not a sweep's several overlaid runs)">Download CSV</button>
+    </div>
   </div>
 
   <div id="charts">

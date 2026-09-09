@@ -54,7 +54,13 @@ input[type=range] { width: 100%; }
   background: var(--bg); color: var(--fg); cursor: pointer; font-size: 0.85em;
 }
 .modebar button.active { background: var(--accent); color: white; border-color: var(--accent); }
-#status { font-size: 0.85em; color: var(--muted); margin-top: 10px; min-height: 1.2em; }
+.status-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 10px; }
+#status { font-size: 0.85em; color: var(--muted); min-height: 1.2em; }
+#download-csv {
+  font-size: 0.78em; padding: 4px 10px; border-radius: 6px; border: 1px solid var(--border);
+  background: var(--bg); color: var(--fg); cursor: pointer; white-space: nowrap;
+}
+#download-csv:disabled { opacity: 0.5; cursor: default; }
 #charts { display: flex; flex-direction: column; gap: 8px; }
 /* Species-fraction sliders are the single biggest contributor to panel
    height (6-9 rows on top of everything else) -- collapsible so the
