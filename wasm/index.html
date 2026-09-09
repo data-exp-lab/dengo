@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dengo in the browser</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>%F0%9F%A7%AA</text></svg>">
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #ffffff; --fg: #1a1a1a; --muted: #666; --border: #d8d8d8;
+    --accent: #3366cc; --panel: #f7f7f9;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #16181d; --fg: #e8e8e8; --muted: #9aa0a6; --border: #30333a; --panel: #1e2128; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 14px/1.4 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+    padding: 24px; max-width: 1100px; margin-inline: auto;
+  }
+  h1 { font-size: 1.3em; margin: 0 0 4px; }
+  p.sub { color: var(--muted); margin: 0 0 20px; }
+  .layout { display: grid; grid-template-columns: 320px 1fr; gap: 24px; align-items: start; }
+  @media (max-width: 760px) { .layout { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+  .row { margin-bottom: 16px; }
+  .row label { display: flex; justify-content: space-between; font-size: 0.9em; margin-bottom: 4px; }
+  .row label span.val { font-variant-numeric: tabular-nums; color: var(--accent); font-weight: 600; }
+  input[type=range] { width: 100%; }
+  .modebar { display: flex; gap: 6px; margin-bottom: 16px; }
+  .modebar button {
+    flex: 1; padding: 8px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--bg); color: var(--fg); cursor: pointer; font-size: 0.85em;
+  }
+  .modebar button.active { background: var(--accent); color: white; border-color: var(--accent); }
+  #status { font-size: 0.85em; color: var(--muted); margin-top: 10px; min-height: 1.2em; }
+  #charts { display: flex; flex-direction: column; gap: 8px; }
+  .chart-box { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 8px; }
+</style>
+</head>
+<body>
+<h1>Dengo primordial chemistry, live in the browser</h1>
+<p class="sub">
+  Same solver as <code>examples/interactive_explorer.ipynb</code>, compiled to WebAssembly
+  (see <code>wasm/dengo_wasm.cpp</code>) -- no Python, no server, no Jupyter kernel.
+  Drag a slider and the chemistry re-solves and redraws immediately.
+</p>
+
+<div class="layout">
+  <div class="panel">
+    <div class="modebar">
+      <button id="mode-cool" class="active">Cool at constant density</button>
+      <button id="mode-freefall">Free-fall collapse</button>
+    </div>
+
+    <div class="row">
+      <label>n<sub>H</sub> (cm<sup>-3</sup>) <span class="val" id="nH-val"></span></label>
+      <input type="range" id="nH" min="-2" max="17" step="0.1" value="4">
+    </div>
+    <div class="row">
+      <label>T (K) <span class="val" id="T-val"></span></label>
+      <input type="range" id="T" min="1" max="4.7" step="0.05" value="3">
+    </div>
+    <div class="row">
+      <label>ionized fraction <span class="val" id="xion-val"></span></label>
+      <input type="range" id="xion" min="-8" max="0" step="0.1" value="-4">
+    </div>
+    <div class="row">
+      <label>H2 fraction <span class="val" id="xh2-val"></span></label>
+      <input type="range" id="xh2" min="-10" max="0" step="0.1" value="-6">
+    </div>
+    <div class="row" id="dtf-row">
+      <label>total time: 10<sup>x</sup> s <span class="val" id="dtf-val"></span></label>
+      <input type="range" id="dtf" min="6" max="17" step="0.1" value="13">
+    </div>
+    <div class="row" id="ntarget-row" style="display:none">
+      <label>target n: 10<sup>x</sup> cm<sup>-3</sup> <span class="val" id="ntarget-val"></span></label>
+      <input type="range" id="ntarget" min="2" max="18" step="0.1" value="15">
+    </div>
+
+    <div id="status">loading solver&hellip;</div>
+  </div>
+
+  <div id="charts">
+    <div class="chart-box"><div id="chart-T"></div></div>
+    <div class="chart-box"><div id="chart-h2"></div></div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/vega@5"></script>
+<script src="https://cdn.jsdelivr.net/npm/vega-lite@5"></script>
+<script src="https://cdn.jsdelivr.net/npm/vega-embed@6"></script>
+<script src="dengo_wasm.js"></script>
+<script>
+const KB = 1.3806504e-16, MH = 1.67e-24, G_GRAV = 6.674e-8;
+
+let mod, idx, speciesNames;
+let init, step, statePtr, rhsPtr, temperature;
+
+function makeIcs(nH, T, xIon, xH2) {
+  return {
+    H_1: nH * 0.76 * (1 - xIon), H_2: nH * 0.76 * xIon,
+    He_1: nH * 0.24 / 4 * (1 - xIon), He_2: 0.0, He_3: nH * 0.24 / 4 * xIon,
+    H_m0: nH * 1e-12, H2_1: nH * xH2, H2_2: nH * 1e-12,
+    de: nH * 0.76 * xIon + 2 * nH * 0.24 / 4 * xIon, ge: 1.5 * KB * T / MH,
+  };
+}
+
+function setState(ics) {
+  const ptr = statePtr() >> 3; // Float64 index
+  for (const [name, val] of Object.entries(ics)) mod.HEAPF64[ptr + idx[name]] = val;
+}
+
+function getScalar() {
+  const ptr = statePtr() >> 3;
+  const out = {};
+  for (const name of speciesNames) out[name] = mod.HEAPF64[ptr + idx[name]];
+  return out;
+}
+
+function h2Fraction(s) {
+  const totalH = s.H_1 + s.H_2 + s.H_m0 + 2 * (s.H2_1 + s.H2_2);
+  return 2 * s.H2_1 / totalH;
+}
+
+function thermodynamicGamma(s) {
+  let nTotal = 0, invGm1Sum = 0;
+  for (const name of speciesNames) {
+    if (name === "ge") continue;
+    nTotal += s[name];
+    const gammaI = (name === "H2_1" || name === "H2_2") ? 7 / 5 : 5 / 3;
+    invGm1Sum += s[name] / (gammaI - 1);
+  }
+  return nTotal / invGm1Sum + 1;
+}
+
+function coolingTime(dtfTotal) {
+  const s = getScalar();
+  const rhsIdx = rhsPtr() >> 3;
+  const dgeDt = mod.HEAPF64[rhsIdx + idx.ge];
+  return dgeDt !== 0 ? Math.abs(s.ge / dgeDt) : dtfTotal;
+}
+
+function runConstantDensity(nH, T, xIon, xH2, logDtf, safetyFactor = 0.1, maxSteps = 2000) {
+  setState(makeIcs(nH, T, xIon, xH2));
+  const dtfTotal = Math.pow(10, logDtf);
+  let t = 0;
+  const tHist = [], THist = [], h2Hist = [];
+  for (let i = 0; i < maxSteps; i++) {
+    // dt set each step from the current cooling time (|ge / d(ge)/dt|),
+    // same recipe as run_dengo.py/the notebook's cooldown phase
+    const dt = Math.min(safetyFactor * coolingTime(dtfTotal), dtfTotal - t);
+    if (dt <= 0) break;
+    const converged = step(dt, 200, 1e-5);
+    if (!converged) break;
+    t += dt;
+    const s = getScalar();
+    tHist.push(t); THist.push(temperature()); h2Hist.push(h2Fraction(s));
+    if (t >= dtfTotal) break;
+  }
+  return { x: tHist, T: THist, h2: h2Hist, xlabel: "Time (s)" };
+}
+
+function runFreefall(nH, T, xIon, xH2, logNTarget, safetyFactor = 0.01, maxSteps = 5000) {
+  setState(makeIcs(nH, T, xIon, xH2));
+  const nTarget = Math.pow(10, logNTarget);
+  let nCurrent = nH;
+  const nHist = [], THist = [], h2Hist = [];
+  for (let i = 0; i < maxSteps; i++) {
+    if (nCurrent >= nTarget) break;
+    const rho = nCurrent * MH;
+    const tFf = Math.sqrt(3 * Math.PI / (32 * G_GRAV * rho));
+    const dt = safetyFactor * tFf;
+    const rhoNew = Math.pow(Math.pow(rho, -0.5) - Math.sqrt(32 * G_GRAV / (3 * Math.PI)) * dt, -2);
+    const densityRatio = rhoNew / rho;
+
+    const ptr = statePtr() >> 3;
+    for (const name of speciesNames) {
+      if (name !== "ge") mod.HEAPF64[ptr + idx[name]] *= densityRatio;
+    }
+    const gammaAd = thermodynamicGamma(getScalar());
+    mod.HEAPF64[ptr + idx.ge] *= (1 + (gammaAd - 1) * (densityRatio - 1));
+
+    const converged = step(dt, 200, 1e-5);
+    if (!converged) break;
+    const s = getScalar();
+    nCurrent = 0;
+    for (const name of speciesNames) if (name !== "ge" && name !== "de") nCurrent += s[name];
+    nHist.push(nCurrent); THist.push(temperature()); h2Hist.push(h2Fraction(s));
+  }
+  return { x: nHist, T: THist, h2: h2Hist, xlabel: "n (cm⁻³)" };
+}
+
+function chartSpec(field, xlabel, yLabel, data, extra) {
+  return {
+    $schema: "https://vega.github.io/schema/vega-lite/v5.json",
+    width: 600, height: 220,
+    background: null,
+    layer: [
+      ...(extra || []),
+      {
+        data: { values: data },
+        mark: { type: "line", point: data.length < 60 },
+        encoding: {
+          x: { field: "x", type: "quantitative", scale: { type: "log" }, title: xlabel },
+          y: { field: field, type: "quantitative", scale: { type: "log" }, title: yLabel },
+        },
+      },
+    ],
+  };
+}
+
+let redrawQueued = false;
+function scheduleRedraw() {
+  if (redrawQueued) return;
+  redrawQueued = true;
+  requestAnimationFrame(() => { redrawQueued = false; redraw(); });
+}
+
+let currentMode = "cool";
+
+function redraw() {
+  const nH = Math.pow(10, parseFloat(document.getElementById("nH").value));
+  const T = Math.pow(10, parseFloat(document.getElementById("T").value));
+  const xIon = Math.pow(10, parseFloat(document.getElementById("xion").value));
+  const xH2 = Math.pow(10, parseFloat(document.getElementById("xh2").value));
+
+  document.getElementById("nH-val").textContent = nH.toExponential(2);
+  document.getElementById("T-val").textContent = T.toFixed(0);
+  document.getElementById("xion-val").textContent = xIon.toExponential(1);
+  document.getElementById("xh2-val").textContent = xH2.toExponential(1);
+
+  const t0 = performance.now();
+  let result;
+  if (currentMode === "freefall") {
+    const logNTarget = parseFloat(document.getElementById("ntarget").value);
+    document.getElementById("ntarget-val").textContent = logNTarget.toFixed(1);
+    result = runFreefall(nH, T, xIon, xH2, logNTarget);
+  } else {
+    const logDtf = parseFloat(document.getElementById("dtf").value);
+    document.getElementById("dtf-val").textContent = logDtf.toFixed(1);
+    result = runConstantDensity(nH, T, xIon, xH2, logDtf);
+  }
+  const elapsed = performance.now() - t0;
+
+  const rows = result.x.map((x, i) => ({ x, T: result.T[i], h2: result.h2[i] }));
+  const band = {
+    data: { values: [{ y0: 1500, y1: 2500 }] },
+    mark: { type: "rect", opacity: 0.15, color: "orange" },
+    encoding: { y: { field: "y0", type: "quantitative" }, y2: { field: "y1" } },
+  };
+
+  vegaEmbed("#chart-T", chartSpec("T", result.xlabel, "Temperature (K)", rows, [band]),
+            { actions: false, renderer: "svg" });
+  vegaEmbed("#chart-h2", chartSpec("h2", result.xlabel, "H2 / H_tot", rows),
+            { actions: false, renderer: "svg" });
+
+  const finalT = result.T[result.T.length - 1];
+  const finalH2 = result.h2[result.h2.length - 1];
+  document.getElementById("status").textContent =
+    `${rows.length} steps, ${elapsed.toFixed(1)} ms -- final T=${finalT ? finalT.toFixed(1) : "?"} K, `
+    + `H2/H_tot=${finalH2 ? finalH2.toExponential(2) : "?"}`;
+}
+
+function setMode(mode) {
+  currentMode = mode;
+  document.getElementById("mode-cool").classList.toggle("active", mode === "cool");
+  document.getElementById("mode-freefall").classList.toggle("active", mode === "freefall");
+  document.getElementById("dtf-row").style.display = mode === "cool" ? "" : "none";
+  document.getElementById("ntarget-row").style.display = mode === "freefall" ? "" : "none";
+  scheduleRedraw();
+}
+
+document.getElementById("mode-cool").addEventListener("click", () => setMode("cool"));
+document.getElementById("mode-freefall").addEventListener("click", () => setMode("freefall"));
+for (const id of ["nH", "T", "xion", "xh2", "dtf", "ntarget"]) {
+  document.getElementById(id).addEventListener("input", scheduleRedraw);
+}
+
+DengoModule().then((m) => {
+  mod = m;
+  init = mod.cwrap("dengo_wasm_init", null, []);
+  step = mod.cwrap("dengo_wasm_step", "number", ["number", "number", "number"]);
+  statePtr = mod.cwrap("dengo_wasm_state_ptr", "number", []);
+  rhsPtr = mod.cwrap("dengo_wasm_rhs_ptr", "number", []);
+  temperature = mod.cwrap("dengo_wasm_temperature", "number", []);
+  const namesFn = mod.cwrap("dengo_wasm_species_names", "string", []);
+  init();
+  speciesNames = namesFn().split(",");
+  idx = Object.fromEntries(speciesNames.map((n, i) => [n, i]));
+  document.getElementById("status").textContent = "ready";
+  redraw();
+});
+</script>
+</body>
+</html>

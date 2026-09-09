@@ -1529,3 +1529,86 @@ tests/test_solver.py pass; 85/85 tests total. `examples/free_fall_
 collapse.py` reproduces the identical 1814-step trajectory (BE_chem_
 solve.C's diagnostic capture is purely additive bookkeeping, changes no
 control flow or numbers).
+
+**2026-09-09, continued: WASM feasibility -- evaluated, then proven,
+then built into a real working browser widget. New branch `wasm-
+solver` (branched from `modernize-uv-cython-openmp`), per the user's
+request.**
+
+User asked about the feasibility of a WASM target for the solver, to
+enable an in-browser widget. Rather than answer from first principles,
+installed the Emscripten SDK locally (`emsdk`, no root needed) and
+actually compiled dengo's generated primordial solver to WebAssembly.
+
+**Result: it just works, no changes needed to the generated solver.**
+`primordial_solver.C`/`BE_chem_solve.C` are already portable C/C++
+(`math.h`/`stdio.h`/`stdlib.h`/`string.h` only, no POSIX-specific
+calls), and OpenMP is already optional with a working serial fallback
+-- irrelevant anyway for a single-cell widget (`nstrip=1` never
+approaches `DENGO_OMP_MIN_CELLS=2048`). Wrote a small (~100-line) hand-
+written C API wrapper mirroring `_advance()` exactly (including the
+growth=2.0 step-size fix), embedded the 475KB rate-table binary
+directly into the module via `--embed-file` (no separate network
+fetch), and compiled with `em++`.
+
+**Verified, not assumed:** ran the identical initial conditions from
+the README's quickstart through both the wasm build (in Node) and the
+native Python/Cython solver -- bit-for-bit identical results (same T,
+H2_1, H_1 to every printed digit). Per-call cost in Node: ~112 us/cell,
+matching the already-optimized native per-cell cost from two sessions
+ago -- no wasm performance penalty. Total footprint: 527KB wasm + 62KB
+JS glue, ~393KB gzipped -- a small, instant-loading download.
+
+Presented two paths: (A) this custom minimal wasm+JS approach, small
+and fast, vs (B) Pyodide/JupyterLite (reuse the existing ipywidgets
+notebook almost unchanged, but tens of MB and several seconds to
+initialize a full wasm-compiled CPython+numpy stack). Recommended (A)
+for "a fun little widget"; user agreed and asked to build it, then
+generalize it into a proper codegen target, emphasizing interactivity
+and OK with Vega-Lite for visualization. Also asked this work go on its
+own branch.
+
+**Built `wasm/`:**
+- `dengo_wasm.cpp`: the C API (`init`, `step`, `state_ptr`, `rhs_ptr`
+  -- the last added specifically so the JS driver could compute a real
+  cooling-time-limited dt for the constant-density mode, `|ge/d(ge)/
+  dt)|`, the same recipe `run_dengo.py`/the notebook use, rather than
+  an ad hoc fixed-fraction placeholder; `calculate_rhs_primordial` is
+  self-contained, doesn't need a prior `step()` call to have run,
+  matching how `Solver.evaluate_rhs()` already works) and
+  `species_names()` (one source of truth for column order, rather than
+  the JS side independently hardcoding the same sorted-name order).
+- `build.sh`: regenerates the network's C++ source via
+  `dengo.primordial_network` (the same shared module every other
+  example/tool uses) and compiles to wasm with `em++`.
+- `index.html`: sliders for density/temperature/ionized/H2 fraction, a
+  mode toggle (mirroring the notebook's two modes), Vega-Lite charts
+  (loaded from CDN) that redraw on every slider `input` event,
+  coalesced to once per animation frame via `requestAnimationFrame` so
+  a fast drag doesn't queue up redundant recomputes -- each recompute
+  is a few hundred us to ~250ms (free-fall's ~1300 steps) at the actual
+  wasm per-step cost, easily fast enough to feel live.
+- `dengo_wasm.js`/`dengo_wasm.wasm` themselves are **committed** (a
+  deliberate exception to this repo's usual "don't commit generated
+  artifacts" convention -- see `wasm/README.md` for the reasoning:
+  unlike a `.so`, this is small, portable, and *is* the deliverable for
+  a statically-served page; asking every visitor to install Emscripten
+  to view a widget would defeat the point).
+
+**Found and fixed one real bug building the actual page**, caught by
+testing in a real headless browser (Playwright driving the system's
+installed Chrome, not just Node) rather than assuming the same
+correctness proof from the command line transferred automatically: the
+Vega-Lite chart panels rendered as blank/zero-width. `width:
+"container"` needs the container element to have a measurable width at
+embed time, which wasn't reliably true inside the CSS grid layout at
+first render; switched to a plain fixed `width: 600` and the charts
+render correctly. Verified visually (screenshots) and numerically (the
+page-driven free-fall run reproduces the exact same 1298-step, T=2198.0K
+trajectory as every earlier from-the-command-line check) for both
+modes.
+
+Not yet done (explicitly deferred to the next phase, per the user's
+"then move on to the second" -- generalizing this into a real Jinja-
+templated wasm codegen path, not hand-written per network): see
+`wasm/README.md`'s "Generalizing" section.
