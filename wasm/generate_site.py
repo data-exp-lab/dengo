@@ -221,6 +221,17 @@ def build_one(name, cfg, out_dir, repo):
 def main():
     out_dir = sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, "_site")
     repo = os.environ.get("GITHUB_REPOSITORY", "data-exp-lab/dengo")
+    # Fail fast, before creating/touching out_dir at all. find_emxx() calls
+    # sys.exit(1) if em++ isn't on PATH -- SystemExit isn't an Exception,
+    # so it isn't caught by the per-network try/except below; left
+    # unchecked here, that meant the whole process died partway through
+    # the *first* network (right after codegen, before compiling it),
+    # leaving a half-built out_dir/ with generated .C files but no
+    # compiled .js/.wasm and no index.html anywhere, including no landing
+    # page -- confusing (looks like a bare directory listing when served)
+    # rather than the clear "install/activate the Emscripten SDK" message
+    # that was actually printed.
+    find_emxx()
     os.makedirs(out_dir, exist_ok=True)
 
     shutil.copy(os.path.join(HERE, "app.js"), out_dir)

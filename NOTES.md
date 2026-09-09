@@ -2068,3 +2068,26 @@ it, so those specific DOM checks aren't reliable evidence either way;
 the rendered pixels are), (e) zero console errors, (f) same physics
 results as every prior check in this file. Full `pytest` suite (86/86)
 also passes.
+
+**2026-09-09, same branch: `generate_site.py` fail-fast fix (found while
+walking the user through testing locally).** User followed the
+"build locally" instructions in `wasm/README.md` and got a bare
+directory listing (`app.js` and friends, no page) when serving
+`wasm/_site/`. Root cause: `em++` wasn't on `PATH` in the shell they ran
+`generate_site.py` from (hadn't re-sourced `emsdk_env.sh`), and
+`find_emxx()` calls `sys.exit(1)` when that happens -- `SystemExit`
+isn't an `Exception`, so it wasn't caught by `main()`'s per-network
+`try/except Exception`, and the whole process died immediately after
+finishing `primordial`'s *codegen* but before compiling it (confirmed:
+`wasm/_site/primordial/` had the generated `.C`/`.h`/`.bin` files but no
+`dengo_wasm.js`/`.wasm`, and no `index.html` anywhere -- `primordial_atomic`/
+`hydrogen_minimal` were never attempted). The script did print a clear
+"install/activate the Emscripten SDK" message, but to stderr, easy to
+miss, and by then a half-built, confusing `_site/` already existed.
+
+Fixed by calling `find_emxx()` once at the very top of `main()`, before
+`out_dir` is even created -- verified this now fails fast with nothing
+written at all (rather than a partial build) when `em++` is missing, and
+still builds all three networks correctly (confirmed `index.html`
+present at every level, including the landing page) when it's present.
+Full `pytest` suite (86/86) still passes.
