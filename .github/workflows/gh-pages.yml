@@ -17,12 +17,9 @@ name: Deploy WASM demo to GitHub Pages
 # "GitHub Actions" (Settings -> Pages) -- a one-time manual step, not
 # something this workflow can turn on itself.
 #
-# NOTE: triggers on pushes to `wasm-solver` (where this work currently
-# lives) -- update the branch name below once this merges to whatever
-# this repo's default/long-lived branch ends up being.
 on:
   push:
-    branches: [wasm-solver]
+    branches: [main]
     paths:
       - "wasm/**"
       - "src/dengo/**"

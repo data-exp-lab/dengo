@@ -1714,3 +1714,30 @@ the workflow deploys once that's on, not before. Also note the
 workflow currently triggers on pushes to `wasm-solver` specifically
 (where this work lives right now); update the branch name once this
 merges elsewhere.
+
+**2026-09-09, continued: merged to main.** User called this session's
+work done and asked to land it: opened a PR (`wasm-solver` -> `master`,
+data-exp-lab/dengo#1 -- summarizing the whole arc: packaging/build,
+solver correctness fixes, Grackle comparison + compat shim, performance
+work, quality-of-life additions, and the wasm codegen path), merged it
+(a real merge commit, not squashed, to keep the detailed per-change
+history NOTES.md cross-references), then renamed the repo's default
+branch from `master` to `main` via GitHub's native rename endpoint
+(`POST /repos/{owner}/{repo}/branches/{branch}/rename` -- updates the
+default-branch pointer and fully removes the old ref, rather than
+leaving a stale `master` alongside a new `main`; confirmed via
+`git ls-remote` that `refs/heads/master` is genuinely gone, not just a
+redirect). One follow-up fixed in the same motion: `.github/workflows/
+gh-pages.yml`'s trigger branch, previously `wasm-solver` with a comment
+flagging it as temporary, now points at `main`.
+
+One real snag along the way, worth recording: the git remote is
+configured over SSH (`git@github.com:...`), and this sandbox has no SSH
+key set up for it -- `git push`/`fetch` failed outright until the
+remote was switched to HTTPS and `gh auth setup-git` wired up its
+token-based credential helper. Separately, the first push attempt was
+rejected because the authenticated token lacked the `workflow` OAuth
+scope (needed specifically to push changes under `.github/workflows/`)
+-- required the user to run `gh auth refresh -s workflow` interactively
+(a browser-based re-authorization, not something scriptable from here)
+before the push could succeed.
