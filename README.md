@@ -116,6 +116,8 @@ print(final["T"])  # converged temperature
 ```
 
 See `examples/primordial_network.py` for the same thing organized into
-reusable functions plus a T(t) plot, and `examples/free_fall_collapse.py`
+reusable functions plus a T(t) plot, `examples/free_fall_collapse.py`
 for the free-fall collapse test problem across the density range this
-project prioritizes (n ~ 1e15 amu/cc, T ~ 1500-2500 K).
+project prioritizes (n ~ 1e15 amu/cc, T ~ 1500-2500 K), and
+`examples/interactive_explorer.ipynb` for a Jupyter-widget version of
+both you can poke at live with sliders.

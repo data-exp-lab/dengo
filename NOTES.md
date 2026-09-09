@@ -1421,3 +1421,51 @@ aggressively after an *easy* convergence, more conservatively after a
 *hard* one, rather than a fixed multiplier regardless of how the
 previous sub-step went) would likely do even better and is a natural
 next step, but wasn't attempted here.
+
+**2026-09-09, continued: quality-of-life -- an interactive Jupyter
+widget explorer.** User asked to shift from performance work to
+quality-of-life, leading with a concrete want: "a fun little web
+interface that let me set ICs and then immediately see the results...
+implemented in Jupyter Widgets in a single notebook."
+
+Added `examples/interactive_explorer.ipynb`: `ipywidgets` sliders for
+initial density, temperature, ionized fraction, and H2 fraction, plus a
+mode toggle between the two existing example scripts' physics --
+"cool at constant density" (`primordial_network.py`'s test problem,
+dt set each step from the current cooling time) and "free-fall
+collapse" (`free_fall_collapse.py`'s plain free-fall prescription, up
+to a user-chosen target density). Every slider release re-solves and
+redraws a two-panel T(x)/H2-fraction(x) log-log plot in place via an
+`ipywidgets.Output()`.
+
+Deliberately built on today's own optimization work rather than the
+dict-based `step()` API: one persistent `Solver` handle held for the
+notebook's whole lifetime, `solver.state`/`SPECIES_INDEX` written to
+directly and `step_inplace()` called in the hot loop -- zero Python
+marshaling per step, and (per this session's step-size-policy fix)
+~4x fewer internal Newton sub-steps than before that fix -- meaning a
+few-thousand-step trajectory now genuinely redraws fast enough to feel
+live, which it would not have before today's fixes. A nice direct
+payoff of the performance work feeding straight into the UX one.
+
+Added a `notebook` dependency group (`ipywidgets`, `jupyterlab`,
+`matplotlib` -- kept separate from `dev` since nothing else needs it)
+via `uv add --group notebook`. Verified the whole notebook executes
+cleanly end to end with `uv run --group notebook jupyter execute
+examples/interactive_explorer.ipynb` (solver builds, widget UI
+constructs, default-mode plot renders, no errors) -- this can't
+simulate an actual slider drag, so also directly re-ran the free-fall
+branch's exact logic standalone to confirm it independently (1298
+steps, final n~1.02e15 cm^-3, final T=2198K -- consistent with this
+project's known free-fall physics). No baked-in cell outputs/execution
+counts committed (kept the notebook clean, matching normal practice).
+
+Also fixed a stale claim caught while touching this area:
+`examples/README.md` still described `free_fall_collapse.py` as using
+the Omukai et al. (2005) force-factor scheme, which an earlier entry in
+this file already replaced with plain free-fall -- the docstring was
+updated at the time but this README wasn't. Fixed, and cross-linked the
+new notebook from both `examples/README.md` and the top-level README.
+
+Run with: `uv run --group notebook jupyter lab
+examples/interactive_explorer.ipynb`.
