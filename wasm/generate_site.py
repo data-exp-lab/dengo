@@ -125,6 +125,7 @@ PAGE_TEMPLATE = """<!doctype html>
       <div class="mini-modebar">
         <button type="button" id="T-mode-T" class="active">temperature</button>
         <button type="button" id="T-mode-ge">thermal energy</button>
+        <label class="zoom-toggle"><input type="checkbox" id="T-zoom-toggle">zoom view</label>
       </div>
       <div class="chart-row">
         <div class="axis-y" id="ylabel-T"></div>
@@ -137,6 +138,13 @@ PAGE_TEMPLATE = """<!doctype html>
         regime this project targets. It's for orientation only, not a
         solver threshold or a prediction that any given run passes
         through it.</p>
+      <p class="preset-note">Turn on "zoom view" above to drag-select a
+        range and see it enlarged in a second chart underneath (e.g. to
+        look closely at the individual steps right around a shock) --
+        the top chart never pans or rescales itself, only the selection
+        box moves;
+        drag an empty area to clear it. Dots on both mark each actual
+        solver step.</p>
     </div>
     <div class="chart-box">
       <div class="chart-title">Ionization &amp; molecular fraction</div>
