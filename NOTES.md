@@ -425,3 +425,278 @@ instead of five -- is the clear next step if more speedup is wanted;
 didn't do it here. Confirmed small-batch calls (`nstrip` below the 2048
 threshold) are bit-for-bit unaffected and `examples/free_fall_collapse.py`
 reproduces the identical physics curve after this change.
+
+## 2026-09-08 — First head-to-head against Grackle
+
+Set up a real comparison against Grackle rather than just reading its
+source. Constraint from the user: no system-wide HDF5 install. Two
+different paths ended up being used for two different purposes:
+
+- **For the comparison run itself**: `gracklepy` (Grackle's Python
+  bindings, renamed from `pygrackle`) ships prebuilt manylinux wheels on
+  PyPI with HDF5 *and* the compiled Grackle C library bundled inside the
+  wheel (same trick h5py uses) -- no HDF5 needed at all. Only wrinkle:
+  the wheels only go up to cp313, and this project's main env is on
+  Python 3.14. Fixed by giving it its own isolated environment
+  (`uv venv --python 3.12 .grackle_compare/.venv` + `uv pip install
+  --python ...`) instead of touching the main project's env/dependencies
+  -- `uv init` from inside a subdirectory auto-registers as a workspace
+  member of the parent project's `pyproject.toml`, which is *not* what
+  we want here (this is comparison tooling, not a dengo dependency), so
+  that got created via plain `uv venv`/`uv pip install` instead, and the
+  accidental workspace registration from a first, wrong attempt was
+  reverted.
+- **Investigated separately, not needed for the wheel path, but kept for
+  reference**: `apt-get download libhdf5-dev` (+ the runtime packages
+  `libhdf5-103-1t64`, `libhdf5-hl-100t64`) followed by `dpkg -x` into a
+  local prefix (`.grackle_deps/`, gitignored) gets real, working
+  HDF5 headers and libraries with zero system-wide installation --
+  `apt-get download` and `dpkg -x` don't touch the system package
+  database or write outside the target directory. Confirmed this
+  actually works (compiled and ran a trivial HDF5 program against it).
+  Would matter if building Grackle from source turns out to be needed
+  later (e.g. for a Python 3.14-native build).
+
+`grackle-project/grackle` was cloned to `.grackle/` (gitignored) for its
+`grackle_data_files` submodule (Cloudy tables Grackle wants a path to
+even when metal cooling is off) and to read its Python utilities'
+source directly.
+
+**The comparison** (`.grackle_compare/run_dengo.py` /
+`run_grackle.py`, not yet committed -- see note below): the same
+two-phase test problem through both codes -- start hot & ionized
+(T=50000 K, n=0.1 cm^-3), cool at constant density down to 300 K, then
+free-fall collapse up to n=3e15 cm^-3 -- using each code's own
+Omukai et al. (2005) free-fall utility (dengo's own, and gracklepy's
+built-in `evolve_freefall`/`evolve_constant_density`), same
+`primordial_chemistry=2`-equivalent 9-species set, same `three_body_rate`
+index (4) on both sides.
+
+Results (single-cell, single-threaded, same old Xeon X5650):
+
+|  | steps (cooldown+freefall) | wall time | final T | final H2 frac |
+|---|---|---|---|---|
+| dengo | 48 + 1929 | 1.68 s | 1492 K | 0.50 |
+| grackle | 742 + 7273 | 6.39 s | 2083 K | 0.73 |
+
+**The T(n) curves track each other closely across all ~15 decades of
+density** -- same shape (initial heating bump, H2-cooling minimum at the
+same density, three-body-formation reheating at the same density,
+landing within ~500 K of each other right at the target regime). That's
+a meaningful independent validation: two codes with different rate-fit
+sources and different implementations agree well on the thing this whole
+effort is centered on. dengo lands at the bottom edge of the 1500-2500 K
+target band, Grackle mid-band -- a real, modest difference, not
+alarming on its own.
+
+**The H2 fraction curves do not agree well at low density**: dengo's H2
+fraction is many orders of magnitude below Grackle's from n~0.1 up to
+~1e9-1e10 cm^-3 (both converge to the same three-body-dominated ~0.5-0.7
+by n~1e12+, where the T curves also converge most closely). This is a
+real, unresolved discrepancy -- not yet root-caused. Candidates, none
+confirmed: dengo's cooldown phase took 48 steps to Grackle's 742 (using
+a cruder cooling-time estimate for the adaptive step, `ge/|dge/dt|`
+instead of Grackle's own `calculate_cooling_time()`), which may be
+under-resolving the H-/H2 formation channel during cooldown; a
+difference in which literature fit each code uses for H- radiative
+association or H2 formation despite matching `three_body_rate`; or an
+initial-condition mismatch in `run_dengo.py`'s `ionized_ics()` (chosen
+without cross-checking gracklepy's own `setup_fluid_container(state=
+"ionized")` values). Also worth being honest about the performance
+number: with a 15x-fewer-steps cooldown phase, dengo's ~3.8x speedup
+here is not a clean apples-to-apples "faster at the same resolution"
+result -- some of it may just be coarser stepping. Both of these are the
+natural next things to dig into if this comparison continues.
+
+Not yet done: `.grackle_compare/`'s comparison scripts (small, no heavy
+deps) haven't been committed -- everything heavy (`.grackle/` clone,
+`.grackle_compare/.venv/`, `.grackle_deps/`, per-run JSON output) is
+gitignored, but the two `run_*.py` scripts themselves are real, reusable
+comparison tooling worth keeping; left for the user to decide whether to
+commit them as-is or reorganize first (e.g. into a proper top-level
+`comparisons/` directory rather than a dot-prefixed one).
+
+## 2026-09-08 — The H2-fraction "discrepancy" was a bug in the comparison script, not dengo
+
+Followed up on the apparent low-density H2-fraction gap from the
+previous entry. Tried tightening `run_primordial`'s `reltol` (1e-5 down
+to 1e-11) for the cooldown phase first, since that was the most direct
+hypothesis: **no effect at all**, to 6+ significant figures, at any
+tolerance tested. This makes sense in hindsight and is itself worth
+recording -- `BE_chem_solve`'s Newton iteration converges to the same
+fixed point regardless of the requested tolerance (tightening it just
+costs more sweeps to converge to that same point, it doesn't change
+*what* it converges to), so tolerance was never going to explain a
+16-order-of-magnitude gap, and didn't.
+
+Investigating why tolerance didn't move anything led to the real bug:
+`run_dengo.py`'s H2-fraction normalization computed `total_H` **once,
+from the state at the very end of the free-fall phase** (after
+collapsing to n=3e15 cm^-3), and used that single number to normalize
+*every* point in the history, including the low-density ones from the
+start of the run. Total-H *number density* isn't a conserved constant
+you can compute once and reuse -- it scales up with compression just
+like every other species' number density does (that's the whole point
+of the free-fall test). Dividing an early, low-density H2 number density
+by the *final*, ~10^16x-larger total-H number density made every early
+point look ~10^16x smaller than it actually was. Grackle's own H2
+fraction was already computed as a per-point NumPy array the whole
+time, so this bug only existed on the dengo side.
+
+Fixed by computing the H2 nuclei fraction from each state's own
+densities at the point it's recorded, never carrying a value over from
+another time (`h2_nuclei_fraction()` in `run_dengo.py`). With that
+fixed, dengo and Grackle's H2 nuclei fraction curves now agree well
+across the **entire ~15-decade density range**: both flat around
+3-5e-3 through the low-density plateau, both turning up sharply at the
+same density (~1e10 cm^-3, three-body formation onset), both landing
+within ~4% of each other (0.9998 vs 0.96) at full collapse. There is no
+remaining H2-fraction discrepancy to explain -- what looked like one was
+entirely this bug.
+
+Net result: two independent, previously-reported findings from the last
+entry are now retracted/corrected (the ~1e22-year cooldown time was a
+separate unit-conversion bug in the *time* diagnostic, already fixed;
+this H2-fraction gap was this normalization bug) and nothing about
+dengo's own chemistry/solver needed to change. Updated
+`.grackle_compare/dengo_vs_grackle.png` shows both temperature and H2
+fraction tracking closely across all ~15 decades of density now.
+
+## 2026-09-08 — High-density timing breakdown, and why Grackle's curve looks noisier
+
+Instrumented both scripts with actual per-step wall-clock timestamps
+(`time.perf_counter()` around just the chemistry-solve call, not the
+surrounding Python bookkeeping) to answer two questions honestly instead
+of by eyeballing the earlier plot.
+
+**The earlier "1.7s dengo vs 6.4s Grackle" total-time comparison was
+measuring different things.** Summing Grackle's own per-step
+`fc.solve_chemistry(dt)` calls comes to only **0.35s** total -- the
+other ~5.5s of Grackle's reported free-fall time is Python-level
+bookkeeping in its `evolve_freefall` *example utility* (`add_to_data`
+copies every one of ~20-30 FluidContainer fields into a growing list,
+7273 times), not the C library's actual solve cost. Dengo's own driver
+loop has far less per-step bookkeeping, so its reported time (1.60s) and
+its summed per-step solve time (1.49s) are close to each other already.
+Comparing solve-only cost: Grackle's C library is *much* faster per call
+than dengo's generated solver (4.8e-5s/step vs 7.7e-4s/step, ~16x).
+
+**Why**: profiled a fixed, trivial dengo workload (single cell, niter=1,
+even a bare `evaluate_rhs` with no time-stepping at all) and got
+~1.4-2.0e-4s per call -- i.e. **most of that 16x gap is fixed per-call
+overhead, not the actual chemistry math**. Every single
+`run_primordial`/`evaluate_rhs`/`evaluate_temperature` call does a fresh
+`{name}_setup_data()` (malloc every per-cell array) + `{name}_read_tables()`
+(fread the whole rate-table file back off disk) + `{name}_free_data()`,
+even when called with a single cell and one substep. That's the right
+tradeoff for the one-shot "hand me `dtf` and let it run to completion
+internally" use this API was designed for, but it's exactly the wrong
+one for a driver that needs to interleave dengo with external state
+updates (rescale densities for compression, then take one more step,
+repeat -- thousands of times) the way both this free-fall script and any
+real hydro coupling would. Grackle's `chemistry_data`/`FluidContainer`
+are set up once and `solve_chemistry(dt)` is cheap precisely because it
+skips all of that on every call. **This is a real, actionable gap**: a
+persistent-handle API (`setup()` once, `step(handle, state, dt)` many
+times, explicit teardown) would let dengo's per-step cost drop close to
+its actual compute cost instead of being swamped by setup/tables I/O --
+not done here, flagging as the clearest concrete next step if
+performance at this calling pattern matters.
+
+**Segmenting by density** (pure solve time, not the inflated Grackle
+total): from n=1e10 up to the 3e15 target, dengo takes 659 (larger)
+steps in 0.60s; Grackle takes 2434 (smaller) steps in 0.18s. Dengo needs
+~3.7x fewer steps to cover the same range, but its ~16x per-step
+overhead more than eats that advantage in this specific high-density
+segment.
+
+**Is Grackle's visible noise a resolution artifact -- i.e. does dengo's
+smooth curve cost something?** No, and the evidence points the other
+way: Grackle actually takes *more* steps than dengo through the noisy
+region (871 vs 229 steps in the 1e13-1e15 range used for this check),
+and its per-step dt there is monotonically decreasing, not itself
+jittery. Quantified the noise directly (RMS deviation from a rolling
+local median): Grackle ~0.85%, dengo ~0.35% -- both small in absolute
+terms, Grackle about 2.4x noisier. The likely explanation is a modeling
+difference, not a numerics one: Grackle's `evolve_freefall` uses the
+pressure-retarded Omukai et al. (2005) scheme by default
+(`include_pressure=True`), which estimates the local effective adiabatic
+index from a finite difference of the last few (pressure, density)
+points -- an estimator that's inherently sensitive to small step-to-step
+fluctuations. Dengo's free-fall script deliberately does *not* use that
+scheme (see the earlier NOTES.md entry: the reference implementation it
+was adapted from never actually exercised it, and reimplementing it
+faithfully surfaced an internal inconsistency) -- it follows the exact
+analytic unimpeded free-fall solution, which is smooth by construction
+because there's no finite-difference estimator in the loop at all. So
+dengo's smoothness isn't bought with a coarser or less accurate solve --
+it's a simpler (and, not incidentally, unvalidated-in-Grackle-either)
+collapse-dynamics model choice, not a resolution/accuracy tradeoff.
+
+## 2026-09-08 — Persistent Solver handle (the calling-pattern fix), and confirming the free-fall noise source
+
+**Persistent handle.** Added a `Solver` class to the generated `_run.pyx`
+(`dengo/templates/cython_solver/cython_solver_run.pyx.template`):
+`{name}_setup_data()`/table read happens once in `__cinit__`, all of
+BE_chem_solve's scratch buffers are allocated once, `step()` reuses all
+of it, `close()`/`__dealloc__`/context-manager protocol tear it down.
+`run_{name}()`/`evaluate_rhs()`/`evaluate_temperature()`/
+`evaluate_jacobian()` are unchanged in signature and behavior -- they're
+now thin wrappers that create a temporary `Solver`, call the matching
+method, and close it, so nothing that already used the one-shot API
+needed to change (all 62 tests still pass unmodified).
+
+Clean before/after (same trivial single-cell workload, isolated from any
+free-fall bookkeeping):
+
+| | one-shot API | persistent `Solver` | speedup |
+|---|---|---|---|
+| `step`/`run_primordial`-equivalent | 2.05e-4 s/call | 6.0e-5 s/call | ~3.4x |
+| `evaluate_rhs` | 1.46e-4 s/call | 4.7e-6 s/call | ~31x |
+
+`evaluate_rhs`'s ~31x is the cleanest evidence for what was actually
+going on: that call does *no* time-stepping at all, so in the one-shot
+version essentially its entire cost *was* setup+table-read+teardown.
+
+At grid scale (100,000 cells, 20 repeated calls to the same handle --
+the actual "call chemistry once per hydro step" pattern): 0.634s/step
+(one-shot) vs 0.514s/step (persistent), **~19%** faster. Smaller than the
+single-cell case because the fixed per-call overhead doesn't scale with
+`nstrip` -- at 100k cells it's already a small fraction of a call
+dominated by real O(nstrip) chemistry work. The free-fall comparison
+script (`run_dengo.py`, now using `mod.Solver(1)` for both phases)
+improved similarly modestly (~10-15%) for the same reason: BE_chem_solve
+often needs several Newton sweeps per step there, so the now-eliminated
+setup/table-read cost was a smaller fraction of an already-real-work-heavy
+call than in the trivial micro-benchmark.
+
+**Confirmed, empirically, why Grackle's curve is noisier and dengo's
+isn't** (the user asked whether this means dengo would give a "better,
+smoother" result if coupled into a real hydro code -- it wouldn't, and
+here's the direct evidence): took dengo's own T(n)/n(t) trajectory from
+the free-fall run (independently measured at only ~0.35% RMS noise) and
+ran it through Grackle's *exact* finite-difference
+gamma_eff-then-force_factor estimator (`calculate_collapse_factor`,
+copied verbatim). The resulting force_factor has a **13% standard
+deviation** and ~4.6% RMS deviation from a local median -- genuinely
+jittery, computed from a smooth input. So the jitter is a property of
+that specific *test-script* estimator (finite-differencing a short,
+inherently slightly-noisy history of (P, rho) pairs to guess a local
+effective adiabatic index), not of which chemistry solver is driving it.
+
+That estimator only exists because both free-fall scripts are a 0-D
+stand-in for real hydrodynamics: neither dengo's plain free-fall formula
+nor Grackle's pressure-retarded one is what a real hydro code would use
+to get density(t) for a fluid element -- a real code computes that from
+actual pressure gradients and gravity on a grid/mesh, and *that*
+determines how smooth the simulation's own trajectory is, not which
+chemistry module is plugged in to respond to it. Swap which chemistry
+solver drives Grackle's own force-factor-based free-fall script and the
+jitter would very likely persist (it's upstream of the chemistry call);
+conversely, adding that same scheme to dengo's free-fall script would
+very likely reproduce it too. So: dengo's smoother-looking curve here
+isn't evidence it would give a smoother/better hydro-coupled simulation
+than Grackle would -- the two free-fall scripts are testing the
+chemistry solvers under two different *prescribed* compression models,
+and the visible noise is a feature of one of those prescriptions, not of
+either solver's numerics.

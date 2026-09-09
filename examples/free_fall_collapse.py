@@ -98,45 +98,53 @@ def main(n_target=3.0e15, safety_factor=1.0e-2, max_steps=20000):
 
     n_current = total_number_density(state, species_names)
     step = 0
-    while n_current < n_target and step < max_steps:
-        # standard free-fall time, t_ff = sqrt(3*pi / (32*G*rho))
-        rho = n_current * MH
-        t_ff = np.sqrt(3.0 * np.pi / (32.0 * G_GRAV * rho))
-        dt = safety_factor * t_ff
+    # One persistent handle for the whole collapse, instead of a fresh
+    # run_primordial() (setup_data + table-read + free_data) every one of
+    # these ~2000 steps -- see NOTES.md, that fixed per-call overhead can
+    # dominate a driver that interleaves many small solver calls with
+    # externally-updated state, which is exactly this loop's pattern (and
+    # a real hydro code's per-timestep chemistry coupling too).
+    with mod.Solver(1) as solver:
+        while n_current < n_target and step < max_steps:
+            # standard free-fall time, t_ff = sqrt(3*pi / (32*G*rho))
+            rho = n_current * MH
+            t_ff = np.sqrt(3.0 * np.pi / (32.0 * G_GRAV * rho))
+            dt = safety_factor * t_ff
 
-        # analytic free-fall solution advanced by dt: rho^-1/2 decreases
-        # linearly in time (Larson 1969 / standard free-fall collapse),
-        # at the rate that makes rho diverge at exactly rho's own t_ff.
-        rho_new = (rho ** -0.5 - np.sqrt(32.0 * G_GRAV / (3.0 * np.pi)) * dt) ** -2.0
-        density_ratio = rho_new / rho
+            # analytic free-fall solution advanced by dt: rho^-1/2
+            # decreases linearly in time (Larson 1969 / standard free-fall
+            # collapse), at the rate that makes rho diverge at exactly
+            # rho's own t_ff.
+            rho_new = (rho ** -0.5 - np.sqrt(32.0 * G_GRAV / (3.0 * np.pi)) * dt) ** -2.0
+            density_ratio = rho_new / rho
 
-        for name in species_names:
-            if name != "ge":
-                state[name] = state[name] * density_ratio
-        # adiabatic compressional heating: d(ge)/ge = (Gamma-1) d(rho)/rho
-        gamma_ad = thermodynamic_gamma(state, species_names)
-        state["ge"] = state["ge"] * (1.0 + (gamma_ad - 1.0) * (density_ratio - 1.0))
+            for name in species_names:
+                if name != "ge":
+                    state[name] = state[name] * density_ratio
+            # adiabatic compressional heating: d(ge)/ge = (Gamma-1) d(rho)/rho
+            gamma_ad = thermodynamic_gamma(state, species_names)
+            state["ge"] = state["ge"] * (1.0 + (gamma_ad - 1.0) * (density_ratio - 1.0))
 
-        final, _ = mod.run_primordial(state, dtf=dt, niter=200, intermediate=False)
-        if not final["converged"]:
-            print("Step %d: chemistry solve did not converge, stopping." % step)
-            break
-        for name in species_names:
-            state[name] = final[name]
+            final, _ = solver.step(state, dtf=dt, niter=200, intermediate=False)
+            if not final["converged"]:
+                print("Step %d: chemistry solve did not converge, stopping." % step)
+                break
+            for name in species_names:
+                state[name] = final[name]
 
-        t_total += dt
-        n_current = total_number_density(state, species_names)
+            t_total += dt
+            n_current = total_number_density(state, species_names)
 
-        history["t"].append(t_total)
-        history["n"].append(n_current)
-        history["T"].append(final["T"][0])
-        for name in species_names:
-            history[name].append(state[name][0])
+            history["t"].append(t_total)
+            history["n"].append(n_current)
+            history["T"].append(final["T"][0])
+            for name in species_names:
+                history[name].append(state[name][0])
 
-        if step % 200 == 0:
-            print("step %5d: n = %10.3e cm^-3, T = %8.1f K"
-                  % (step, n_current, final["T"][0]))
-        step += 1
+            if step % 200 == 0:
+                print("step %5d: n = %10.3e cm^-3, T = %8.1f K"
+                      % (step, n_current, final["T"][0]))
+            step += 1
 
     for key in history:
         history[key] = np.asarray(history[key])

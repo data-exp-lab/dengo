@@ -26,3 +26,10 @@ examples/_*/
 
 # OS
 .DS_Store
+
+# Locally-extracted HDF5 dev files (for building Grackle to compare
+# against, without a system-wide apt install -- see NOTES.md)
+.grackle_deps/
+.grackle/
+.grackle_compare/.venv/
+.grackle_compare/*.json

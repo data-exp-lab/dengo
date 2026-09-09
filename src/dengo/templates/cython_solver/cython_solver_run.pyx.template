@@ -6,6 +6,19 @@
 # memoryview (not the legacy `numpy.ndarray[...]` buffer syntax / numpy
 # C-API) -- the numerical hot path is entirely in the generated C++, so
 # there is nothing performance-sensitive on the Python/Cython side here.
+#
+# `Solver` holds everything that a one-shot call would otherwise redo
+# every time: the rate/cooling/gamma tables (read from disk once) and
+# every scratch buffer BE_chem_solve needs. That matters if you're
+# calling into this repeatedly with externally-updated state (e.g. a
+# free-fall/collapse driver, or per-hydro-step coupling) rather than
+# handing it one dtf and letting it run to completion internally --
+# profiling showed the fixed per-call setup/teardown cost alone (before
+# any actual chemistry) can dominate over the real solve cost at that
+# calling pattern. `run_{{ solver_name }}`/`evaluate_rhs`/
+# `evaluate_temperature`/`evaluate_jacobian` below are unchanged, one-shot
+# convenience wrappers around a temporary `Solver` for anyone who doesn't
+# need to keep it around.
 
 import os
 import numpy as np
@@ -43,11 +56,268 @@ SPECIES_NAMES = [
 ]
 
 
+cdef class Solver:
+    """A persistent handle on the "{{ solver_name }}" network: one
+    `{{ solver_name }}_setup_data()` (reads the rate/cooling/gamma tables
+    off disk once) and one set of BE_chem_solve scratch buffers, reused
+    across as many `step()` calls as you like instead of being
+    allocated and freed every time. Use as a context manager
+    (`with Solver(dims) as solver:`) or call `.close()` explicitly when
+    done; garbage collection also cleans it up, but not necessarily
+    promptly.
+
+    Parameters
+    ----------
+    dims : int
+        Number of independent chemical systems ("cells") this handle
+        will be used for -- fixed for the handle's lifetime.
+    table_file : str, optional
+        Path to the rate table binary; defaults to the one written next
+        to this module.
+    redshift : float
+        Only used for the CMB temperature floor in Compton cooling.
+    """
+    cdef {{ solver_name }}_data *_data
+    cdef double *_input
+    cdef double *_prev
+    cdef double *_scale
+    cdef double *_atol
+    cdef double *_rtol
+    cdef double *_u0
+    cdef double *_s
+    cdef double *_gu
+    cdef double *_Ju
+    cdef double *_diag_input
+    cdef double *_diag_rhs
+    cdef double *_diag_jac
+    cdef readonly int dims
+    cdef bint _closed
+
+    def __cinit__(self, int dims, table_file=None, double redshift=0.0):
+        cdef int n = NSPECIES
+        self.dims = dims
+        self._closed = True  # until fully constructed, so a failed
+                              # __cinit__ (e.g. bad table_file) doesn't
+                              # double-free in __dealloc__
+
+        if table_file is None:
+            table_file = _DEFAULT_TABLE_FILE
+        table_file_b = table_file.encode("utf-8")
+        cdef char *table_file_c = table_file_b
+        self._data = {{ solver_name }}_setup_data(table_file_c, dims)
+        self._data.current_z = redshift
+
+        self._input = <double *> malloc(dims * n * sizeof(double))
+        self._prev   = <double *> malloc(dims * n * sizeof(double))
+        self._scale  = <double *> malloc(dims * n * sizeof(double))
+        self._atol   = <double *> malloc(dims * n * sizeof(double))
+        self._rtol   = <double *> malloc(dims * n * sizeof(double))
+        self._u0     = <double *> malloc(dims * n * sizeof(double))
+        self._s      = <double *> malloc(dims * n * sizeof(double))
+        self._gu     = <double *> malloc(dims * n * sizeof(double))
+        self._Ju     = <double *> malloc(dims * n * n * sizeof(double))
+        self._diag_input = <double *> malloc(n * sizeof(double))
+        self._diag_rhs   = <double *> malloc(n * sizeof(double))
+        self._diag_jac   = <double *> malloc(n * n * sizeof(double))
+        self._closed = False
+
+    def __dealloc__(self):
+        self.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        self.close()
+        return False
+
+    def close(self):
+        """Free the persistent data/scratch buffers. Idempotent --
+        calling it more than once (or letting __dealloc__ call it again)
+        is safe."""
+        if self._closed:
+            return
+        self._closed = True
+        {{ solver_name }}_free_data(self._data)
+        free(self._input); free(self._prev); free(self._scale)
+        free(self._atol); free(self._rtol)
+        free(self._u0); free(self._s); free(self._gu); free(self._Ju)
+        free(self._diag_input); free(self._diag_rhs); free(self._diag_jac)
+
+    @property
+    def redshift(self):
+        return self._data.current_z
+
+    @redshift.setter
+    def redshift(self, double value):
+        self._data.current_z = value
+
+    def step(self, state, double dtf, int niter=10000,
+             double reltol=1.0e-5, double floor_value=1.0e-20,
+             bint adaptive_step=True, bint intermediate=True):
+        """Evolve `state` forward by `dtf` seconds, in place semantics:
+        reads `state` in, returns the evolved (final, trajectory_or_None)
+        -- same contract as `run_{{ solver_name }}`, just reusing this
+        handle's tables/buffers instead of setting up and tearing down
+        fresh ones. See `run_{{ solver_name }}`'s docstring for the
+        parameters; they're identical here minus `table_file`/`redshift`
+        (set once, at construction, via the `redshift` property).
+        """
+        if self._closed:
+            raise RuntimeError("this Solver has already been closed")
+        cdef int dims = self.dims
+        cdef int n = NSPECIES
+        cdef int i, s_idx, it
+
+        cdef double[::1] arr_view
+        for s_idx, name in enumerate(SPECIES_NAMES):
+            arr_view = np.ascontiguousarray(state[name], dtype=np.float64).reshape(-1)
+            for i in range(dims):
+                self._input[i * n + s_idx] = arr_view[i]
+
+        ensure_electron_consistency(self._input, dims, n)
+        for i in range(dims * n):
+            self._atol[i] = floor_value * reltol
+            self._rtol[i] = reltol
+            # BE_chem_solve normalizes by 1/scale internally, so scale
+            # must never be zero -- an exactly-zero initial abundance
+            # (e.g. no He+ / He++ / H2 yet) is the common case, not an
+            # edge case.
+            self._scale[i] = max(abs(self._input[i]), floor_value)
+            self._prev[i] = self._input[i]
+
+        traj_dict = {}
+        T_traj = None
+        t_traj = None
+        ok_traj = None
+        if intermediate:
+            traj_dict = {name: np.zeros((dims, niter)) for name in SPECIES_NAMES}
+            T_traj = np.zeros((dims, niter))
+            t_traj = np.zeros(niter)
+            ok_traj = np.zeros(niter, dtype=bool)
+
+        cdef double dt = dtf / niter
+        cdef double ttot = 0.0
+        cdef int rv
+        it = 0
+        while it < niter and ttot < dtf:
+            rv = BE_chem_solve(calculate_rhs_{{ solver_name }}, calculate_jacobian_{{ solver_name }},
+                                self._input, dt, self._rtol, self._atol, dims, n, self._scale,
+                                <void *> self._data, self._u0, self._s, self._gu, self._Ju)
+            for i in range(dims * n):
+                if self._input[i] < 0:
+                    rv = 1
+                    break
+            if rv == 0:
+                ttot += dt
+                for i in range(dims * n):
+                    if self._input[i] < floor_value:
+                        self._input[i] = floor_value
+                    self._prev[i] = self._input[i]
+                    self._scale[i] = max(abs(self._input[i]), floor_value)
+                if intermediate:
+                    for i in range(dims):
+                        for s_idx, name in enumerate(SPECIES_NAMES):
+                            traj_dict[name][i, it] = self._input[i * n + s_idx]
+                        T_traj[i, it] = self._data.Ts[i]
+                    t_traj[it] = ttot
+                    ok_traj[it] = True
+                if adaptive_step and ttot < dtf:
+                    dt = min(dt * 1.1, dtf - ttot)
+                it += 1
+            else:
+                dt /= 2.0
+                for i in range(dims * n):
+                    self._input[i] = self._prev[i]
+                    self._scale[i] = max(abs(self._prev[i]), floor_value)
+                if dt < 1.0e-15 * dtf:
+                    break
+
+        final = {}
+        for s_idx, name in enumerate(SPECIES_NAMES):
+            final[name] = np.array([self._input[i * n + s_idx] for i in range(dims)])
+        final["T"] = np.array([self._data.Ts[i] for i in range(dims)])
+        final["t"] = ttot
+        final["converged"] = (ttot >= dtf)
+
+        trajectory = None
+        if intermediate:
+            trajectory = {name: traj_dict[name][:, :it] for name in SPECIES_NAMES}
+            trajectory["T"] = T_traj[:, :it]
+            trajectory["t"] = t_traj[:it]
+            trajectory["successful"] = ok_traj[:it]
+
+        return final, trajectory
+
+    def evaluate_temperature(self, state):
+        """Compute T for one cell's state without advancing the
+        chemistry at all -- e.g. to re-derive T after manually rescaling
+        densities (a compression step) before the next `step()`. Always
+        cell 0 of this handle, regardless of `dims`."""
+        if self._closed:
+            raise RuntimeError("this Solver has already been closed")
+        cdef int n = NSPECIES
+        cdef int s_idx
+        for s_idx, name in enumerate(SPECIES_NAMES):
+            self._diag_input[s_idx] = state[name]
+        cdef int rv = {{ solver_name }}_calculate_temperature(self._data, self._diag_input, 1, n)
+        cdef double T = self._data.Ts[0]
+        if rv != 0:
+            raise RuntimeError("{{ solver_name }}_calculate_temperature failed (rv=%d)" % rv)
+        return T
+
+    def evaluate_rhs(self, state):
+        """Evaluate d(state)/dt once, for cell 0 of this handle --
+        mainly useful for testing the generated RHS directly (e.g.
+        against a finite-difference Jacobian)."""
+        if self._closed:
+            raise RuntimeError("this Solver has already been closed")
+        cdef int n = NSPECIES
+        cdef int s_idx
+        for s_idx, name in enumerate(SPECIES_NAMES):
+            self._diag_input[s_idx] = state[name]
+        cdef int rv = calculate_rhs_{{ solver_name }}(self._diag_input, self._diag_rhs, 1, n, <void *> self._data)
+        out = {name: self._diag_rhs[s_idx] for s_idx, name in enumerate(SPECIES_NAMES)}
+        if rv != 0:
+            raise RuntimeError("calculate_rhs_{{ solver_name }} failed (rv=%d)" % rv)
+        return out
+
+    def evaluate_jacobian(self, state):
+        """Evaluate the analytic Jacobian once, for cell 0 of this
+        handle, as a {(row_species, col_species): d(row)/d(col)} dict."""
+        if self._closed:
+            raise RuntimeError("this Solver has already been closed")
+        cdef int n = NSPECIES
+        cdef int s_idx, i_idx, j_idx
+        for s_idx, name in enumerate(SPECIES_NAMES):
+            self._diag_input[s_idx] = state[name]
+        # calculate_jacobian reads data->Ts, so the temperature cache
+        # needs a RHS evaluation first to be populated for this state.
+        calculate_rhs_{{ solver_name }}(self._diag_input, self._diag_rhs, 1, n, <void *> self._data)
+        cdef int rv = calculate_jacobian_{{ solver_name }}(self._diag_input, self._diag_jac, 1, n, <void *> self._data)
+
+        out = {}
+        # column-major per BE_chem_solve.C's convention: row i fastest, col j slowest
+        for j_idx, col_name in enumerate(SPECIES_NAMES):
+            for i_idx, row_name in enumerate(SPECIES_NAMES):
+                out[(row_name, col_name)] = self._diag_jac[j_idx * n + i_idx]
+        if rv != 0:
+            raise RuntimeError("calculate_jacobian_{{ solver_name }} failed (rv=%d)" % rv)
+        return out
+
+
 def run_{{ solver_name }}(ics, double dtf, int niter=10000,
                           double reltol=1.0e-5, double floor_value=1.0e-20,
                           bint adaptive_step=True, bint intermediate=True,
                           double redshift=0.0, table_file=None):
-    """Evolve the "{{ solver_name }}" network from `ics` for a time `dtf`.
+    """Evolve the "{{ solver_name }}" network from `ics` for a time `dtf`,
+    as a single one-shot call. If you'll be calling into this solver
+    repeatedly with externally-updated state (a free-fall/collapse
+    driver, coupling to a hydro code's per-step chemistry update, ...),
+    use `Solver` instead and keep it around across calls -- this
+    function creates one, uses it once, and throws it away, which means
+    re-reading the rate tables off disk and re-allocating every scratch
+    buffer every single call.
 
     Parameters
     ----------
@@ -78,194 +348,46 @@ def run_{{ solver_name }}(ics, double dtf, int niter=10000,
     (final, trajectory_or_None) : (dict[str, ndarray], dict or None)
     """
     cdef int dims = int(np.asarray(ics["{{ network.energy_term.name }}"]).shape[0])
-    cdef int n = NSPECIES
-    cdef int i, s_idx, it
-
-    cdef double *input = <double *> malloc(dims * n * sizeof(double))
-    cdef double *prev   = <double *> malloc(dims * n * sizeof(double))
-    cdef double *scale  = <double *> malloc(dims * n * sizeof(double))
-    cdef double *atol   = <double *> malloc(dims * n * sizeof(double))
-    cdef double *rtol   = <double *> malloc(dims * n * sizeof(double))
-    cdef double *u0     = <double *> malloc(dims * n * sizeof(double))
-    cdef double *s      = <double *> malloc(dims * n * sizeof(double))  # per-cell now (OpenMP-parallel Newton update)
-    cdef double *gu     = <double *> malloc(dims * n * sizeof(double))
-    cdef double *Ju     = <double *> malloc(dims * n * n * sizeof(double))
-
-    cdef double[::1] arr_view
-    for s_idx, name in enumerate(SPECIES_NAMES):
-        arr_view = np.ascontiguousarray(ics[name], dtype=np.float64).reshape(-1)
-        for i in range(dims):
-            input[i * n + s_idx] = arr_view[i]
-
-    if table_file is None:
-        table_file = _DEFAULT_TABLE_FILE
-    cdef bytes table_file_b = table_file.encode("utf-8")
-    cdef char *table_file_c = table_file_b
-
-    cdef {{ solver_name }}_data *data = {{ solver_name }}_setup_data(table_file_c, dims)
-    data.current_z = redshift
-
-    ensure_electron_consistency(input, dims, n)
-    for i in range(dims * n):
-        atol[i] = floor_value * reltol
-        rtol[i] = reltol
-        # BE_chem_solve normalizes by 1/scale internally, so scale must
-        # never be zero -- and an exactly-zero initial abundance (e.g. no
-        # He+ / He++ / H2 yet) is the common case, not an edge case.
-        scale[i] = max(abs(input[i]), floor_value)
-        prev[i] = input[i]
-
-    traj_dict = {}
-    T_traj = None
-    t_traj = None
-    ok_traj = None
-    if intermediate:
-        traj_dict = {name: np.zeros((dims, niter)) for name in SPECIES_NAMES}
-        T_traj = np.zeros((dims, niter))
-        t_traj = np.zeros(niter)
-        ok_traj = np.zeros(niter, dtype=bool)
-
-    cdef double dt = dtf / niter
-    cdef double ttot = 0.0
-    cdef int rv
-    it = 0
-    while it < niter and ttot < dtf:
-        rv = BE_chem_solve(calculate_rhs_{{ solver_name }}, calculate_jacobian_{{ solver_name }},
-                            input, dt, rtol, atol, dims, n, scale,
-                            <void *> data, u0, s, gu, Ju)
-        for i in range(dims * n):
-            if input[i] < 0:
-                rv = 1
-                break
-        if rv == 0:
-            ttot += dt
-            for i in range(dims * n):
-                if input[i] < floor_value:
-                    input[i] = floor_value
-                prev[i] = input[i]
-                scale[i] = max(abs(input[i]), floor_value)
-            if intermediate:
-                for i in range(dims):
-                    for s_idx, name in enumerate(SPECIES_NAMES):
-                        traj_dict[name][i, it] = input[i * n + s_idx]
-                    T_traj[i, it] = data.Ts[i]
-                t_traj[it] = ttot
-                ok_traj[it] = True
-            if adaptive_step and ttot < dtf:
-                dt = min(dt * 1.1, dtf - ttot)
-            it += 1
-        else:
-            dt /= 2.0
-            for i in range(dims * n):
-                input[i] = prev[i]
-                scale[i] = max(abs(prev[i]), floor_value)
-            if dt < 1.0e-15 * dtf:
-                break
-
-    final = {}
-    for s_idx, name in enumerate(SPECIES_NAMES):
-        final[name] = np.array([input[i * n + s_idx] for i in range(dims)])
-    final["T"] = np.array([data.Ts[i] for i in range(dims)])
-    final["t"] = ttot
-    final["converged"] = (ttot >= dtf)
-
-    trajectory = None
-    if intermediate:
-        trajectory = {name: traj_dict[name][:, :it] for name in SPECIES_NAMES}
-        trajectory["T"] = T_traj[:, :it]
-        trajectory["t"] = t_traj[:it]
-        trajectory["successful"] = ok_traj[:it]
-
-    {{ solver_name }}_free_data(data)
-    free(input); free(prev); free(scale); free(atol); free(rtol)
-    free(u0); free(s); free(gu); free(Ju)
-
-    return final, trajectory
+    solver = Solver(dims, table_file=table_file, redshift=redshift)
+    try:
+        return solver.step(ics, dtf, niter=niter, reltol=reltol, floor_value=floor_value,
+                            adaptive_step=adaptive_step, intermediate=intermediate)
+    finally:
+        solver.close()
 
 
 def evaluate_temperature(state, double redshift=0.0, table_file=None):
     """Compute T for one state without advancing the chemistry at all --
     useful for e.g. re-deriving T after manually rescaling densities
-    (a compression step) before handing the state back to run_{{ solver_name }}."""
-    cdef int n = NSPECIES
-    cdef double *input = <double *> malloc(n * sizeof(double))
-    for s_idx, name in enumerate(SPECIES_NAMES):
-        input[s_idx] = state[name]
-
-    if table_file is None:
-        table_file = _DEFAULT_TABLE_FILE
-    cdef bytes table_file_b = table_file.encode("utf-8")
-    cdef char *table_file_c = table_file_b
-    cdef {{ solver_name }}_data *data = {{ solver_name }}_setup_data(table_file_c, 1)
-    data.current_z = redshift
-
-    cdef int rv = {{ solver_name }}_calculate_temperature(data, input, 1, n)
-    cdef double T = data.Ts[0]
-
-    {{ solver_name }}_free_data(data)
-    free(input)
-    if rv != 0:
-        raise RuntimeError("{{ solver_name }}_calculate_temperature failed (rv=%d)" % rv)
-    return T
+    (a compression step) before handing the state back to
+    run_{{ solver_name }}. One-shot convenience wrapper; see `Solver` if
+    you're calling this (or `run_{{ solver_name }}`/`evaluate_rhs`/
+    `evaluate_jacobian`) repeatedly."""
+    solver = Solver(1, table_file=table_file, redshift=redshift)
+    try:
+        return solver.evaluate_temperature(state)
+    finally:
+        solver.close()
 
 
 def evaluate_rhs(state, double redshift=0.0, table_file=None):
     """Evaluate d(state)/dt once, for one cell -- mainly useful for
     testing the generated RHS directly (e.g. against a finite-difference
-    Jacobian) without going through the time-stepping loop."""
-    cdef int n = NSPECIES
-    cdef double *input = <double *> malloc(n * sizeof(double))
-    cdef double *rhs = <double *> malloc(n * sizeof(double))
-    for s_idx, name in enumerate(SPECIES_NAMES):
-        input[s_idx] = state[name]
-
-    if table_file is None:
-        table_file = _DEFAULT_TABLE_FILE
-    cdef bytes table_file_b = table_file.encode("utf-8")
-    cdef char *table_file_c = table_file_b
-    cdef {{ solver_name }}_data *data = {{ solver_name }}_setup_data(table_file_c, 1)
-    data.current_z = redshift
-
-    cdef int rv = calculate_rhs_{{ solver_name }}(input, rhs, 1, n, <void *> data)
-    out = {name: rhs[s_idx] for s_idx, name in enumerate(SPECIES_NAMES)}
-
-    {{ solver_name }}_free_data(data)
-    free(input); free(rhs)
-    if rv != 0:
-        raise RuntimeError("calculate_rhs_{{ solver_name }} failed (rv=%d)" % rv)
-    return out
+    Jacobian) without going through the time-stepping loop. One-shot
+    convenience wrapper; see `Solver` if you're calling this repeatedly."""
+    solver = Solver(1, table_file=table_file, redshift=redshift)
+    try:
+        return solver.evaluate_rhs(state)
+    finally:
+        solver.close()
 
 
 def evaluate_jacobian(state, double redshift=0.0, table_file=None):
     """Evaluate the analytic Jacobian once, for one cell, as a
-    {(row_species, col_species): d(row)/d(col)} dict."""
-    cdef int n = NSPECIES
-    cdef double *input = <double *> malloc(n * sizeof(double))
-    cdef double *jac = <double *> malloc(n * n * sizeof(double))
-    for s_idx, name in enumerate(SPECIES_NAMES):
-        input[s_idx] = state[name]
-
-    if table_file is None:
-        table_file = _DEFAULT_TABLE_FILE
-    cdef bytes table_file_b = table_file.encode("utf-8")
-    cdef char *table_file_c = table_file_b
-    cdef {{ solver_name }}_data *data = {{ solver_name }}_setup_data(table_file_c, 1)
-    data.current_z = redshift
-
-    # calculate_jacobian reads data->Ts, so the temperature cache needs a
-    # RHS evaluation first to be populated for this state.
-    cdef double *rhs = <double *> malloc(n * sizeof(double))
-    calculate_rhs_{{ solver_name }}(input, rhs, 1, n, <void *> data)
-    cdef int rv = calculate_jacobian_{{ solver_name }}(input, jac, 1, n, <void *> data)
-
-    out = {}
-    # column-major per BE_chem_solve.C's convention: row i fastest, col j slowest
-    for j_idx, col_name in enumerate(SPECIES_NAMES):
-        for i_idx, row_name in enumerate(SPECIES_NAMES):
-            out[(row_name, col_name)] = jac[j_idx * n + i_idx]
-
-    {{ solver_name }}_free_data(data)
-    free(input); free(jac); free(rhs)
-    if rv != 0:
-        raise RuntimeError("calculate_jacobian_{{ solver_name }} failed (rv=%d)" % rv)
-    return out
+    {(row_species, col_species): d(row)/d(col)} dict. One-shot
+    convenience wrapper; see `Solver` if you're calling this repeatedly."""
+    solver = Solver(1, table_file=table_file, redshift=redshift)
+    try:
+        return solver.evaluate_jacobian(state)
+    finally:
+        solver.close()
