@@ -1741,3 +1741,67 @@ scope (needed specifically to push changes under `.github/workflows/`)
 -- required the user to run `gh auth refresh -s workflow` interactively
 (a browser-based re-authorization, not something scriptable from here)
 before the push could succeed.
+
+**2026-09-09, new branch `web-interface-cleanup`: LaTeX axis labels,
+step annotation, human-readable time units, dark-mode-aware charts.**
+Three specific asks about `wasm/`'s widget, plus a mid-flow one about
+dark mode ("I don't use Dark Themes but somebody else I work with
+does"):
+
+- **Proper math typesetting.** Vega-Lite axis titles are plain SVG
+  `<text>` -- no subscript/superscript/LaTeX rendering at all, which is
+  why the old labels were hand-approximated Unicode (`n (cm⁻³)`,
+  `H⁺ / H_tot`). Rather than keep extending that approximation, pulled
+  in [KaTeX](https://katex.org/) (CDN, `wasm/generate_site.py`'s
+  `PAGE_TEMPLATE`) and render each axis's title as real LaTeX
+  (`AXIS_LATEX` in `app.js`) into small HTML labels laid out alongside
+  each chart (`.axis-y`/`.axis-x` in `style.css`, `.chart-row` markup in
+  `PAGE_TEMPLATE`) instead of asking Vega-Lite to draw a title at all
+  (`axis: {title: null}`). `.katex { color: inherit }` so the labels
+  follow the page's light/dark text color rather than KaTeX's own
+  light-mode-only default.
+- **Annotate solver steps.** Each entry in the plotted series already
+  *is* one accepted adaptive step (one call to the generated `step()`);
+  the old spec only drew point markers below a 60-point cutoff, so nearly
+  every free-fall run (hundreds to thousands of steps) rendered as a bare
+  line with the step-size ramp invisible. Now always draws point markers,
+  sized down as the step count grows (`pointSize` in `chartSpec()`,
+  `app.js`) so density stays legible instead of turning into a smear, and
+  added a tooltip (step index, `x`, `Δt`, the y-field) so hovering a point
+  shows exactly what step it is and how big a jump was taken.
+- **Auto time units.** The old x-axis for the constant-density mode was
+  always raw seconds, unreadable at the kyr-Myr scales this project
+  actually runs at. Axis ticks now auto-pick a unit (s/hr/d/yr/kyr/Myr)
+  via a Vega expression (`TIME_LABEL_EXPR`) evaluated per tick -- Vega-Lite
+  can't call out to arbitrary JS from a spec, so there's a second,
+  same-logic JS version (`formatTimeAuto()`) for the tooltip and status
+  line, which show the auto-unit value *and* raw seconds side by side
+  ("in addition to", not instead of, per the ask). Also threaded actual
+  elapsed simulation time through the free-fall path (previously only
+  tracked density, not time at all), so even though free-fall's x-axis is
+  density, its tooltip/status still report elapsed time.
+  One snag: converted tick labels ("254 kyr") are wider than the plain
+  numbers they replaced, and on a busy same-decade log axis started
+  visibly overlapping ("222 kyr254 kyr") despite `labelOverlap: "greedy"`
+  being set -- fixed by angling time-axis labels (`labelAngle: -40`,
+  density axis left alone) rather than relying on overlap removal alone.
+- **Dark mode.** Chart colors were never actually theme-aware -- Vega-Lite's
+  defaults (near-black axis/label colors) were baked into every spec
+  regardless of the page's already-dark-mode-aware CSS. Added `vlConfig()`
+  (axis/line/point colors picked from `isDarkMode()`) to every chart spec,
+  bumped the orange target-temperature-band opacity in dark mode (0.15
+  read as nearly invisible against the dark panel background), and added
+  a `matchMedia` `change` listener so flipping the OS theme live redraws
+  the charts -- everything else on the page already follows the OS
+  preference via CSS custom properties and needed no JS at all.
+
+Verified the same way as the original wasm work: a real Emscripten build
+of all three fiducial networks plus a real headless-browser pass
+(Playwright + system Chrome) over every page in both `colorScheme: light`
+and `colorScheme: dark`, checking (a) zero console errors, (b) the exact
+same physics results as every prior check in this file (primordial
+free-fall T=2198.5K, atomic T=5817.6K, hydrogen_minimal stopping at 68
+steps) -- confirming the tooltip/dt/t plumbing didn't touch the actual
+solver path, (c) KaTeX genuinely rendered (not left as raw LaTeX source
+or a red KaTeX error span), and (d) the angled tick-label fix by
+rendering and reading back actual tick text from the DOM.

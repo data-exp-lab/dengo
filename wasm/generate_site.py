@@ -41,6 +41,7 @@ PAGE_TEMPLATE = """<!doctype html>
 <title>{title} -- dengo in the browser</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>%F0%9F%A7%AA</text></svg>">
 <link rel="stylesheet" href="../style.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
 </head>
 <body>
 <div class="nav"><a href="../">&larr; all networks</a></div>
@@ -81,14 +82,29 @@ PAGE_TEMPLATE = """<!doctype html>
   </div>
 
   <div id="charts">
-    <div class="chart-box"><div id="chart-T"></div></div>
-    <div class="chart-box"><div id="chart-ion"></div></div>
+    <div class="chart-box">
+      <div class="chart-title">Temperature</div>
+      <div class="chart-row">
+        <div class="axis-y" id="ylabel-T"></div>
+        <div id="chart-T"></div>
+      </div>
+      <div class="axis-x" id="xlabel-T"></div>
+    </div>
+    <div class="chart-box">
+      <div class="chart-title">Ionization</div>
+      <div class="chart-row">
+        <div class="axis-y" id="ylabel-ion"></div>
+        <div id="chart-ion"></div>
+      </div>
+      <div class="axis-x" id="xlabel-ion"></div>
+    </div>
   </div>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/vega@5"></script>
 <script src="https://cdn.jsdelivr.net/npm/vega-lite@5"></script>
 <script src="https://cdn.jsdelivr.net/npm/vega-embed@6"></script>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
 <script src="dengo_wasm.js"></script>
 <script src="../app.js"></script>
 <script>

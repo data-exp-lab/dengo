@@ -6,6 +6,11 @@
 @media (prefers-color-scheme: dark) {
   :root { --bg: #16181d; --fg: #e8e8e8; --muted: #9aa0a6; --border: #30333a; --panel: #1e2128; }
 }
+/* explicit overrides, for a page-provided toggle -- unused today (the
+   page currently only follows the OS preference above) but harmless to
+   have ready, and mirrors the pattern other dengo surfaces use. */
+:root[data-theme="dark"] { --bg: #16181d; --fg: #e8e8e8; --muted: #9aa0a6; --border: #30333a; --panel: #1e2128; }
+:root[data-theme="light"] { --bg: #ffffff; --fg: #1a1a1a; --muted: #666; --border: #d8d8d8; --panel: #f7f7f9; }
 * { box-sizing: border-box; }
 body {
   margin: 0; background: var(--bg); color: var(--fg);
@@ -31,6 +36,17 @@ input[type=range] { width: 100%; }
 #status { font-size: 0.85em; color: var(--muted); margin-top: 10px; min-height: 1.2em; }
 #charts { display: flex; flex-direction: column; gap: 8px; }
 .chart-box { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 8px; }
+.chart-title { font-size: 0.85em; font-weight: 600; color: var(--fg); margin: 2px 4px 4px; }
+.chart-row { display: flex; align-items: stretch; }
+.axis-y {
+  writing-mode: vertical-rl; transform: rotate(180deg);
+  display: flex; align-items: center; justify-content: center;
+  color: var(--muted); font-size: 0.8em; flex: 0 0 auto; padding: 0 2px;
+}
+.axis-x { text-align: center; color: var(--muted); font-size: 0.8em; margin-top: 2px; }
+/* KaTeX ships its own (light-mode-only) text color; make it follow the
+   page theme instead so axis labels stay legible in dark mode too. */
+.katex { color: inherit; }
 #species-sliders { border-top: 1px solid var(--border); padding-top: 4px; margin-top: 4px; }
 .nav { margin-bottom: 20px; }
 .nav a { margin-right: 12px; }

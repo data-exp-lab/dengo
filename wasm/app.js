@@ -8,10 +8,80 @@
 // (true of every fiducial network) plus, optionally, H2_1/H2_2 for the
 // bonus H2-fraction readout.
 const KB = 1.3806504e-16, MH = 1.67e-24, G_GRAV = 6.674e-8;
+const YEAR = 3.1557e7; // Julian year, seconds -- matches primordial_cooling.py's usage elsewhere
 
 let mod, idx, speciesNames;
 let init, step, statePtr, rhsPtr, temperature;
 let currentMode = "cool";
+
+// -- LaTeX axis labels (rendered via KaTeX, not Vega-Lite's own plain-text
+// titles -- see NOTES.md for why: Vega-Lite axis titles are just SVG
+// <text>, no math rendering, so proper sub/superscripts need an external
+// renderer laid out alongside the chart instead). ----------------------
+const AXIS_LATEX = {
+  time: "t\\ (\\mathrm{s})",
+  density: "n\\ (\\mathrm{cm^{-3}})",
+  T: "T\\ (\\mathrm{K})",
+  ion: "\\mathrm{H^+} / \\mathrm{H_{tot}}",
+};
+
+function renderLatex(elId, key) {
+  const el = document.getElementById(elId);
+  if (!el || !window.katex) return;
+  if (el.dataset.rendered === key) return; // cheap no-op on unrelated redraws
+  katex.render(AXIS_LATEX[key], el, { throwOnError: false });
+  el.dataset.rendered = key;
+}
+
+// Same "pick the least-silly unit" logic in two places by necessity: this
+// JS version (for status text and the tooltip's human-readable field) and
+// TIME_LABEL_EXPR below (a Vega expression string, for axis tick labels --
+// Vega-Lite can't call out to arbitrary JS from a spec). Keep them in sync
+// if either changes.
+function formatTimeAuto(seconds) {
+  const a = Math.abs(seconds);
+  if (!(a > 0)) return "0 s";
+  if (a >= 1e6 * YEAR) return (seconds / (1e6 * YEAR)).toPrecision(3) + " Myr";
+  if (a >= 1e3 * YEAR) return (seconds / (1e3 * YEAR)).toPrecision(3) + " kyr";
+  if (a >= YEAR) return (seconds / YEAR).toPrecision(3) + " yr";
+  if (a >= 86400) return (seconds / 86400).toPrecision(3) + " d";
+  if (a >= 3600) return (seconds / 3600).toPrecision(3) + " hr";
+  return seconds.toPrecision(3) + " s";
+}
+
+const TIME_LABEL_EXPR =
+  "!(abs(datum.value) > 0) ? '0 s' : " +
+  "abs(datum.value) >= 1e6*" + YEAR + " ? format(datum.value/1e6/" + YEAR + ",'.3~g') + ' Myr' : " +
+  "abs(datum.value) >= 1e3*" + YEAR + " ? format(datum.value/1e3/" + YEAR + ",'.3~g') + ' kyr' : " +
+  "abs(datum.value) >= " + YEAR + " ? format(datum.value/" + YEAR + ",'.3~g') + ' yr' : " +
+  "abs(datum.value) >= 86400 ? format(datum.value/86400,'.3~g') + ' d' : " +
+  "abs(datum.value) >= 3600 ? format(datum.value/3600,'.3~g') + ' hr' : " +
+  "format(datum.value,'.3~g') + ' s'";
+
+function isDarkMode() {
+  return !!(window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
+}
+
+// Vega-Lite's default axis/legend colors are tuned for a light page and go
+// near-invisible against a dark one (someone I work with actually uses
+// dark mode) -- pick chart colors to match the CSS theme instead of
+// leaving Vega-Lite's light-mode defaults baked into the spec.
+function vlConfig() {
+  const dark = isDarkMode();
+  return {
+    background: null,
+    view: { stroke: "transparent" },
+    axis: {
+      labelColor: dark ? "#b7bcc4" : "#333333",
+      titleColor: dark ? "#b7bcc4" : "#333333",
+      gridColor: dark ? "#33363d" : "#e6e6e6",
+      domainColor: dark ? "#565a63" : "#888888",
+      tickColor: dark ? "#565a63" : "#888888",
+    },
+    line: { color: dark ? "#8ab4ff" : "#3366cc" },
+    point: { color: dark ? "#8ab4ff" : "#3366cc" },
+  };
+}
 
 function getScalar() {
   const ptr = statePtr() >> 3;
@@ -64,7 +134,7 @@ function runConstantDensity(nH, T, fractions, logDtf, safetyFactor = 0.1, maxSte
   setIcs(nH, T, fractions);
   const dtfTotal = Math.pow(10, logDtf);
   let t = 0;
-  const tHist = [], THist = [], ionHist = [], h2Hist = [];
+  const tHist = [], THist = [], ionHist = [], h2Hist = [], dtHist = [];
   for (let i = 0; i < maxSteps; i++) {
     const dt = Math.min(safetyFactor * coolingTime(dtfTotal), dtfTotal - t);
     if (dt <= 0) break;
@@ -73,16 +143,17 @@ function runConstantDensity(nH, T, fractions, logDtf, safetyFactor = 0.1, maxSte
     t += dt;
     const s = getScalar();
     tHist.push(t); THist.push(temperature()); ionHist.push(ionizedFraction(s)); h2Hist.push(h2Fraction(s));
+    dtHist.push(dt);
     if (t >= dtfTotal) break;
   }
-  return { x: tHist, T: THist, ion: ionHist, h2: h2Hist, xlabel: "Time (s)" };
+  return { x: tHist, t: tHist, dt: dtHist, T: THist, ion: ionHist, h2: h2Hist, xKey: "time" };
 }
 
 function runFreefall(nH, T, fractions, logNTarget, safetyFactor = 0.01, maxSteps = 5000) {
   setIcs(nH, T, fractions);
   const nTarget = Math.pow(10, logNTarget);
-  let nCurrent = nH;
-  const nHist = [], THist = [], ionHist = [], h2Hist = [];
+  let nCurrent = nH, t = 0;
+  const nHist = [], THist = [], ionHist = [], h2Hist = [], tHist = [], dtHist = [];
   for (let i = 0; i < maxSteps; i++) {
     if (nCurrent >= nTarget) break;
     const rho = nCurrent * MH;
@@ -100,26 +171,57 @@ function runFreefall(nH, T, fractions, logNTarget, safetyFactor = 0.01, maxSteps
 
     const converged = step(dt, 200, 1e-5);
     if (!converged) break;
+    t += dt;
     const s = getScalar();
     nCurrent = 0;
     for (const name of speciesNames) if (name !== "ge" && name !== "de") nCurrent += s[name];
     nHist.push(nCurrent); THist.push(temperature()); ionHist.push(ionizedFraction(s)); h2Hist.push(h2Fraction(s));
+    tHist.push(t); dtHist.push(dt);
   }
-  return { x: nHist, T: THist, ion: ionHist, h2: h2Hist, xlabel: "n (cm⁻³)" };
+  return { x: nHist, t: tHist, dt: dtHist, T: THist, ion: ionHist, h2: h2Hist, xKey: "density" };
 }
 
-function chartSpec(field, xlabel, yLabel, data, extra) {
+const FIELD_TITLE = { T: "T (K)", ion: "H⁺ / H_tot" };
+
+function chartSpec(field, xKey, data, extra) {
+  // Point markers double as an annotation of *where* the adaptive
+  // stepper actually placed a step -- their spacing on the log x-axis
+  // directly shows the step-size ramp (small at first, growing ~2x per
+  // step; see BE_chem_solve.C / NOTES.md). Always drawn (not just below
+  // some point-count cutoff), sized down as steps pile up so a
+  // few-thousand-step free-fall run doesn't turn into a solid smear.
+  const n = data.length;
+  const pointSize = Math.max(6, Math.min(36, 2500 / Math.max(n, 1)));
   return {
     $schema: "https://vega.github.io/schema/vega-lite/v5.json",
     width: 600, height: 220, background: null,
+    config: vlConfig(),
     layer: [
       ...(extra || []),
       {
         data: { values: data },
-        mark: { type: "line", point: data.length < 60 },
+        mark: { type: "line", point: { filled: true, size: pointSize, opacity: 0.9 } },
         encoding: {
-          x: { field: "x", type: "quantitative", scale: { type: "log" }, title: xlabel },
-          y: { field: field, type: "quantitative", scale: { type: "log" }, title: yLabel },
+          x: {
+            field: "x", type: "quantitative", scale: { type: "log" },
+            axis: {
+              title: null, labelOverlap: "greedy",
+              // human-unit labels ("254 kyr") run wider than the plain
+              // numbers this axis used to show, so angle them -- greedy
+              // overlap removal alone still let neighbors visually touch
+              // on a busy log axis with many same-decade ticks.
+              labelAngle: xKey === "time" ? -40 : 0,
+              labelExpr: xKey === "time" ? TIME_LABEL_EXPR : undefined,
+            },
+          },
+          y: { field: field, type: "quantitative", scale: { type: "log" }, axis: { title: null } },
+          tooltip: [
+            { field: "i", title: "step", type: "quantitative" },
+            { field: "x", title: xKey === "time" ? "t (s)" : "n (cm⁻³)", type: "quantitative", format: ".3~g" },
+            { field: "tHuman", title: "t", type: "nominal" },
+            { field: "dt", title: "step Δt (s)", type: "quantitative", format: ".3~g" },
+            { field: field, title: FIELD_TITLE[field] || field, type: "quantitative", format: ".4~g" },
+          ],
         },
       },
     ],
@@ -166,23 +268,32 @@ function redraw() {
   }
   const elapsed = performance.now() - t0;
 
-  const rows = result.x.map((x, i) => ({ x, T: result.T[i], ion: result.ion[i] }));
+  const rows = result.x.map((x, i) => ({
+    x, T: result.T[i], ion: result.ion[i],
+    i, dt: result.dt[i], tHuman: formatTimeAuto(result.t[i]),
+  }));
   const band = {
     data: { values: [{ y0: 1500, y1: 2500 }] },
-    mark: { type: "rect", opacity: 0.15, color: "orange" },
+    mark: { type: "rect", opacity: isDarkMode() ? 0.25 : 0.15, color: "orange" },
     encoding: { y: { field: "y0", type: "quantitative" }, y2: { field: "y1" } },
   };
-  vegaEmbed("#chart-T", chartSpec("T", result.xlabel, "Temperature (K)", rows, [band]),
+  vegaEmbed("#chart-T", chartSpec("T", result.xKey, rows, [band]),
             { actions: false, renderer: "svg" });
-  vegaEmbed("#chart-ion", chartSpec("ion", result.xlabel, "H⁺ / H_tot", rows),
+  vegaEmbed("#chart-ion", chartSpec("ion", result.xKey, rows),
             { actions: false, renderer: "svg" });
+  renderLatex("ylabel-T", "T");
+  renderLatex("xlabel-T", result.xKey);
+  renderLatex("ylabel-ion", "ion");
+  renderLatex("xlabel-ion", result.xKey);
 
   const finalT = result.T[result.T.length - 1];
   const finalIon = result.ion[result.ion.length - 1];
   const finalH2 = result.h2[result.h2.length - 1];
+  const finalTime = result.t[result.t.length - 1];
   let statusText = `${rows.length} steps, ${elapsed.toFixed(1)} ms -- final T=${finalT ? finalT.toFixed(1) : "?"} K, `
     + `ionized=${finalIon ? finalIon.toExponential(2) : "?"}`;
   if (finalH2 !== null && finalH2 !== undefined) statusText += `, H2/H_tot=${finalH2.toExponential(2)}`;
+  if (finalTime !== undefined) statusText += `, elapsed t=${formatTimeAuto(finalTime)} (${finalTime.toExponential(2)} s)`;
   document.getElementById("status").textContent = statusText;
 }
 
@@ -220,6 +331,13 @@ function initPage(config) {
   document.getElementById("mode-freefall").addEventListener("click", () => setMode("freefall"));
   for (const id of ["nH", "T", "dtf", "ntarget"]) {
     document.getElementById(id).addEventListener("input", scheduleRedraw);
+  }
+  // Charts bake current colors into the Vega-Lite spec at render time
+  // (see vlConfig()), so a live OS theme flip needs an explicit redraw --
+  // it won't happen on its own the way the CSS-variable-driven rest of
+  // the page does.
+  if (window.matchMedia) {
+    window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", scheduleRedraw);
   }
 
   DengoModule().then((m) => {
