@@ -2667,3 +2667,27 @@ reassignment/dead-code overwrites, local-variable clamps, mask-variable
 name reuse, the threebody-switch-vs-T-branch classification) and the
 declarative-schema rewrite option remain unbuilt, per explicit
 instruction to stop here for now.
+
+**2026-09-09, new branch `wasm-temp-band-note`: labeled the shaded band
+on the Temperature chart.** Flagged as "the yellow bar" -- it had no
+on-page explanation at all; it's the `band` rect in `redraw()`
+(`app.js`, y0=1500/y1=2500, orange at low opacity, which is exactly why
+it reads as yellow rather than orange, especially in dark mode where it
+looks distinctly gold), only ever shown in temperature view (`tempField
+=== "T"`; it disappears in thermal-energy view since 1500-2500 is a
+temperature range specifically). It marks this project's target regime
+(T ~ 1500-2500 K, from the H2-formation-heating-driven fragmentation
+physics this whole widget exists to explore) -- context, not a solver
+threshold or a claim that any given run passes through it.
+
+Added a `.preset-note` caption directly under the Temperature chart in
+`generate_site.py`'s page template saying exactly that, matching the
+existing note style used elsewhere on the page (e.g. the shock-event
+note). No app.js/rates.js logic changed -- purely a label for something
+that already existed silently.
+
+Verified: real Emscripten rebuild of all three fiducial networks,
+headless-browser check (light + dark) confirming the note renders under
+the chart on every network, reads correctly against both themes, and
+zero console errors. Full `pytest` unaffected (120/120) -- this only
+touches the HTML template, no path any Python test exercises.
