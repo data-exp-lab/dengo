@@ -135,3 +135,40 @@ ul.network-list li {
 }
 ul.network-list a { font-weight: 600; text-decoration: none; }
 ul.network-list .desc { color: var(--muted); font-size: 0.9em; margin-top: 4px; }
+
+/* Reaction-rate viewer (rates.html/rates.js) */
+.rates-toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+.rates-toolbar-spacer { flex: 1; }
+.rates-toolbar button {
+  font-size: 0.8em; padding: 4px 10px; border-radius: 8px; border: 1px solid var(--border);
+  background: var(--bg); color: var(--fg); cursor: pointer;
+}
+#rates-export { background: var(--accent); color: white; border-color: var(--accent); }
+.rates-upload-label {
+  font-size: 0.8em; padding: 4px 10px; border-radius: 8px; border: 1px solid var(--border);
+  background: var(--bg); color: var(--fg); cursor: pointer;
+}
+.rates-upload-label input[type=file] { display: none; }
+#rate-toggle { margin-bottom: 16px; }
+#rate-cards {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px;
+}
+.rate-card {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 10px;
+}
+.rate-card-header { font-size: 0.85em; margin-bottom: 6px; }
+.rate-source { display: block; color: var(--muted); font-size: 0.85em; margin-top: 2px; }
+.rate-card-controls { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 0.8em; }
+.rate-card-controls select {
+  padding: 2px 4px; border-radius: 6px; border: 1px solid var(--border);
+  background: var(--bg); color: var(--fg); font-size: 0.95em;
+}
+.rate-card-controls button {
+  font-size: 0.9em; padding: 2px 8px; border-radius: 6px; border: 1px solid var(--border);
+  background: var(--bg); color: var(--muted); cursor: pointer;
+}
+.rate-card textarea {
+  width: 100%; font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 0.72em;
+  padding: 6px; border-radius: 6px; border: 1px solid var(--border);
+  background: var(--bg); color: var(--fg); resize: vertical; margin-bottom: 6px;
+}

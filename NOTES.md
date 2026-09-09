@@ -2481,3 +2481,127 @@ were wrong before, so anything evolved from them legitimately changes
 once they're fixed. Any future entry citing a specific "final T"-style
 number should be re-verified against the current build, not assumed to
 still match an older entry in this file.
+
+**2026-09-09, new branch `wasm-rate-viewer`: added a reaction-rate
+viewer/editor page, browser-only scope by explicit decision.** This
+returns to the "reaction rate viewer" idea flagged earlier in the
+session, now scoped down per an explicit instruction: "let's see what
+we can do just for the web interface for now and worry about the rest
+later." So this entry is the whole feature -- there is deliberately no
+attempt here to feed edits back into the real Python/dengo codegen;
+that's a separate, later phase.
+
+Architecture decision, made after evaluating it directly rather than
+guessing: use Vega-Lite's own `data: {sequence: {...}}` generator plus
+a `transform: [{calculate: ...}]` chain as the entire formula-evaluation
+mechanism, instead of writing a custom JS expression parser. Vega's
+`calculate` transform already is a small sandboxed expression language
+(supports `pow`/`exp`/`log`/`sqrt`/`min`/`max`/ternary), so a rate
+"formula" is just one more `calculate` step computing `T -> tev ->
+logtev/logT -> rate` in a chain, using the same natural-log convention
+`primordial_rates.py` itself uses (confirmed via k09's own explicit
+`np.log10` recovery: `state.logT / np.log(10.0)`). This means editing a
+formula string and re-embedding the same spec shape *is* the entire
+live-update story -- no evaluator to maintain at all beyond the
+formula-string transcription itself.
+
+New `wasm/reaction_rates.py`: hand-transcribed, hand-verified formulas
+for all 22 primordial reactions (k01-k19, k21-k23), including both
+three-body reactions' (k13, k22) 6 alternate `threebody=0..5` literature
+fits as named presets (matching dengo/grackle's own `state.threebody`
+convention) rather than folding them into one T-formula -- they're not
+actually T-branches, they're a selection among entirely different
+fits for the same reaction. New `wasm/rates.js` (viewer/editor logic)
+and a `rates.html` page per network (built by `generate_site.py`,
+filtered to whatever reactions that network actually uses): toggle
+which reactions are plotted, an editable formula textarea per card that
+redraws live on input, a preset dropdown for k13/k22, revert-to-default,
+and JSON export/import of the whole edit session (which reactions are
+selected, current formula, current preset) so a browser session's
+exploration isn't lost on reload.
+
+**Two real bugs found during verification, both in the transcription,
+not the architecture:**
+1. Every formula string initially used bare `T`/`tev`/`logtev`/`logT`.
+   Vega's `calculate` expression language interprets a bare identifier
+   as a reactive *signal* reference, not a field lookup -- so the very
+   first real-browser embed crashed with "Unrecognized signal name."
+   Fixed by systematically prefixing every reference with `datum.`
+   (word-boundary regex is safe here since these are pure-alphabetic,
+   non-overlapping identifiers -- `\btev\b` never matches inside
+   `logtev`). Re-verified numerically afterward, not just "no longer
+   crashes."
+2. A regeneration pass (needed to apply fix #1 file-wide) had a bug of
+   its own: k13/k22 preset keys came out as bare `"0"`-`"5"` instead of
+   `"threebody=0"`-`"threebody=5"`, silently breaking the preset-label
+   convention the UI and JSON export depend on. Caught by reading the
+   regenerated file's diff carefully rather than trusting the
+   regeneration script; fixed in the generation script itself and
+   rebuilt.
+
+Verification methodology (two independent checks against real ground
+truth, not just "looks right"): (a) evaluated every transcribed formula
+directly (a small JS `Function` sandbox, same `datum.*` inputs) against
+the real dengo `coeff_fn` output for the same T values, called from
+actual Python (`ChemicalNetwork`'s real primordial network, T = 10 K to
+1e8 K, all 22 reactions plus all 12 threebody presets) -- all matched to
+better than 1e-6 relative error. (b) went one step further and verified
+the values Vega itself computes at runtime, not just the formula string
+in isolation: built real `rateChartSpec()` specs, embedded them via the
+real `vegaEmbed()` used on the page, pulled the actual computed dataset
+back out (`result.view.data(<compiled dataset name>)`), and compared
+those against the same Python reference via log-linear interpolation --
+matched to a few percent (attributable to the interpolation itself, not
+transcription error, since check (a) already confirmed the underlying
+formulas exactly). Both checks were re-run after fixes #1 and #2 landed,
+against the corrected build, not just the first draft.
+
+Full UI regression pass on the corrected build (real Emscripten-built
+site, headless Chrome, light + dark, all three fiducial networks):
+card counts correct (22/6/2), k13's preset dropdown lists all six
+`threebody=N` options with `threebody=4` as the pre-selected default,
+toggle-all/toggle-none/reset-edits all work, live-editing a formula
+redraws only that card's chart and revert restores the original, 
+switching k13's preset updates both the formula textarea and the chart
+together, an intentionally-malformed formula degrades to a
+`.chart-placeholder` error message instead of crashing the page (Vega
+returns a deliberately generic "Disabled." message for some malformed
+inputs and a specific one, e.g. "Unrecognized function: ...", for
+others -- either way it's caught and shown per-card, the rest of the
+page is unaffected), and a full export -> reload -> import round-trip
+correctly restores which reactions were selected, edited formula text,
+and the chosen preset. Zero console errors throughout. Full `pytest`
+suite (86/86) still passes (unaffected, as expected -- this feature
+touches no Python code path the tests exercise).
+
+**Deliberately not done here, per the scoping decision above:**
+- No feedback path from an edited/preset-selected formula back into the
+  compiled solver on the main widget page -- this page is read/explore/
+  export only.
+- Cooling rates and the CIE cooling table are out of scope; only
+  reaction rate coefficients are covered.
+- No attempt at a general Python-formula -> Vega-expression translator.
+  Investigated this directly (prompted by "how hard would a single
+  source of truth be"): `primordial_rates.py`'s rate functions are
+  short imperative numpy, not sympy expressions, so this isn't a
+  transpile-an-existing-symbolic-form problem. A mechanical pass over
+  all 22 reactions found the *branching* vocabulary is actually very
+  narrow -- 8 are a single expression with no branching at all, 12 are
+  exactly one two-way boolean-mask split (`cond ? A : B`), 1 (k09) is a
+  clamp (`min`) feeding into a formula followed by one low-T override,
+  and the only apparent "multi-way" case (k13/k22's threebody 0-5) isn't
+  T-branching at all -- it's a switch on a separate discrete parameter,
+  already correctly modeled here as presets rather than a formula
+  branch. A small closed schema (`{op: "expr"|"piecewise"|"clamp_then",
+  ...}` using `datum.field` leaf expressions throughout) could plausibly
+  cover the whole file with two small renderers -- one producing a
+  numpy `np.where(...)`-based Python `coeff_fn` for the real solver,
+  one producing this page's Vega `calculate` string -- eliminating the
+  hand-duplicated-formula-drift risk that produced bug #1 above
+  entirely, since both would come from one source dict. Worth
+  revisiting as a real follow-up, not attempted this pass; a
+  regex-only (non-AST) version of the branch-restructuring step was
+  considered and rejected as too fragile for that follow-up if it's
+  ever built -- the risk is a plausible-looking wrong formula compiling
+  silently, which is strictly worse than the loud crash bug #1 above
+  actually was.

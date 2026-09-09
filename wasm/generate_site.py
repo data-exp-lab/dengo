@@ -26,6 +26,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from fiducial_networks import FIDUCIAL_NETWORKS  # noqa: E402
+from reaction_rates import REACTION_RATES  # noqa: E402
 
 EXPORTED_FUNCTIONS = [
     "_dengo_wasm_init", "_dengo_wasm_step", "_dengo_wasm_state_ptr",
@@ -44,7 +45,7 @@ PAGE_TEMPLATE = """<!doctype html>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
 </head>
 <body>
-<div class="nav"><a href="../">&larr; all networks</a></div>
+<div class="nav"><a href="../">&larr; all networks</a> <a href="rates.html">reaction rates &rarr;</a></div>
 <h1 id="page-title">{title}</h1>
 <p class="sub">
   Compiled to WebAssembly from dengo's generated solver (no Python, no server) --
@@ -210,6 +211,53 @@ initPage({config_json});
 </html>
 """
 
+RATES_PAGE_TEMPLATE = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title} reaction rates -- dengo in the browser</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>%F0%9F%A7%AA</text></svg>">
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<div class="nav"><a href="../">&larr; all networks</a> <a href="index.html">&larr; {title} widget</a></div>
+<h1>{title}: reaction rates</h1>
+<p class="sub">
+  Every reaction rate coefficient this network uses, plotted over its
+  configured temperature range and editable in place (Vega expression
+  syntax -- the same T/tev/logtev/logT variables
+  <a href="https://github.com/{repo}/blob/main/src/dengo/primordial_rates.py">primordial_rates.py</a>'s
+  own functions use). Changes here are exploratory only -- editing a
+  formula updates its own plot immediately but does not (yet) feed back
+  into the compiled solver on the <a href="index.html">widget page</a>.
+  Select which reactions to show, then export the current set (including
+  any edits) to a small JSON file, or load one back in.
+</p>
+<div class="rates-toolbar">
+  <button type="button" id="rates-all">all</button>
+  <button type="button" id="rates-none">none</button>
+  <button type="button" id="rates-reset">reset edits</button>
+  <span class="rates-toolbar-spacer"></span>
+  <button type="button" id="rates-export">Download JSON</button>
+  <label class="rates-upload-label">Upload JSON
+    <input type="file" id="rates-import" accept="application/json">
+  </label>
+</div>
+<div id="rate-toggle" class="species-toggle"></div>
+<div id="rate-cards"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/vega@5"></script>
+<script src="https://cdn.jsdelivr.net/npm/vega-lite@5"></script>
+<script src="https://cdn.jsdelivr.net/npm/vega-embed@6"></script>
+<script src="../rates.js"></script>
+<script>
+initRatesPage({config_json});
+</script>
+</body>
+</html>
+"""
+
 LANDING_TEMPLATE = """<!doctype html>
 <html lang="en">
 <head>
@@ -244,11 +292,36 @@ def find_emxx():
     return emxx
 
 
+def build_rates_page(network, cfg, net_dir, repo):
+    """The reaction-rate viewer needs none of the compiled solver -- just
+    the network's own reaction list (to filter REACTION_RATES down to
+    what this particular network actually uses) and its configured
+    temperature range (network.T, set by init_temperature() during
+    cfg["build"]()). No em++ involved at all."""
+    reaction_names = sorted(network.reactions.keys())
+    rates = {name: REACTION_RATES[name] for name in reaction_names if name in REACTION_RATES}
+    missing = [name for name in reaction_names if name not in REACTION_RATES]
+    if missing:
+        print("!!! reaction_rates.py has no transcription for: %s (omitted from rates page)"
+              % missing, file=sys.stderr)
+    config = {
+        "title": cfg["title"],
+        "Tmin": float(network.T.min()),
+        "Tmax": float(network.T.max()),
+        "rates": rates,
+    }
+    with open(os.path.join(net_dir, "rates.html"), "w") as f:
+        f.write(RATES_PAGE_TEMPLATE.format(
+            title=cfg["title"], repo=repo, config_json=json.dumps(config),
+        ))
+
+
 def build_one(name, cfg, out_dir, repo):
     net_dir = os.path.join(out_dir, name)
     os.makedirs(net_dir, exist_ok=True)
 
     network = cfg["build"]()
+    build_rates_page(network, cfg, net_dir, repo)
     network.write_wasm_solver(name, output_dir=net_dir)
 
     subprocess.run(
@@ -299,6 +372,7 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
 
     shutil.copy(os.path.join(HERE, "app.js"), out_dir)
+    shutil.copy(os.path.join(HERE, "rates.js"), out_dir)
     shutil.copy(os.path.join(HERE, "style.css"), out_dir)
 
     succeeded, failed = [], []
