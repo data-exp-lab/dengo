@@ -131,6 +131,12 @@ PAGE_TEMPLATE = """<!doctype html>
         <div id="chart-T"></div>
       </div>
       <div class="axis-x" id="xlabel-T"></div>
+      <p class="preset-note">The shaded band (temperature view only --
+        it's a T range, so it disappears in thermal-energy view) marks
+        1500-2500 K, the H2-formation-heating-driven fragmentation
+        regime this project targets. It's for orientation only, not a
+        solver threshold or a prediction that any given run passes
+        through it.</p>
     </div>
     <div class="chart-box">
       <div class="chart-title">Ionization &amp; molecular fraction</div>
