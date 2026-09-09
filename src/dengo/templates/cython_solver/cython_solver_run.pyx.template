@@ -48,6 +48,19 @@ cdef extern from "{{ solver_name }}_solver.h":
                        double *atol, int nstrip, int nchem, double *scaling,
                        void *sdata, double *u0, double *s, double *gu, double *Ju)
 
+    ctypedef struct BE_chem_solve_diag:
+        int occurred
+        int reason
+        int cell
+        int species_index
+        double value
+        double change
+        double atol
+        double rtol
+        double ratio
+
+    BE_chem_solve_diag BE_chem_solve_last_failure()
+
 
 SPECIES_NAMES = [
     {%- for s in network.required_species | sort %}
@@ -181,6 +194,70 @@ cdef class Solver:
     def redshift(self, double value):
         self._data.current_z = value
 
+    @property
+    def last_error(self):
+        """Diagnostic info for the most recent internal BE_chem_solve()
+        failure, if any -- None if the last one converged (or none has
+        run yet). Check this right after a `step()`/`step_inplace()`
+        call reports `converged=False`, to see *which* species (and,
+        for `dims>1`, which cell) was hardest to satisfy, rather than
+        just that something was. Reflects the smallest-dt sub-step
+        `_advance()`'s adaptive-dt retry loop actually attempted last,
+        since BE_chem_solve() resets this at the start of every call --
+        including calls made by *any* Solver for this network in this
+        process, so if you're interleaving calls to more than one
+        Solver instance concurrently, check this immediately after the
+        failing call, before another Solver's call overwrites it.
+
+        Returns a dict: `reason` ("tolerance", "nan", or
+        "singular_jacobian"), `cell`, `species` (name, or None for
+        "singular_jacobian"), `value`/`change`/`atol`/`rtol`/`ratio`
+        (None where not meaningful for that reason), and a
+        human-readable `message`.
+        """
+        cdef BE_chem_solve_diag diag = BE_chem_solve_last_failure()
+        if not diag.occurred:
+            return None
+
+        reason = {1: "tolerance", 2: "nan", 3: "singular_jacobian",
+                   4: "rhs_or_jacobian_failed"}.get(diag.reason, "unknown")
+        species = SPECIES_NAMES[diag.species_index] if diag.species_index >= 0 else None
+
+        if reason == "tolerance":
+            message = (
+                "species '%s' in cell %d changed by %.4g (normalized) on the "
+                "last attempted sub-step, exceeding its tolerance "
+                "(atol=%.4g + rtol=%.4g*|value|=%.4g) by %.2fx" % (
+                    species, diag.cell, diag.change, diag.atol, diag.rtol,
+                    abs(diag.value), diag.ratio,
+                )
+            )
+        elif reason == "nan":
+            message = "species '%s' in cell %d became NaN on the last attempted sub-step" % (species, diag.cell)
+        elif reason == "singular_jacobian":
+            message = "the Jacobian was singular (Gauss elimination failed) in cell %d on the last attempted sub-step" % diag.cell
+        elif reason == "rhs_or_jacobian_failed":
+            message = (
+                "the generated RHS/Jacobian evaluation itself failed on the last "
+                "attempted sub-step (commonly a negative species density) -- which "
+                "species/cell isn't tracked at this level; check the input state"
+            )
+        else:
+            message = "step failed for an unrecognized reason (%d)" % diag.reason
+
+        has_species_detail = reason in ("tolerance", "nan")
+        return {
+            "reason": reason,
+            "cell": diag.cell if diag.cell >= 0 else None,
+            "species": species,
+            "value": diag.value if has_species_detail else None,
+            "change": diag.change if has_species_detail else None,
+            "atol": diag.atol if has_species_detail else None,
+            "rtol": diag.rtol if has_species_detail else None,
+            "ratio": diag.ratio if reason == "tolerance" else None,
+            "message": message,
+        }
+
     cdef (double, int) _advance(self, double dtf, int niter, double reltol,
                                  double floor_value, bint adaptive_step,
                                  bint intermediate, dict traj_dict,
@@ -284,7 +361,8 @@ cdef class Solver:
         cost by orders of magnitude at `dims=1`, because none of that
         Python/NumPy object overhead shrinks with problem size. No
         trajectory recording here (see `step()` for that); returns just
-        `(converged, t)`.
+        `(converged, t)` -- if `converged` is False, `self.last_error`
+        has details on which species/cell/tolerance was the problem.
         """
         if self._closed:
             raise RuntimeError("this Solver has already been closed")
@@ -309,6 +387,9 @@ cdef class Solver:
         rather hand in/get back a plain dict of arrays than deal with
         `self.state` directly -- see `step_inplace()` if you're calling
         this repeatedly and the dict marshaling cost matters.
+
+        If `final["converged"]` is False, `self.last_error` has details
+        on which species/cell/tolerance was the problem.
         """
         if self._closed:
             raise RuntimeError("this Solver has already been closed")

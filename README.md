@@ -48,6 +48,13 @@ fixed along the way). What's actively supported and tested right now:
   Validated directly against the real gracklepy in
   `.grackle_compare/validate_grackle_compat.py` (not a repo dependency,
   needs its own venv -- see `NOTES.md`).
+- `dengo.quick_solve(nH=..., T=..., dtf=...)`: a one-line convenience
+  entry point for a quick single-zone check -- no `ChemicalNetwork`/
+  `Solver` boilerplate. Builds/compiles once per process (cached), so
+  repeated calls are fast. `Solver.last_error` (checked via
+  `quick_solve(..., full_output=True)`, or on any `Solver` directly)
+  reports *which* species/cell/tolerance a non-converged step actually
+  failed on, not just that it didn't converge.
 
 What's present in the repo but **not** part of the modernized, tested
 path (left alone intentionally, not because it's unimportant):

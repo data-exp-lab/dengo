@@ -104,4 +104,21 @@ int BE_chem_solve(rhs_f f, jac_f J, double *u, double dt, double *rtol,
                   double *atol, int nstrip, int nchem, double *scaling,
                   void *sdata, double *u0, double *s, double *gu, double *Ju);
 
+/* Diagnostic info for BE_chem_solve's most recent failure, if any --
+   see BE_chem_solve.C for field meanings (reason: 1=tolerance not met,
+   2=NaN, 3=singular Jacobian). */
+typedef struct {
+    int occurred;
+    int reason;
+    int cell;
+    int species_index;
+    double value;
+    double change;
+    double atol;
+    double rtol;
+    double ratio;
+} BE_chem_solve_diag;
+
+BE_chem_solve_diag BE_chem_solve_last_failure();
+
 #endif

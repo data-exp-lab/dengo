@@ -77,6 +77,35 @@
 typedef int(*rhs_f)(double *, double *, int, int, void *);
 typedef int(*jac_f)(double *, double *, int, int, void *);
 
+// Diagnostic info for the most recent BE_chem_solve() call's failure (if
+// any), so a caller can report *why* a step didn't converge instead of
+// just that it didn't -- the underlying numbers were already computed
+// by the existing per-cell convergence check below, just never kept
+// around past a debug fprintf(). Reset at the top of every call, so
+// after _advance()'s adaptive-dt retry loop gives up, this reflects the
+// most recent (smallest-dt) attempt. reason: 0 = none (last call
+// converged), 1 = a species' Newton update exceeded its tolerance
+// (species_index/ratio/etc. meaningful), 2 = NaN encountered
+// (species_index meaningful, ratio is not), 3 = Gauss_Elim hit a
+// singular Jacobian (only cell is meaningful). See NOTES.md.
+typedef struct {
+  int occurred;
+  int reason;
+  int cell;
+  int species_index;
+  double value;   // current normalized species value u
+  double change;  // Newton update s (how far it wanted to move)
+  double atol;
+  double rtol;
+  double ratio;   // |change| / (atol + rtol*|value|); reason==1 only
+} BE_chem_solve_diag;
+
+static BE_chem_solve_diag g_be_chem_solve_last_failure;
+
+BE_chem_solve_diag BE_chem_solve_last_failure() {
+  return g_be_chem_solve_last_failure;
+}
+
 // function prototypes
 int BE_Resid_FunJac(rhs_f, jac_f, double *u, double *u0, double *gu, double *Ju, double dt,
                      int nstrip, int nchem, double *scaling, double *inv_scaling, void *sdata);
@@ -113,6 +142,22 @@ int BE_chem_solve(rhs_f f, jac_f J,
   double lam=1.0;
   int unsolved;
 
+  // Reset the *exposed* diagnostic now; it's only overwritten (from
+  // local_diag, below) at a point where this call is actually about to
+  // return failure. That's deliberate: early Newton sweeps routinely
+  // violate tolerance before converging on a later one -- that's normal
+  // iteration, not a failure -- so capturing unconditionally on every
+  // sweep (an earlier version of this) left stale "failure" info
+  // exposed even after a call that ultimately succeeded. local_diag is
+  // reset every sweep (see below) so on return it reflects only the
+  // *last* sweep's worst offender, not the worst across all sweeps
+  // (typically the least converged, most misleading choice, since
+  // Newton sweeps generally improve monotonically).
+  g_be_chem_solve_last_failure.occurred = 0;
+  g_be_chem_solve_last_failure.reason = 0;
+  g_be_chem_solve_last_failure.ratio = 0.0;
+  BE_chem_solve_diag local_diag;
+
   //create an array to store 1/scaling
   double *inv_scaling = new double[nchem*nstrip];
   for (i=0; i<nstrip*nchem; i++)  inv_scaling[i] = 1.0 / scaling[i];
@@ -142,6 +187,9 @@ int BE_chem_solve(rhs_f f, jac_f J,
 
   // perform Newton iterations
   for (isweep=0; isweep<sweeps; isweep++) {
+    local_diag.occurred = 0;
+    local_diag.reason = 0;
+    local_diag.ratio = 0.0;
 
     // compute nonlinear residual and Jacobian -- f() and J() are always
     // evaluated at the same u within one sweep, so this rescales u to
@@ -160,6 +208,16 @@ int BE_chem_solve(rhs_f f, jac_f J,
       //*/
 
       //fprintf(stderr, "Error in BE_Resid_FunJac \n");
+      // f()/J() themselves failed (e.g. a generated calculate_rhs/
+      // calculate_jacobian rejected a negative species density) --
+      // a different failure mode than the three below, and one that
+      // doesn't currently report which species/cell triggered it (that
+      // detail isn't threaded back through f()/J()'s own return code),
+      // so this is deliberately generic.
+      g_be_chem_solve_last_failure.occurred = 1;
+      g_be_chem_solve_last_failure.reason = 4;
+      g_be_chem_solve_last_failure.cell = -1;
+      g_be_chem_solve_last_failure.species_index = -1;
       delete[] inv_scaling;
       return 1;
     }
@@ -176,6 +234,13 @@ int BE_chem_solve(rhs_f f, jac_f J,
       // solve for Newton update
       if (Gauss_Elim(&(Ju[ix*nchem*nchem]), &(s[ioff]), &(gu[ioff]), nchem) != 0) {
           fprintf(stderr, "There was an unsolved case in Gauss_Elim! \n");
+          #pragma omp critical
+          {
+            local_diag.occurred = 1;
+            local_diag.reason = 3;
+            local_diag.cell = ix;
+            local_diag.species_index = -1;
+          }
           fatal_error = 1;
           continue;
       }
@@ -185,10 +250,36 @@ int BE_chem_solve(rhs_f f, jac_f J,
 
       // check error in this cell (max norm)
       for (int ii=0; ii<nchem; ii++) {
-          if ( fabs(s[ioff+ii]) > (atol[ioff+ii] + rtol[ioff+ii] * fabs(u[ioff+ii]))) {
+          double tol = atol[ioff+ii] + rtol[ioff+ii] * fabs(u[ioff+ii]);
+          if ( fabs(s[ioff+ii]) > tol) {
               if (dt < 1.0) {
 	              fprintf(stderr, "dt %0.5g, Sweep %d, Unsolved[%d]: nchem: %d change: % 0.8g sum tol: % 0.5g atol: % 0.5g rtol: % 0.5g value: % 0.5g\n",
 		                  dt, isweep, ix, ii, s[ioff+ii], atol[ioff+ii] + rtol[ioff+ii] * fabs(u[ioff+ii]), atol[ioff+ii], rtol[ioff+ii], u[ioff+ii]);
+              }
+              // Record this as the current worst-known violation (by
+              // normalized ratio) *within this sweep* (local_diag is
+              // reset every sweep -- see above), so a caller that ends
+              // up giving up can report which species/cell was hardest
+              // to converge on the last attempt, not just "didn't
+              // converge". reason 2/3 (NaN, singular Jacobian) take
+              // priority and are never overwritten by a mere tolerance
+              // miss.
+              double ratio = fabs(s[ioff+ii]) / tol;
+              if (local_diag.reason < 2 && ratio > local_diag.ratio) {
+                #pragma omp critical
+                {
+                  if (local_diag.reason < 2 && ratio > local_diag.ratio) {
+                    local_diag.occurred = 1;
+                    local_diag.reason = 1;
+                    local_diag.cell = ix;
+                    local_diag.species_index = ii;
+                    local_diag.value = u[ioff+ii];
+                    local_diag.change = s[ioff+ii];
+                    local_diag.atol = atol[ioff+ii];
+                    local_diag.rtol = rtol[ioff+ii];
+                    local_diag.ratio = ratio;
+                  }
+                }
               }
               cell_unsolved = 1;
               break;
@@ -196,6 +287,17 @@ int BE_chem_solve(rhs_f f, jac_f J,
           if ( u[ioff+ii] != u[ioff+ii] ) {  // NaN encountered!!
             printf("BE_chem_solve ERROR: NaN in iteration %i (cell %i, species %i); dt = %0.5g, atol = %0.5g\n",
                    isweep,ix,ii, dt, atol[ioff+ii]);
+            #pragma omp critical
+            {
+              local_diag.occurred = 1;
+              local_diag.reason = 2;
+              local_diag.cell = ix;
+              local_diag.species_index = ii;
+              local_diag.value = u[ioff+ii];
+              local_diag.change = s[ioff+ii];
+              local_diag.atol = atol[ioff+ii];
+              local_diag.rtol = rtol[ioff+ii];
+            }
             #ifdef DENGO_DEBUG
             for (int jj = 0; jj < nchem; jj++){
                 printf("u[%d+%d] = %0.5g\n", ioff, jj, u[ioff+jj]);
@@ -215,6 +317,7 @@ int BE_chem_solve(rhs_f f, jac_f J,
     } // ix loop
 
     if (fatal_error) {
+      g_be_chem_solve_last_failure = local_diag;
       ///*
       // rescale back to input variables
       for (i=0; i<nstrip*nchem; i++)  u[i] *= scaling[i];
@@ -246,6 +349,7 @@ int BE_chem_solve(rhs_f f, jac_f J,
 
   // final check, diagnostics output
   if (unsolved) {
+    g_be_chem_solve_last_failure = local_diag;
     #ifdef DENGO_DEBUG
     printf("BE_chem_solve WARNING: unsolved after %i iterations\n",isweep);
     #endif

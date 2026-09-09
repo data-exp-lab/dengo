@@ -1469,3 +1469,63 @@ new notebook from both `examples/README.md` and the top-level README.
 
 Run with: `uv run --group notebook jupyter lab
 examples/interactive_explorer.ipynb`.
+
+**2026-09-09, continued: two more quality-of-life items -- a one-line
+convenience entry point, and non-convergence diagnostics that actually
+say why.**
+
+**`dengo.quick_solve(nH=..., T=..., dtf=...)`** (`src/dengo/quick_solve.py`,
+wired up via a newly non-empty `src/dengo/__init__.py`): builds and
+compiles the primordial network's solver once per process (module-level
+cache, `~/tempfile.mkdtemp()` build dir, same pattern `grackle_compat`
+already uses), then reuses it across calls -- first call ~23s (the
+codegen+compile cost, same one-time cost noted for the C-level
+benchmarks two entries up), every call after that sub-millisecond.
+`full_output=True` returns `(final, solver)` so a failed
+(`final["converged"] is False`) call can be followed by
+`solver.last_error` (see below) to find out why. Note `import dengo`
+itself is no longer a total no-op (previously an empty `__init__.py`):
+it now eagerly imports `dengo.primordial_network`'s chain (chemical_
+network/reaction_classes/sympy etc.), adding real but modest import
+time (~1s) -- nothing is *compiled* until `quick_solve()` is actually
+called, so the README's "zero compiled extensions required to import
+dengo" claim still holds, just not "instant to import" anymore.
+
+**`Solver.last_error`**: a new property surfacing exactly what its name
+says -- which species (and, for `dims>1`, which cell) was hardest to
+satisfy on a step that returned `converged=False`, instead of just
+"didn't converge". The raw numbers (which species violated tolerance by
+how much) were already computed by BE_chem_solve.C's existing
+convergence check; they used to just get discarded after an
+occasionally-firing raw `fprintf(stderr, ...)` debug print gated behind
+`if (dt < 1.0)`. Added a small `BE_chem_solve_diag` struct + `static`
+tracking + a `BE_chem_solve_last_failure()` getter (new
+`cython_solver.h.template`/`.pyx.template` declarations, `BE_chem_
+solve.C` capture logic) -- reason 1 (tolerance not met, with
+species/cell/value/change/atol/rtol/ratio), 2 (NaN), 3 (singular
+Jacobian, Gauss_Elim), or 4 (a generic fallback for when calculate_rhs/
+calculate_jacobian themselves reject the state, e.g. a negative species
+density -- doesn't currently carry per-species detail, since that
+isn't threaded back through f()'s/J()'s own return code; noted as a
+scoped gap, not attempted here).
+
+Found and fixed a real bug while validating this against an actual
+successful step: capturing unconditionally at every tolerance-violation
+check (the first version) left `last_error` showing a *stale* failure
+from an early Newton sweep even after the call went on to converge on a
+later sweep within the same call -- normal Newton iteration routinely
+"fails" tolerance on early sweeps before succeeding, that's not an
+error. Fixed by tracking in a call-scoped (not `static`) `local_diag`,
+reset every sweep, only copied into the exposed `static` diagnostic at
+the two points the function is actually about to return failure --
+verified directly: `last_error` is `None` before any step, stays `None`
+after a step that converges (even though intermediate sweeps within
+that same call had failed the tolerance check), and correctly reports a
+real species/ratio/message when a step is forced to fail (tested with
+an unsatisfiable `reltol=1e-300`).
+
+Both new tests/test_quick_solve.py and the two new tests in
+tests/test_solver.py pass; 85/85 tests total. `examples/free_fall_
+collapse.py` reproduces the identical 1814-step trajectory (BE_chem_
+solve.C's diagnostic capture is purely additive bookkeeping, changes no
+control flow or numbers).

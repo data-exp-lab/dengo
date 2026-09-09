@@ -190,6 +190,41 @@ def test_evaluate_bulk_methods_match_single_cell_and_multi_cell(primordial_solve
         assert rhs2[0, ge_idx] == pytest.approx(rhs_single["ge"], rel=1e-4)
 
 
+def test_last_error_is_none_before_and_after_a_successful_step(primordial_solver):
+    """solver.last_error should read None until a real failure happens,
+    and go back to None after a subsequent success -- not leak a stale
+    "unsolved" report from an earlier Newton sweep that ultimately
+    converged (every step involves several sweeps that individually
+    miss tolerance before the final one succeeds; that's normal
+    iteration, not a failure -- see NOTES.md)."""
+    network, mod = primordial_solver
+    ics = primordial_ics()
+    with mod.Solver(1) as solver:
+        assert solver.last_error is None
+        final, _ = solver.step(ics, dtf=3.15e13, niter=200, intermediate=False)
+        assert final["converged"]
+        assert solver.last_error is None
+
+
+def test_last_error_reports_which_species_failed(primordial_solver):
+    """An unsatisfiable tolerance (reltol so tight it's below float64
+    precision) forces a real, final non-convergence -- solver.last_error
+    should then name a real species and explain the shortfall, not just
+    report that *something* failed."""
+    network, mod = primordial_solver
+    ics = primordial_ics()
+    with mod.Solver(1) as solver:
+        final, _ = solver.step(ics, dtf=3.15e13, niter=200, intermediate=False, reltol=1e-300)
+        assert not final["converged"]
+        err = solver.last_error
+        assert err is not None
+        assert err["reason"] == "tolerance"
+        assert err["species"] in mod.SPECIES_NAMES
+        assert err["cell"] == 0
+        assert err["ratio"] > 1.0
+        assert err["species"] in err["message"]
+
+
 def test_zero_abundance_species_does_not_produce_nan(primordial_solver):
     """Regression test: He_2 = He_3 = 0 (fully neutral helium) used to
     poison the whole solver with NaN via BE_chem_solve's 1/scale
