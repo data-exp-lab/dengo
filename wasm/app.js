@@ -199,11 +199,53 @@ function coolingTime(dtfTotal) {
   return dgeDt !== 0 ? Math.abs(s.ge / dgeDt) : dtfTotal;
 }
 
-function runConstantDensity(nH, T, fractions, logDtf, safetyFactor = 0.1, maxSteps = 2000) {
+// Sweep charts compare several tracks' *shape* against each other; a
+// track whose local cooling/heating timescale is much longer than the
+// whole requested run legitimately lets the unforced path below take
+// one giant step straight from t=0 to t=dtfTotal (efficient and correct
+// for a single run) -- but that renders as a single point with no shape
+// at all, which defeats a comparison chart's entire purpose. Sweep runs
+// instead sample a fixed, shared, log-spaced checkpoint grid (every
+// track gets the same number of points on the same time grid, however
+// fast it individually converges), leaning on BE_chem_solve's own
+// internal adaptive sub-stepping -- it already halves dt on
+// non-convergence -- for whatever a particular gap between checkpoints
+// turns out to need, the same robustness the unforced path already
+// relies on for its own (usually much larger) single jump.
+const SWEEP_CHECKPOINTS = 24;
+
+function runConstantDensity(nH, T, fractions, logDtf, safetyFactor = 0.1, maxSteps = 2000, forSweep = false) {
   setIcs(nH, T, fractions);
   const dtfTotal = Math.pow(10, logDtf);
   let t = 0;
   const tHist = [], THist = [], ionHist = [], h2Hist = [], dtHist = [], sHist = [];
+  // The initial condition itself is worth plotting -- without it every
+  // chart started mid-story, at whatever state the first accepted step
+  // happened to reach, never showing where the run actually began.
+  // temperature() reads a *cached* value the solver only refreshes
+  // inside calculate_rhs/calculate_jacobian -- setIcs() writes species
+  // and ge directly and doesn't itself trigger either, so temperature()
+  // here would otherwise still report whatever the *previous* run last
+  // left behind. rhsPtr() (already used by coolingTime()) runs
+  // calculate_rhs as a side effect, which is what actually refreshes it.
+  rhsPtr();
+  const s0 = getScalar();
+  tHist.push(0); THist.push(temperature()); ionHist.push(ionizedFraction(s0)); h2Hist.push(h2Fraction(s0));
+  dtHist.push(0); sHist.push(s0);
+  if (forSweep) {
+    for (let i = 0; i < SWEEP_CHECKPOINTS; i++) {
+      const target = dtfTotal * Math.pow(10, -4 * (1 - (i + 1) / SWEEP_CHECKPOINTS));
+      const dt = target - t;
+      if (dt <= 0) continue;
+      const converged = step(dt, 200, 1e-5);
+      if (!converged) break;
+      t = target;
+      const s = getScalar();
+      tHist.push(t); THist.push(temperature()); ionHist.push(ionizedFraction(s)); h2Hist.push(h2Fraction(s));
+      dtHist.push(dt); sHist.push(s);
+    }
+    return { x: tHist, t: tHist, dt: dtHist, T: THist, ion: ionHist, h2: h2Hist, s: sHist, xKey: "time" };
+  }
   for (let i = 0; i < maxSteps; i++) {
     const dt = Math.min(safetyFactor * coolingTime(dtfTotal), dtfTotal - t);
     if (dt <= 0) break;
@@ -243,6 +285,18 @@ function runFreefall(nH, T, fractions, logNTarget, logNShock, machShock, safetyF
   let shocked = nCurrent >= nShock; // already past it at t=0 -- don't fire mid-run
   let shockApplied = false; // only set once the post-shock step actually converges -- see below
   const nHist = [], THist = [], ionHist = [], h2Hist = [], tHist = [], dtHist = [], sHist = [];
+  // The initial condition itself is worth plotting, same reasoning as
+  // runConstantDensity() -- and free-fall's x-axis is density, always
+  // positive, so (unlike time) there's no log-scale concern in placing
+  // it as the very first point.
+  {
+    // temperature()'s cache needs an explicit refresh here too -- see
+    // the identical comment in runConstantDensity().
+    rhsPtr();
+    const s0 = getScalar();
+    nHist.push(nCurrent); THist.push(temperature()); ionHist.push(ionizedFraction(s0)); h2Hist.push(h2Fraction(s0));
+    tHist.push(0); dtHist.push(0); sHist.push(s0);
+  }
   for (let i = 0; i < maxSteps; i++) {
     if (nCurrent >= nTarget) break;
     const rho = nCurrent * MH;
@@ -318,7 +372,13 @@ function chartSpec(field, xKey, data, extra, extraTooltip) {
         mark: { type: "line", point: { filled: true, size: pointSize, opacity: 0.9 } },
         encoding: {
           x: {
-            field: "x", type: "quantitative", scale: { type: "log" },
+            field: "x", type: "quantitative",
+            // Time (unlike density) can legitimately be exactly 0 now
+            // that the initial condition itself is plotted -- symlog
+            // (linear near zero, log further out) shows that point
+            // instead of silently dropping it the way a pure log scale
+            // would.
+            scale: { type: xKey === "time" ? "symlog" : "log" },
             axis: {
               title: null, labelOverlap: "greedy",
               // human-unit labels ("254 kyr") run wider than the plain
@@ -369,7 +429,12 @@ function ionizationChartSpec(xKey, rows) {
     mark: { type: "line", point: { filled: true, size: pointSize, opacity: 0.9 } },
     encoding: {
       x: {
-        field: "x", type: "quantitative", scale: { type: "log" },
+        field: "x", type: "quantitative",
+        // Time (unlike density) can legitimately be exactly 0 now that
+        // the initial condition itself is plotted -- symlog (linear
+        // near zero, log further out) shows that point instead of
+        // silently dropping it the way a pure log scale would.
+        scale: { type: xKey === "time" ? "symlog" : "log" },
         axis: {
           title: null, labelOverlap: "greedy",
           labelAngle: xKey === "time" ? -40 : 0,
@@ -413,7 +478,12 @@ function speciesChartSpec(xKey, rows, valueTitle) {
     mark: { type: "line", point: { filled: true, size: pointSize, opacity: 0.9 } },
     encoding: {
       x: {
-        field: "x", type: "quantitative", scale: { type: "log" },
+        field: "x", type: "quantitative",
+        // Time (unlike density) can legitimately be exactly 0 now that
+        // the initial condition itself is plotted -- symlog (linear
+        // near zero, log further out) shows that point instead of
+        // silently dropping it the way a pure log scale would.
+        scale: { type: xKey === "time" ? "symlog" : "log" },
         axis: {
           title: null, labelOverlap: "greedy",
           labelAngle: xKey === "time" ? -40 : 0,
@@ -461,7 +531,12 @@ function sweepChartSpec(field, xKey, rows, domainLabels) {
     mark: { type: "line", point: { filled: true, size: 12, opacity: 0.9 } },
     encoding: {
       x: {
-        field: "x", type: "quantitative", scale: { type: "log" },
+        field: "x", type: "quantitative",
+        // Time (unlike density) can legitimately be exactly 0 now that
+        // the initial condition itself is plotted -- symlog (linear
+        // near zero, log further out) shows that point instead of
+        // silently dropping it the way a pure log scale would.
+        scale: { type: xKey === "time" ? "symlog" : "log" },
         axis: {
           title: null, labelOverlap: "greedy",
           labelAngle: xKey === "time" ? -40 : 0,
@@ -754,6 +829,10 @@ function sweepValues(paramKey) {
 function buildSweepParamOptions() {
   const select = document.getElementById("sweep-param");
   select.innerHTML = "";
+  const noneOpt = document.createElement("option");
+  noneOpt.value = "";
+  noneOpt.textContent = "No sweep";
+  select.appendChild(noneOpt);
   for (const [key, param] of Object.entries(SWEEP_PARAMS)) {
     if (!document.getElementById(param.sliderId)) continue; // e.g. no H2 species on this network
     const opt = document.createElement("option");
@@ -768,16 +847,28 @@ function buildSweepParamOptions() {
 // previous one, then refills from/to with that slider's own min/max in
 // physical units -- a reasonable, visible-and-editable default rather
 // than the old behavior of silently always using the full slider range
-// no matter what it was actually set to.
+// no matter what it was actually set to. "No sweep" (paramKey === "")
+// is the explicit off state: nothing disabled, range inputs cleared and
+// inert, run-sweep button off.
 let sweptSliderId = null;
 function updateSweepParamUI() {
   const paramKey = document.getElementById("sweep-param").value;
-  const param = SWEEP_PARAMS[paramKey];
-  if (!param) return;
-  if (sweptSliderId && sweptSliderId !== param.sliderId) {
+  if (sweptSliderId) {
     const prev = document.getElementById(sweptSliderId);
     if (prev) prev.disabled = false;
+    sweptSliderId = null;
   }
+  const param = SWEEP_PARAMS[paramKey];
+  const runButton = document.getElementById("run-sweep");
+  const rangeInputs = [document.getElementById("sweep-start"), document.getElementById("sweep-stop"), document.getElementById("sweep-count")];
+  if (!param) {
+    for (const el of rangeInputs) { el.value = ""; el.disabled = true; }
+    runButton.disabled = true;
+    document.getElementById("sweep-status").textContent = "";
+    return;
+  }
+  for (const el of rangeInputs) el.disabled = false;
+  runButton.disabled = false;
   sweptSliderId = param.sliderId;
   const slider = document.getElementById(param.sliderId);
   slider.disabled = true;
@@ -789,6 +880,7 @@ function updateSweepParamUI() {
 }
 
 function runSweep() {
+  if (!document.getElementById("sweep-param").value) return; // "No sweep" -- button is disabled anyway, but guard directly too
   const button = document.getElementById("run-sweep");
   const statusEl = document.getElementById("sweep-status");
   button.disabled = true;
@@ -825,7 +917,7 @@ function runSweepBody() {
       result = runFreefall(nH, T, fractions, logNTarget, logNShock, machShock);
     } else {
       const logDtf = parseFloat(document.getElementById("dtf").value);
-      result = runConstantDensity(nH, T, fractions, logDtf);
+      result = runConstantDensity(nH, T, fractions, logDtf, undefined, undefined, true);
     }
     xKey = result.xKey;
     const label = sweepFormat(param, param.toPhysical(v));
@@ -955,9 +1047,8 @@ function initPage(config) {
     buildSpeciesSliders(config);
     buildSpeciesToggle();
     buildSweepParamOptions();
-    updateSweepParamUI(); // disables the initially-selected sweep target's slider immediately, not just after the dropdown is touched
+    updateSweepParamUI(); // sets up the "No sweep" default state (run-sweep button included) immediately, not just after the dropdown is touched
     document.getElementById("ic-preset").disabled = false;
-    document.getElementById("run-sweep").disabled = false;
     document.getElementById("status").textContent = "ready";
     redraw();
   });

@@ -2350,3 +2350,87 @@ behavior -- confirming the fix actually changes behavior, not just the
 label, (d) a full 21-decade n_H sweep (10⁻⁴ to 10¹⁷ cm⁻³) still runs
 cleanly, (e) zero console errors, (f) full `pytest` suite (86/86)
 passes.
+
+**2026-09-09, same branch, user-reported bugs: "No sweep" default state,
+sweeping 10-2000K gave one visible track instead of six, and (found
+along the way) charts never plotted the initial condition at all.**
+Three related fixes, landed together since the second two turned out to
+be entangled:
+
+- **Explicit "No sweep" option.** `#sweep-param`'s first, default-
+  selected option is now `"No sweep"` -- nothing disabled, from/to/count
+  inputs cleared and inert, "Run sweep" off, rather than always having
+  some parameter pre-armed (and a slider silently pre-disabled) from the
+  moment the page loads.
+- **The "only one result" bug, reproduced and root-caused, not
+  guessed at**: called `runConstantDensity()` directly for the exact
+  reported values (T0=10,55,302,...,2000K) and found 5 of 6 converge in
+  **exactly one step** -- `coolingTime()`-based adaptive stepping
+  legitimately jumps straight from t=0 to t=dtfTotal in a single step
+  when the local cooling/heating timescale is much longer than the
+  whole run (correct and efficient for a *single* run), which renders as
+  a single point with zero visible shape -- exactly wrong for a
+  *comparison* chart, whose entire purpose is showing several tracks'
+  shapes against each other. Fixed by giving sweep runs a dedicated
+  `forSweep` path in `runConstantDensity()`: a fixed, shared, log-spaced
+  24-point checkpoint grid, capping `dt` at each checkpoint regardless of
+  what the adaptive estimate would prefer, leaning on `BE_chem_solve`'s
+  own internal sub-stepping (already robust to exactly this kind of
+  externally-imposed jump -- the unforced path already relies on the
+  same robustness for its own, usually much larger, single jump).
+- **Include the initial condition as the first plotted point**
+  (suggested mid-fix, and directly related: it's part of why the sweep
+  bug read as confusing rather than obviously "these tracks are just
+  fast") -- `runConstantDensity()`/`runFreefall()` now both push the
+  state immediately after `setIcs()`, before any `step()` call. Free-
+  fall's x-axis (density) is always positive, no complication; but
+  time can now legitimately be exactly 0, which a `type: "log"` x-scale
+  cannot render at all -- switched every time-axis chart (not
+  density-axis ones, which don't need it) to `type: "symlog"`
+  (Vega-Lite/Vega's linear-near-zero, log-further-out scale), verified
+  by screenshot that t=0 renders sensibly at the left edge rather than
+  being silently dropped.
+
+**A second, deeper, pre-existing bug found while verifying the above,
+not introduced by it**: adding the initial point required calling
+`temperature()` right after `setIcs()`, which surfaced that
+`temperature()` reads a *cached* value `calculate_rhs`/
+`calculate_jacobian` only refresh as a side effect -- `setIcs()` writes
+species/`ge` directly and triggers neither, so the "initial" temperature
+was actually reporting whatever the *previous* run last left behind.
+Fixed narrowly by calling `rhsPtr()` (already used by `coolingTime()`,
+runs `calculate_rhs` as a side effect) once right after `setIcs()` in
+both run functions, before reading `temperature()`.
+
+That fix then exposed a **third, separate, genuinely pre-existing bug,
+flagged rather than silently fixed or ignored**: with the cache
+correctly refreshed, `primordial`'s initial point reads **1220K** for a
+*requested* 1000K -- a 22% discrepancy. Root cause, confirmed by
+reading `setIcs()`: `ge = 1.5*KB*T/MH` assumes pure monatomic hydrogen
+(mean molecular weight mu=1) unconditionally, completely ignoring the
+actual He/H2 composition passed to it -- for any mixture with real He
+content (`primordial`, `primordial_atomic`; NOT `hydrogen_minimal`,
+which has no He and mu=1 exactly, matching), the solver's true starting
+temperature has silently differed from whatever the T slider displayed
+for this entire project's history, invisible until now purely because
+nothing ever plotted the instant-after-`setIcs()` state before. Confirmed
+directly: `hydrogen_minimal` (mu=1, no He) reads 8017.8K for a requested
+8000K (0.2%, consistent with minor residual effects like electron
+counting) vs. `primordial`'s 22% mu-driven miss. This is a real,
+separate correctness issue, not scope-crept into this fix -- noted here
+and flagged to the user rather than either quietly patched (risk of
+guessing the wrong mu convention under time pressure, since it needs to
+match whatever the compiled solver's own T-from-ge code actually does)
+or swept under the rug.
+
+Verified: real Emscripten build of all three fiducial networks,
+headless-browser pass (light + dark) confirming (a) "No sweep" is the
+genuine default (button/inputs disabled, no slider pre-disabled), (b)
+selecting/deselecting a sweep parameter correctly enables/disables the
+right slider and range inputs each time, (c) the exact reported bug
+scenario (T, 10 to 2000, count 6) now shows all six tracks as real,
+distinct, multi-point curves (screenshot-verified -- previously only one
+of six was visible), (d) the initial-condition point now appears
+correctly on every chart, at the correct value once the cache-refresh
+fix landed, (e) zero console errors across all three networks/both
+themes, (f) full `pytest` suite (86/86) passes.
