@@ -708,18 +708,28 @@ function applyPreset(key) {
 // run the current mode (cool/free-fall) once per sampled value of that
 // one, overlay all of them. `sliderId` is read/written directly (same
 // elements redraw() itself reads), so this generalizes to any slider
-// with no per-parameter special-casing beyond how to *sample* it:
-// mach's slider is linear-in-Mach itself, so log-spaced physical samples
-// need computing explicitly; every other sweepable slider already
-// stores log10(physical value), so plain linear interpolation of its
-// own min/max *is* log-spaced physical sampling, no transform needed.
-const SWEEP_N = 6;
+// with no per-parameter special-casing beyond how to convert between
+// the slider's own raw units and physical ones (`toRaw`/`toPhysical`):
+// T/nH/H2-fraction/shock-density sliders already store log10(physical
+// value), so their raw<->physical conversion is log10/10^x; mach's
+// slider is linear-in-Mach already, so its conversion is the identity.
+// The *sampled* start/stop/count all live in physical units (an actual
+// Kelvin range, not a log10 one) -- typing "1000" to "10000" should mean
+// what it says regardless of which of these a slider happens to store
+// internally -- and `logSpace` controls whether count values are spread
+// evenly in physical space or in log-physical space between them.
 const SWEEP_PARAMS = {
-  T: { sliderId: "T", label: "T₀", toPhysical: (v) => Math.pow(10, v), unit: "K" },
-  nH: { sliderId: "nH", label: "n_H,0", toPhysical: (v) => Math.pow(10, v), unit: "cm⁻³" },
-  "sp-H2_1": { sliderId: "sp-H2_1", label: "H2 frac₀", toPhysical: (v) => Math.pow(10, v), unit: "" },
-  mach: { sliderId: "mach", label: "shock Mach", toPhysical: (v) => v, unit: "", linear: true },
-  nshock: { sliderId: "nshock", label: "shock n", toPhysical: (v) => Math.pow(10, v), unit: "cm⁻³" },
+  T: { sliderId: "T", label: "T₀", unit: "K", logSpace: true, toPhysical: (v) => Math.pow(10, v), toRaw: (v) => Math.log10(v) },
+  nH: { sliderId: "nH", label: "n_H,0", unit: "cm⁻³", logSpace: true, toPhysical: (v) => Math.pow(10, v), toRaw: (v) => Math.log10(v) },
+  "sp-H2_1": { sliderId: "sp-H2_1", label: "H2 frac₀", unit: "", logSpace: true, toPhysical: (v) => Math.pow(10, v), toRaw: (v) => Math.log10(v) },
+  // Mach's *default* range (see updateSweepParamUI) is still log-spaced
+  // for the same reason as before (the no-effect -> partial ->
+  // saturated transition happens over the first factor of ~10) -- but
+  // now that start/stop are explicit and user-editable, that's just the
+  // default, not baked into the sampling itself; sample linearly across
+  // whatever range is actually entered, same as every other parameter.
+  mach: { sliderId: "mach", label: "shock Mach", unit: "", logSpace: false, toPhysical: (v) => v, toRaw: (v) => v },
+  nshock: { sliderId: "nshock", label: "shock n", unit: "cm⁻³", logSpace: true, toPhysical: (v) => Math.pow(10, v), toRaw: (v) => Math.log10(v) },
 };
 
 function sweepFormat(param, physical) {
@@ -727,18 +737,18 @@ function sweepFormat(param, physical) {
   return `${param.label}=${s}${param.unit ? " " + param.unit : ""}`;
 }
 
-function sweepValues(paramKey, slider) {
-  const min = parseFloat(slider.min), max = parseFloat(slider.max);
-  if (SWEEP_PARAMS[paramKey].linear) {
-    // mach: sample log-spaced *physical* Mach numbers (the interesting
-    // no-effect -> partial -> saturated transition happens over the
-    // first factor of ~10, not spread evenly across 1-100), but the
-    // slider itself is linear, so this is the one case that needs its
-    // own log-space construction rather than reusing the slider's.
-    const lo = Math.log10(Math.max(min, 1)), hi = Math.log10(max);
-    return Array.from({ length: SWEEP_N }, (_, i) => Math.pow(10, lo + (hi - lo) * i / (SWEEP_N - 1)));
+// Reads the visible from/to/count inputs (physical units) and returns
+// raw slider-unit values, ready to assign straight to `slider.value`.
+function sweepValues(paramKey) {
+  const param = SWEEP_PARAMS[paramKey];
+  const startPhys = parseFloat(document.getElementById("sweep-start").value);
+  const stopPhys = parseFloat(document.getElementById("sweep-stop").value);
+  const count = Math.max(2, Math.min(12, parseInt(document.getElementById("sweep-count").value, 10) || 6));
+  if (param.logSpace) {
+    const lo = Math.log10(startPhys), hi = Math.log10(stopPhys);
+    return Array.from({ length: count }, (_, i) => param.toRaw(Math.pow(10, lo + (hi - lo) * i / (count - 1))));
   }
-  return Array.from({ length: SWEEP_N }, (_, i) => min + (max - min) * i / (SWEEP_N - 1));
+  return Array.from({ length: count }, (_, i) => param.toRaw(startPhys + (stopPhys - startPhys) * i / (count - 1)));
 }
 
 function buildSweepParamOptions() {
@@ -751,6 +761,31 @@ function buildSweepParamOptions() {
     opt.textContent = param.label + (param.unit ? ` (${param.unit})` : "");
     select.appendChild(opt);
   }
+}
+
+// Disables whichever slider is currently the sweep target (it's driven
+// by the from/to/count range instead while selected) and re-enables the
+// previous one, then refills from/to with that slider's own min/max in
+// physical units -- a reasonable, visible-and-editable default rather
+// than the old behavior of silently always using the full slider range
+// no matter what it was actually set to.
+let sweptSliderId = null;
+function updateSweepParamUI() {
+  const paramKey = document.getElementById("sweep-param").value;
+  const param = SWEEP_PARAMS[paramKey];
+  if (!param) return;
+  if (sweptSliderId && sweptSliderId !== param.sliderId) {
+    const prev = document.getElementById(sweptSliderId);
+    if (prev) prev.disabled = false;
+  }
+  sweptSliderId = param.sliderId;
+  const slider = document.getElementById(param.sliderId);
+  slider.disabled = true;
+  const minPhys = param.toPhysical(parseFloat(slider.min));
+  const maxPhys = param.toPhysical(parseFloat(slider.max));
+  document.getElementById("sweep-start").value = Number(minPhys.toPrecision(4));
+  document.getElementById("sweep-stop").value = Number(maxPhys.toPrecision(4));
+  document.getElementById("sweep-count").value = 6;
 }
 
 function runSweep() {
@@ -771,7 +806,7 @@ function runSweepBody() {
   const param = SWEEP_PARAMS[paramKey];
   const slider = document.getElementById(param.sliderId);
   const savedValue = slider.value;
-  const values = sweepValues(paramKey, slider);
+  const values = sweepValues(paramKey);
 
   const t0 = performance.now();
   const tRows = [], h2Rows = [];
@@ -894,6 +929,7 @@ function initPage(config) {
   document.getElementById("T-mode-ge").addEventListener("click", () => setTemperatureDisplayMode("ge"));
   document.getElementById("ic-preset").addEventListener("change", (e) => applyPreset(e.target.value));
   document.getElementById("run-sweep").addEventListener("click", runSweep);
+  document.getElementById("sweep-param").addEventListener("change", updateSweepParamUI);
   for (const id of ["nH", "T", "dtf", "ntarget", "nshock", "mach"]) {
     document.getElementById(id).addEventListener("input", scheduleRedraw);
   }
@@ -919,6 +955,7 @@ function initPage(config) {
     buildSpeciesSliders(config);
     buildSpeciesToggle();
     buildSweepParamOptions();
+    updateSweepParamUI(); // disables the initially-selected sweep target's slider immediately, not just after the dropdown is touched
     document.getElementById("ic-preset").disabled = false;
     document.getElementById("run-sweep").disabled = false;
     document.getElementById("status").textContent = "ready";
