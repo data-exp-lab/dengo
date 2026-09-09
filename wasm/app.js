@@ -15,6 +15,7 @@ let init, step, statePtr, rhsPtr, temperature;
 let currentMode = "cool";
 let speciesDisplayMode = "density"; // "density" (cm^-3) or "massfrac" (X_i, dimensionless)
 let temperatureDisplayMode = "T"; // "T" (K) or "ge" (specific internal energy, erg/g)
+let temperatureZoomEnabled = false; // opt-in: drag-to-zoom detail view under the Temperature chart
 
 // -- LaTeX axis labels (rendered via KaTeX, not Vega-Lite's own plain-text
 // titles -- see NOTES.md for why: Vega-Lite axis titles are just SVG
@@ -467,7 +468,7 @@ function runFreefall(nH, T, fractions, logNTarget, logNShock, machShock, safetyF
 
 const FIELD_TITLE = { T: "T (K)", ge: "ε (erg/g)" };
 
-function chartSpec(field, xKey, data, extra, extraTooltip) {
+function chartSpec(field, xKey, data, extra, extraTooltip, withZoom) {
   // Point markers double as an annotation of *where* the adaptive
   // stepper actually placed a step -- their spacing on the log x-axis
   // directly shows the step-size ramp (small at first, growing ~2x per
@@ -475,47 +476,101 @@ function chartSpec(field, xKey, data, extra, extraTooltip) {
   // some point-count cutoff), sized down as steps pile up so a
   // few-thousand-step free-fall run doesn't turn into a solid smear.
   const n = data.length;
-  const pointSize = Math.max(6, Math.min(36, 2500 / Math.max(n, 1)));
-  return {
-    $schema: "https://vega.github.io/schema/vega-lite/v5.json",
-    width: 600, height: 220, background: null,
-    config: vlConfig(),
+  const overviewPointSize = Math.max(6, Math.min(36, 2500 / Math.max(n, 1)));
+  // The zoomed detail view below is specifically for looking closely at
+  // individual steps (e.g. runFreefall's shock-refinement points) -- its
+  // dots are always drawn at a comfortably visible fixed size regardless
+  // of how many points the whole run has, since that's the point of
+  // zooming in at all.
+  const detailPointSize = 50;
+
+  const xAxis = {
+    title: null, labelOverlap: "greedy",
+    // human-unit labels ("254 kyr") run wider than the plain numbers
+    // this axis used to show, so angle them -- greedy overlap removal
+    // alone still let neighbors visually touch on a busy log axis with
+    // many same-decade ticks.
+    labelAngle: xKey === "time" ? -40 : 0,
+    labelExpr: xKey === "time" ? TIME_LABEL_EXPR : undefined,
+  };
+  const tooltip = [
+    { field: "i", title: "step", type: "quantitative" },
+    { field: "x", title: xKey === "time" ? "t (s)" : "n (cm⁻³)", type: "quantitative", format: ".3~g" },
+    { field: "tHuman", title: "t", type: "nominal" },
+    { field: "dt", title: "step Δt (s)", type: "quantitative", format: ".3~g" },
+    { field: field, title: FIELD_TITLE[field] || field, type: "quantitative", format: ".4~g" },
+    ...(extraTooltip || []),
+  ];
+
+  // `xDomain`, when given, is a `{domain: ...}` scale-property object
+  // spread in alongside the ordinary type -- used below to bind the
+  // detail view's x-axis to the overview's brush selection. `withBrush`
+  // attaches the brush selection itself to *this one layer* -- not to
+  // the outer multi-layer view, which is what a first attempt did and
+  // is exactly what triggered a "Duplicate signal name" error: a
+  // selection declared at a layered view's top level gets projected
+  // onto every layer in that view, including the band/shock-rule extra
+  // layers below that don't even have an x field, and Vega-Lite's
+  // compiler doesn't handle that cleanly. Scoping the selection to just
+  // the one layer that actually needs it avoids the whole problem.
+  function mainLayer(pointSize, xDomain, withBrush) {
+    return {
+      data: { values: data },
+      mark: { type: "line", point: { filled: true, size: pointSize, opacity: 0.9 } },
+      encoding: {
+        x: {
+          field: "x", type: "quantitative",
+          // Time (unlike density) can legitimately be exactly 0 now
+          // that the initial condition itself is plotted -- symlog
+          // (linear near zero, log further out) shows that point
+          // instead of silently dropping it the way a pure log scale
+          // would.
+          scale: { type: xKey === "time" ? "symlog" : "log", ...(xDomain || {}) },
+          axis: xAxis,
+        },
+        y: { field: field, type: "quantitative", scale: { type: "log" }, axis: { title: null } },
+        tooltip,
+      },
+      ...(withBrush ? { params: [{ name: "brush", select: { type: "interval", encodings: ["x"] } }] } : {}),
+    };
+  }
+
+  // The zoom view is opt-in (gated behind the "zoom view" checkbox next
+  // to this chart) -- a plain single chart, no brush, is the plainer/
+  // more compact look this defaults away from being forced on everyone.
+  if (!withZoom) {
+    return {
+      $schema: "https://vega.github.io/schema/vega-lite/v5.json",
+      width: 600, height: 220, background: null,
+      config: vlConfig(),
+      layer: [...(extra || []), mainLayer(overviewPointSize)],
+    };
+  }
+
+  // Drag a rectangle on the overview (top) chart to select a range;
+  // its own axes never pan or rescale from that drag, only the
+  // selection rectangle itself moves. The detail (bottom) chart's axes
+  // zoom to match instead -- the standard Vega-Lite recipe of binding a
+  // second view's scale domain to an interval selection param, no
+  // custom pan/zoom event handling needed. Before anything is selected
+  // the detail view just shows the same full range as the overview.
+  const overview = {
+    width: 600, height: 140,
+    layer: [...(extra || []), mainLayer(overviewPointSize, undefined, true)],
+  };
+  const detail = {
+    width: 600, height: 160,
     layer: [
       ...(extra || []),
-      {
-        data: { values: data },
-        mark: { type: "line", point: { filled: true, size: pointSize, opacity: 0.9 } },
-        encoding: {
-          x: {
-            field: "x", type: "quantitative",
-            // Time (unlike density) can legitimately be exactly 0 now
-            // that the initial condition itself is plotted -- symlog
-            // (linear near zero, log further out) shows that point
-            // instead of silently dropping it the way a pure log scale
-            // would.
-            scale: { type: xKey === "time" ? "symlog" : "log" },
-            axis: {
-              title: null, labelOverlap: "greedy",
-              // human-unit labels ("254 kyr") run wider than the plain
-              // numbers this axis used to show, so angle them -- greedy
-              // overlap removal alone still let neighbors visually touch
-              // on a busy log axis with many same-decade ticks.
-              labelAngle: xKey === "time" ? -40 : 0,
-              labelExpr: xKey === "time" ? TIME_LABEL_EXPR : undefined,
-            },
-          },
-          y: { field: field, type: "quantitative", scale: { type: "log" }, axis: { title: null } },
-          tooltip: [
-            { field: "i", title: "step", type: "quantitative" },
-            { field: "x", title: xKey === "time" ? "t (s)" : "n (cm⁻³)", type: "quantitative", format: ".3~g" },
-            { field: "tHuman", title: "t", type: "nominal" },
-            { field: "dt", title: "step Δt (s)", type: "quantitative", format: ".3~g" },
-            { field: field, title: FIELD_TITLE[field] || field, type: "quantitative", format: ".4~g" },
-            ...(extraTooltip || []),
-          ],
-        },
-      },
+      mainLayer(detailPointSize, { domain: { param: "brush", field: "x" } }, false),
     ],
+  };
+
+  return {
+    $schema: "https://vega.github.io/schema/vega-lite/v5.json",
+    background: null,
+    config: vlConfig(),
+    vconcat: [overview, detail],
   };
 }
 
@@ -757,7 +812,7 @@ function redraw() {
       encoding: { x: { field: "x", type: "quantitative" } },
     });
   }
-  vegaEmbed("#chart-T", chartSpec(tempField, result.xKey, rows, tempExtra, gammaTooltip),
+  vegaEmbed("#chart-T", chartSpec(tempField, result.xKey, rows, tempExtra, gammaTooltip, temperatureZoomEnabled),
             { actions: false, renderer: "svg" });
   const ionRows = [];
   for (let i = 0; i < result.x.length; i++) {
@@ -1134,6 +1189,10 @@ function initPage(config) {
   document.getElementById("species-mode-massfrac").addEventListener("click", () => setSpeciesDisplayMode("massfrac"));
   document.getElementById("T-mode-T").addEventListener("click", () => setTemperatureDisplayMode("T"));
   document.getElementById("T-mode-ge").addEventListener("click", () => setTemperatureDisplayMode("ge"));
+  document.getElementById("T-zoom-toggle").addEventListener("change", (e) => {
+    temperatureZoomEnabled = e.target.checked;
+    scheduleRedraw();
+  });
   document.getElementById("ic-preset").addEventListener("change", (e) => applyPreset(e.target.value));
   document.getElementById("run-sweep").addEventListener("click", runSweep);
   document.getElementById("sweep-param").addEventListener("change", updateSweepParamUI);

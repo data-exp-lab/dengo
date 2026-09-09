@@ -85,6 +85,10 @@ input[type=range] { width: 100%; }
   background: var(--bg); color: var(--fg); cursor: pointer;
 }
 .mini-modebar button.active { background: var(--accent); color: white; border-color: var(--accent); }
+.zoom-toggle {
+  display: inline-flex; align-items: center; gap: 4px; margin-left: auto;
+  font-size: 0.78em; color: var(--muted);
+}
 .species-toggle { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; margin: 0 4px 8px; }
 .species-toggle label {
   display: inline-flex; align-items: center; gap: 4px;

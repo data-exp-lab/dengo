@@ -2757,3 +2757,61 @@ not a regression, a pre-existing, already-documented limit of how
 strong a shock the solver can resolve at all, from a state this
 extreme. Full `pytest` suite unaffected (120/120) -- pure `app.js`
 change, no Python path touched.
+
+**2026-09-09, new branch `wasm-chart-zoom`: drag-to-zoom detail view for
+the Temperature chart, opt-in.** Direct follow-up to the shock-
+refinement entry above -- once the shock's actual spike-then-crash-
+then-recovery became visible as real points on the chart, the next
+thing wanted was a way to look closely at that (or any) region without
+permanently altering the main chart's own axes. Explicitly not
+scroll/drag pan-and-zoom on the one chart (continuously rescaling axes
+the way that always risks losing your place or fat-fingering the wrong
+zoom level) -- instead the standard Vega-Lite "overview + detail"
+recipe: drag a rectangle on the (unchanged) chart to select a range,
+and a second, smaller chart underneath shows that exact range enlarged,
+with its own axes actually zoomed. Gated behind a new "zoom view"
+checkbox next to the existing temperature/thermal-energy mode buttons
+(off by default, always visible so the capability is discoverable) --
+added at the user's own suggestion, once the two-chart layout's
+appearance was in question, rather than forcing every user of the plain
+chart into a taller page.
+
+Implementation (`app.js`'s `chartSpec()`): builds a `vconcat` of two
+views sharing the same underlying data and the existing shaded-band/
+shock-line "extra" layers, the top one carrying an `interval` selection
+param (`brush`) on its x-encoding, the bottom one's x-scale domain bound
+to that selection (`scale: {domain: {param: "brush", field: "x"}}`) --
+no custom pan/zoom event handling anywhere, this is Vega-Lite's own
+declarative binding. The detail view always draws its point markers at
+a fixed, comfortably visible size, regardless of how many points the
+whole run has (unlike the overview, which still shrinks its points as
+step count grows) -- since the entire point of zooming in is to see
+individual steps clearly.
+
+One real bug surfaced building this, caught immediately by the existing
+zero-console-errors check rather than needing to be searched for: a
+first attempt attached the `brush` selection `param` at the *view*
+level of the (multi-layer) overview chart, which crashed on load with
+"Duplicate signal name: brush_tuple" -- Vega-Lite tries to project a
+view-level selection onto every layer in that view, including the
+shaded-band layer that has no x-field at all, and its compiler doesn't
+handle that cleanly (confirmed via a minimal, dependency-free repro
+outside the actual app before touching real code again -- isolated it
+to exactly one layer vs. more than one layer in the same trick, not
+object-identity/data reuse, which was the first, wrong guess). Fixed by
+attaching `params` to the one specific layer that needs it instead of
+the outer view -- scoped selections don't have this problem.
+
+Verified: real Emscripten rebuild, headless-browser pass across all
+three networks, both themes, both temperature/thermal-energy modes,
+zoom on and off (including toggling it back off after being on) -- zero
+console errors throughout. Confirmed directly, not just assumed: the
+checkbox itself is always visible and unchecked by default (single
+plain chart, byte-for-byte the old layout); checking it swaps in the
+overview+detail pair; a real mouse drag on the overview produces a
+visible selection rectangle and a correctly zoomed, correctly-scoped
+detail view underneath (confirmed via DOM inspection that both views
+render actual point-mark elements, one per data point, not just a
+line); clicking an empty area clears the selection and both views
+revert to the same full range. Full `pytest` unaffected (120/120) --
+pure `app.js`/HTML-template/CSS change.
