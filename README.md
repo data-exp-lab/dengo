@@ -38,6 +38,16 @@ fixed along the way). What's actively supported and tested right now:
   parameter — see `k13`/`k22` in `primordial_rates.py`). Extending this
   to a general, cleanly-named per-reaction mechanism is the natural next
   step, not yet done (see `NOTES.md`).
+- `dengo.grackle_compat`: a Grackle-API-compatible shim (`chemistry_data`/
+  `FluidContainer`, matching Grackle's own field names/units convention)
+  over this same primordial network, so code written against gracklepy
+  can run against dengo instead for the physics dengo implements
+  (Grackle's `primordial_chemistry=2`, no metal cooling/UV background/
+  dust/radiative transfer -- anything else raises `GrackleCompatError`
+  at `initialize()` rather than silently giving wrong physics).
+  Validated directly against the real gracklepy in
+  `.grackle_compare/validate_grackle_compat.py` (not a repo dependency,
+  needs its own venv -- see `NOTES.md`).
 
 What's present in the repo but **not** part of the modernized, tested
 path (left alone intentionally, not because it's unimportant):

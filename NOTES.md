@@ -1071,3 +1071,99 @@ iterate on, rather than making each iteration itself cheaper.
    just fixed, but replacing it with each solver's actual gamma (`fc.
    calculate_gamma()` for Grackle; a call into dengo's own gamma table)
    would be the natural next refinement.
+
+**2026-09-09: evaluated, then built, a Grackle-API-compatible shim
+(`dengo.grackle_compat`).** User asked how hard it would be to expose
+Grackle's API for a drop-in replacement. Split this into two very
+different projects and scoped both:
+
+- **(A) API-shape compatibility for what dengo already implements**
+  (primordial H/He/H2 chemistry, Grackle's `primordial_chemistry=2`, no
+  metals/UV background/dust/radiative transfer) -- moderate,
+  well-scoped, multi-day-not-multi-week effort, mostly glue + unit-
+  conversion code given `.grackle_compare/`'s prior work already solved
+  the hard parts (species/field mapping, units conversion, confirming
+  the two codes' physics agrees once the gamma bug was fixed).
+- **(B) Full Grackle feature parity** (metal-line Cloudy cooling tables,
+  UV background + self-shielding, dust physics, D/D+/HD tracking,
+  radiative transfer coupling) -- a much larger, separate physics-
+  content project (new rate/cooling tables and species dengo doesn't
+  have at all), not a shim; explicitly out of scope here.
+
+Built (A) as `src/dengo/grackle_compat.py`:
+
+- `chemistry_data`: instantiate-then-set-attributes ergonomics matching
+  gracklepy's own, with `set_velocity_units()` reproducing Grackle's
+  exact formula (`grackle_units.c`: `velocity_units =
+  length_units/time_units`, `/= a_value` if comoving). `initialize()`
+  validates every parameter in `_UNSUPPORTED_UNLESS_DEFAULT` (metal_
+  cooling, dust_chemistry, UVbackground, primordial_chemistry != 2,
+  self-shielding, radiative transfer, ...) and raises
+  `GrackleCompatError` -- loudly, not a silent no-op -- for anything
+  outside what this shim implements.
+- `FluidContainer`: a dict-like field container backed by a dengo
+  `Solver`, with Grackle's exact field names/units convention (density
+  fields as *mass* density in `chemistry_data.density_units`,
+  `internal_energy` in `velocity_units**2`) -- `_push()`/`_pull()`
+  convert to/from dengo's native cgs number densities and specific
+  energy at the boundary, the same conversions
+  `.grackle_compare/run_grackle.py`/`run_decoupled.py` already had to
+  get right by hand.
+- `solve_chemistry(dt)`, `calculate_temperature()`, `calculate_pressure()`
+  -> trivial ideal-gas-law from already-known n_tot/T,
+  `calculate_gamma()` -> reimplemented the Omukai & Nishi H2-gamma
+  mixture formula directly in Python/numpy from `solver.state`/`solver.T`
+  (no new C/Cython needed -- it's a simple closed form, and dengo's own
+  internal copy already exists for the *solver's* internal use, just
+  wasn't queryable from outside), `calculate_cooling_time()` -> `ge /
+  |d(ge)/dt|` via the new bulk RHS evaluator (below). `calculate_dust_
+  temperature()` raises `GrackleCompatError` (dust not implemented).
+- `setup_fluid_container()`: a restricted version of gracklepy's own
+  (ionized/neutral single-cell setup); `converge=True` (iterate to a
+  self-consistent starting T) and nonzero `metal_mass_fraction` both
+  raise rather than silently doing the wrong thing.
+
+Two small, genuinely general (not Grackle-specific) additions to the
+Solver template made this possible without new C/Cython plumbing beyond
+what already existed: `evaluate_temperature_bulk()`/`evaluate_rhs_bulk()`
+-- the multi-cell (`dims`-wide), marshaling-free counterparts to the
+existing single-cell `evaluate_temperature()`/`evaluate_rhs()`, reading/
+writing `self.state`/`self.T`/the new `self.rhs` directly. New tests
+confirm they agree with the single-cell dict-based API (to ~1e-4
+relative -- both converge their own Newton iteration to 1e-8 internally
+from potentially different starting guesses, so exact bit-agreement
+isn't expected) and give a genuinely independent answer per cell, not a
+broadcast from cell 0.
+
+Also consolidated three near-duplicate copies of the primordial
+species/cooling/reaction lists (`examples/primordial_network.py`,
+`.grackle_compare/primordial_network_helpers.py`, `tests/conftest.py`)
+into one canonical `src/dengo/primordial_network.py`, used by all three
+plus the new `grackle_compat` module -- the "minimize duplication"
+constraint applies to this project's own internals just as much as to
+solver templates.
+
+**Validated against the real gracklepy directly**
+(`.grackle_compare/validate_grackle_compat.py`, not a repo test
+dependency -- needs the `.grackle_compare/.venv` gracklepy install):
+built the identical ionized-cooldown test problem through both real
+`gracklepy.chemistry_data`/`FluidContainer` and
+`dengo.grackle_compat`'s, stepped both forward with `solve_chemistry()`,
+compared `calculate_temperature()`/`calculate_gamma()` at every step.
+After an initial few steps of larger transient disagreement (both sides
+start from the same approximate `1.5*kB*T/mh` internal-energy guess,
+which is only approximately consistent with either solver's real EOS),
+temperature converges to agree within ~1% and gamma matches to 4+
+significant figures (both ~5/3, negligible H2 at these conditions) --
+the same level of agreement established throughout this investigation
+between dengo's and Grackle's underlying chemistry, now confirmed to
+survive going through the compat layer's unit conversions too, not just
+the native APIs. 80/80 tests pass (65 previous + 15 new
+`test_grackle_compat.py` tests).
+
+Known limitation worth flagging: `solve_chemistry()`'s convergence
+check uses a fixed `reltol=1.0e-5` rather than exposing Grackle's own
+tolerance-equivalent controls, and `max_iterations` is the only
+Grackle-side solver-tuning parameter actually honored (mapped to
+`niter`). Not a correctness issue, but a caller relying on Grackle's
+other iteration-control parameters won't find them respected.
