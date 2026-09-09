@@ -96,7 +96,13 @@ REACTION_RATES = {
     "k13": {
         "equation": "H2 + H → 3H",
         "source": "Glover 2008 (three-body dissociation channel)",
-        "formula": "datum.tev > 0.3 ? 1.0670825e-10*pow(datum.tev,2.012)/(exp(4.463/datum.tev)*pow(1+0.2472*datum.tev,3.512)) : 1e-20",
+        # This top-level "formula" is only a fallback for reactions with
+        # no presets at all -- rates.js always resolves the active
+        # formula via presets[default_preset] once a card is built, so
+        # this should match that (threebody=4), not just "whichever
+        # preset happened to come first" (it used to duplicate
+        # threebody=0 here, which coeff_fn never actually falls back to).
+        "formula": "pow(10, -178.4239 - 68.42243*(log(datum.T)/log(10)) + 43.20243*pow(log(datum.T)/log(10),2) - 4.633167*pow(log(datum.T)/log(10),3) + 69.70086*(log(1+40870.38/datum.T)/log(10)) - (23705.7/datum.T))",
         "default_preset": "threebody=4",
         "presets": {
             "threebody=0": "datum.tev > 0.3 ? 1.0670825e-10*pow(datum.tev,2.012)/(exp(4.463/datum.tev)*pow(1+0.2472*datum.tev,3.512)) : 1e-20",
@@ -145,7 +151,9 @@ REACTION_RATES = {
     "k22": {
         "equation": "2H + H → H2 + H",
         "source": "Glover 2008 (three-body formation channel)",
-        "formula": "datum.T > 300.0 ? 1.3e-32*pow(datum.T/300.0,-0.38) : 1.3e-32*pow(datum.T/300.0,-1.0)",
+        # See k13's identical note: matches presets[default_preset], not
+        # the first-encountered preset.
+        "formula": "7.7e-31/pow(datum.T,0.464)",
         "default_preset": "threebody=4",
         "presets": {
             "threebody=0": "datum.T > 300.0 ? 1.3e-32*pow(datum.T/300.0,-0.38) : 1.3e-32*pow(datum.T/300.0,-1.0)",
