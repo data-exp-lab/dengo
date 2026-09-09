@@ -1612,3 +1612,105 @@ Not yet done (explicitly deferred to the next phase, per the user's
 "then move on to the second" -- generalizing this into a real Jinja-
 templated wasm codegen path, not hand-written per network): see
 `wasm/README.md`'s "Generalizing" section.
+
+**2026-09-09, continued: GitHub Pages CI, the generalized wasm codegen
+path, and three fiducial networks -- all three parts of the user's
+next request landed together.**
+
+**CI decision, made explicitly as asked ("you can decide... at what
+level"):** full regeneration on every push (codegen + Emscripten
+compile for every fiducial network), not just republishing whatever
+`.wasm`/`.js` happen to be committed. Reasoning: this project's own
+history has repeatedly found real, previously-silent bugs in the
+generated solver (the H2-gamma bug, the case-sensitive-sort bug, the
+step-size-policy bug, ...) -- a demo site that could silently drift
+from source because nobody remembered to rebuild and commit new
+binaries is a worse failure mode than a few extra minutes of CI time.
+GitHub-hosted runners easily afford it: three small single-cell
+networks, each a few seconds of codegen + a few seconds of `em++`. A
+consequence of this choice: the wasm build artifacts are **no longer
+committed to the repo at all** (a reversal of the previous entry's
+"deliberate exception" -- CI regenerating them on every push removes
+the staleness risk that exception was accepting, so there's no reason
+left to keep it).
+
+**Generalized `dengo_wasm.cpp` into a real codegen path**, per the
+user's earlier-stated next step: `src/dengo/templates/wasm_solver/
+dengo_wasm.cpp.template` (Jinja, mirrors `cython_solver_run.pyx.
+template`'s conventions) + `ChemicalNetwork.write_wasm_solver()`.
+Refactored `write_cython_solver()`/`write_wasm_solver()` to share a new
+`_write_solver_core()` helper (renders `{solver_name}_solver.h`/`.C` +
+copies `BE_chem_solve.C` -- identical either way, since that part is
+plain, target-agnostic C++; only the thin wrapper around it differs).
+Verified the generated `dengo_wasm.cpp` differs from the previous
+hand-written version only in comments/wording (one genuine cleanup: two
+`#define`s that were dead code, correctly dropped) -- recompiled and
+reran the exact same quickstart initial conditions, bit-for-bit
+identical result to every earlier check (T=5971.048503743692,
+H2_1=0.00012072995205076718, H_1=7600.935053098028). New
+`tests/test_codegen.py::test_write_wasm_solver_creates_expected_files`
+pins the codegen output shape (file existence/content, not a full
+Emscripten compile -- `em++` isn't a repo/CI test dependency).
+
+**Three fiducial networks** (`wasm/fiducial_networks.py`), deliberately
+spanning a wide complexity range to prove the codegen path isn't
+hand-fitted to one network:
+- `primordial` -- the flagship, full H/He/H2 network (reuses
+  `dengo.primordial_network.build_network()` directly).
+- `primordial_atomic` -- H/He ionization/recombination only (reactions
+  k01-k06, cooling terms that don't need H2: recombination, collisional
+  excitation/ionization, bremsstrahlung, Compton), no H2 chemistry at
+  all -- a genuine contrast case, not just a smaller version of the
+  same thing. Confirmed idempotent to call `primordial_rates.
+  setup_primordial()` from a second, independent module-level guard
+  (plain dict registration, `reaction_registry[name] = self` -- checked
+  directly rather than assumed) before relying on that to build this
+  network without going through `dengo.primordial_network`'s own guard.
+- `hydrogen_minimal` -- H/H+/e- with just k01/k02, no cooling terms at
+  all (matches `tests/conftest.py`'s `make_hydrogen_network`) -- the
+  simplest network dengo can generate a solver for.
+
+All three generate, compile with `em++`, and run correctly -- checked
+directly (not assumed): each converges and gives a physically sensible
+trajectory in both modes (constant-density cooldown, free-fall
+collapse). `primordial_atomic`'s free-fall run reaches a much higher
+final temperature than `primordial`'s at the same target density
+(5817K vs. 2198K) -- expected and correct: without H2's cooling/
+formation-heating channel, adiabatic compressional heating has nothing
+to radiate away. `hydrogen_minimal`'s free-fall run stops early (~4e4
+cm^-3 of a 1e15 target, 68 steps) since with zero cooling terms
+temperature only ever rises, eventually outrunning what the fixed
+Newton tolerance can track at that state -- a real, expected limitation
+of this deliberately-minimal network, not a bug, and left as-is (it's
+included specifically to show the fast/minimal case, not to reach
+astrophysical densities).
+
+**Generalized the site itself**, not just the codegen: `wasm/app.js` is
+now shared across all three networks' pages -- builds per-species
+initial-fraction sliders dynamically from `dengo_wasm_species_names()`
+(nothing hardcoded to a particular species set), uses "ionized fraction"
+(`H_2/(H_1+H_2)`) as the universal second chart panel (every fiducial
+network tracks H_1/H_2), with H2 fraction as a bonus status-line metric
+only when `H2_1` exists. `thermodynamicGamma()`'s existing "H2 gets
+7/5, everything else gets 5/3" logic already generalizes correctly to
+species sets without H2 at all (the check simply never matches).
+`wasm/generate_site.py` orchestrates codegen + compile + per-network
+page + landing page for the whole set; `wasm/index.html`/`dengo_wasm.
+cpp`/`.js`/`.wasm`/`build.sh` (the single-network, hand-written
+precursor from the previous entry) are removed, fully superseded.
+
+Verified the whole site end-to-end with a real headless browser
+(Playwright + the system's Chrome) serving the actual generated output,
+not just checking each piece in isolation: landing page links to all
+three networks; each network's page loads, builds its sliders, solves,
+and redraws with no console errors, in both modes. Screenshots
+confirm correct rendering (dynamic species sliders matching each
+network's actual species list, sensible-looking T/ionization curves).
+86/86 tests pass (85 previous + 1 new).
+
+Manual step still required, not automatable from here: enabling GitHub
+Pages for this repo (Settings -> Pages -> Source: GitHub Actions) --
+the workflow deploys once that's on, not before. Also note the
+workflow currently triggers on pushes to `wasm-solver` specifically
+(where this work lives right now); update the branch name once this
+merges elsewhere.

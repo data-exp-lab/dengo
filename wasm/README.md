@@ -1,42 +1,68 @@
 # Dengo in the browser (WebAssembly)
 
-`index.html` is a self-contained, client-side version of
-`examples/interactive_explorer.ipynb`: the same primordial H/He/H2
-solver, compiled to WebAssembly, running entirely in the browser -- no
-Python, no server, no Jupyter kernel. Open `index.html` (served over
-http(s), not `file://` -- browsers block loading wasm/CDN scripts from
-`file://`) and drag the sliders.
-
-```
-cd wasm && python3 -m http.server 8000
-# then open http://localhost:8000/
-```
+A demo site: dengo's generated chemistry/cooling solver, compiled to
+WebAssembly and running entirely client-side -- no Python, no server,
+no Jupyter kernel -- with an interactive widget (sliders + live
+[Vega-Lite](https://vega.github.io/vega-lite/) charts) for each of a
+few fiducial networks. Deployed automatically to GitHub Pages by
+[`.github/workflows/gh-pages.yml`](../.github/workflows/gh-pages.yml)
+on every push (see that workflow's comments for why it fully
+regenerates every network from source on every push, rather than just
+republishing whatever's already built).
 
 ## What's here
 
-- `dengo_wasm.cpp` -- a small hand-written C API (`init()`,
-  `step(dtf, niter, reltol)`, direct pointers to the state and RHS
-  buffers) around dengo's generated solver, compiled with Emscripten.
-  Hardcoded to the primordial network specifically for now (species
-  order matches Python's `SPECIES_NAMES`) -- see "Generalizing" below.
-- `build.sh` -- regenerates the primordial network's C++ source (via
-  `dengo.primordial_network`, same as every other example) and compiles
-  it + `dengo_wasm.cpp` to `dengo_wasm.js`/`dengo_wasm.wasm` with
-  `em++`, embedding the ~475KB rate-table binary directly into the
-  module (no separate fetch). Requires the
+- `../src/dengo/templates/wasm_solver/dengo_wasm.cpp.template` -- the
+  Jinja template (rendered by `ChemicalNetwork.write_wasm_solver()`,
+  alongside `../src/dengo/chemical_network.py`) for a small C API
+  (`init`, `step(dtf, niter, reltol)`, direct pointers to the state and
+  RHS buffers, `species_names()`) around the generated solver, meant to
+  be compiled with Emscripten instead of Cython -- the wasm-equivalent
+  of `cython_solver_run.pyx.template`. Always a single cell (`nstrip=1`
+  -- this targets an interactive one-zone widget, not a grid-scale
+  simulation).
+- `fiducial_networks.py` -- three networks spanning a wide range of
+  complexity (see "Fiducial networks" below), to show the codegen path
+  genuinely works for more than the one network it was built against.
+- `generate_site.py` -- for each fiducial network: generates the wasm
+  solver source, compiles it with `em++`, and writes its page; plus one
+  landing page linking to all of them. Requires the
   [Emscripten SDK](https://emscripten.org/docs/getting_started/downloads.html)
-  (`emsdk install latest && emsdk activate latest`, no root needed) on
-  `PATH`.
-- `dengo_wasm.js`/`dengo_wasm.wasm` -- the compiled output, **committed**
-  (unlike other generated artifacts in this repo) so `index.html` works
-  for anyone who clones the repo and serves this directory, without
-  needing Emscripten themselves. Re-run `build.sh` and commit the result
-  whenever the primordial network definition changes.
-- `index.html` -- the widget: sliders (density, temperature, ionized/H2
-  fraction), a mode toggle (constant-density cooldown vs. free-fall
-  collapse, matching the notebook's two modes), and
-  [Vega-Lite](https://vega.github.io/vega-lite/) charts that redraw on
-  every slider input.
+  (`emsdk install <version> && emsdk activate <version>`, no root
+  needed) on `PATH` -- see the pinned version in
+  `.github/workflows/gh-pages.yml`.
+- `app.js`/`style.css` -- the shared JS driver and styling every
+  network's page loads: builds initial-fraction sliders dynamically
+  from `dengo_wasm_species_names()` (nothing here is hardcoded to a
+  particular species set), runs the same two modes as
+  `examples/interactive_explorer.ipynb` (constant-density cooldown,
+  free-fall collapse), and redraws on every slider `input` event,
+  coalesced to once per animation frame.
+
+Build locally with Emscripten on `PATH`:
+
+```
+uv run python wasm/generate_site.py wasm/_site
+cd wasm/_site && python3 -m http.server 8000
+# open http://localhost:8000/ (not file:// -- browsers block wasm/CDN
+# script loading from file://)
+```
+
+## Fiducial networks
+
+| name | species | reactions | cooling |
+|---|---|---|---|
+| `primordial` | full H/H+/He/He+/He++/H-/H2/H2+/e- | 22 (incl. the full H2 formation/dissociation chain) | all 17, incl. H2 cooling/formation heating |
+| `primordial_atomic` | H/H+/He/He+/He++/e- (no H2 at all) | 6 (ionization/recombination only) | 13 (recombination, collisional excitation/ionization, bremsstrahlung, Compton -- no H2-specific terms) |
+| `hydrogen_minimal` | H/H+/e- | 2 (`k01`/`k02`) | none |
+
+`primordial` is the flagship: the ~1e15 amu/cc, 1500-2500K
+H2-formation-heating regime this whole project targets. The other two
+are deliberately smaller contrasts -- `primordial_atomic` shows the same
+free-fall collapse without H2's cooling channel (compare its much
+higher final temperature to `primordial`'s), and `hydrogen_minimal` is
+the simplest network dengo can generate a solver for at all (matches
+`tests/conftest.py`'s `make_hydrogen_network`).
 
 ## Verified, not assumed
 
@@ -45,23 +71,24 @@ browser (Playwright + the system's Chrome) before being called done --
 see NOTES.md for the full account:
 
 - The compiled wasm module gives **bit-for-bit identical** results to
-  the native Python/Cython solver on the same initial conditions.
+  the native Python/Cython solver on the same initial conditions (both
+  the original hand-written wrapper and the current Jinja-templated
+  codegen path, checked independently).
 - Per-call cost in Node/the browser (~110 us/cell) matches the
   already-optimized native per-cell cost -- no wasm performance penalty.
-- The actual page, driven by a headless browser, reproduces the same
-  free-fall trajectory (1298 steps, final T=2198.0K) as the native
-  solver and the standalone wasm check.
+- Each fiducial network's page, driven by a headless browser, converges
+  and produces physically sensible trajectories in both modes;
+  `primordial`'s free-fall run reproduces the same final temperature
+  (~2198K) as every native/command-line check elsewhere in this repo.
 
-## Generalizing beyond the primordial network
+## Generalizing further
 
-`dengo_wasm.cpp` is hand-written and specific to the primordial network
-(hardcoded `NSPECIES`, species name order, `calculate_rhs_primordial`/
-`calculate_jacobian_primordial` symbol names). Turning this into a
-proper wasm codegen target -- so *any* dengo network can produce a
-build like this one, the way `cython_solver_run.pyx.template` already
-does for the Cython wrapper -- would mean a new
-`dengo/templates/wasm_solver/dengo_wasm.cpp.template`, Jinja-rendered
-the same way, plus wiring `build.sh`'s logic into
-`ChemicalNetwork`/`solver_build`-style tooling rather than a one-off
-shell script. Not done yet -- this directory is the validated proof of
-concept for the primordial network specifically.
+Done: a proper Jinja-templated codegen path
+(`ChemicalNetwork.write_wasm_solver()`), used identically by all three
+fiducial networks above -- not hand-written per network anymore. Not
+done: exposing multi-cell (`dims>1`) or redshift-dependent behavior
+through the wasm API (irrelevant for a single-zone interactive widget,
+so not attempted), and the per-species slider UI is generic but simple
+(log-fraction sliders for every non-`ge`/non-`de` species) rather than
+network-specific curated defaults beyond the flat `default_ics`/
+`default_T` each fiducial network specifies in `fiducial_networks.py`.

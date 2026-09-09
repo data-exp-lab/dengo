@@ -17,6 +17,28 @@ def test_write_cython_solver_creates_expected_files(tmp_path):
         assert (tmp_path / fn).exists(), fn
 
 
+def test_write_wasm_solver_creates_expected_files(tmp_path):
+    """write_wasm_solver() shares _write_solver_core()/
+    _write_solver_tables_bin() with write_cython_solver() -- this only
+    checks the wasm-specific dengo_wasm.cpp is generated correctly and
+    the shared files still appear; compiling it needs Emscripten (not a
+    repo/CI dependency for the test suite -- see wasm/README.md for
+    that, done by hand against a real em++ toolchain)."""
+    network = make_hydrogen_network()
+    network.write_wasm_solver("t", output_dir=str(tmp_path))
+    for fn in ("t_solver.h", "t_solver.C", "BE_chem_solve.C",
+               "t_tables.bin", "dengo_wasm.cpp"):
+        assert (tmp_path / fn).exists(), fn
+    assert not (tmp_path / "t_solver_run.pyx").exists()
+
+    source = (tmp_path / "dengo_wasm.cpp").read_text()
+    assert '#include "t_solver.h"' in source
+    assert "t_setup_data" in source
+    assert "calculate_rhs_t(" in source
+    for sp in network.required_species:
+        assert sp.name in source  # dengo_wasm_species_names()'s joined string
+
+
 def test_generated_source_declares_every_species(tmp_path):
     network = make_primordial_network()
     network.write_cython_solver("t", output_dir=str(tmp_path))

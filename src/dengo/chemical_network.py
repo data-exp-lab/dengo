@@ -944,6 +944,36 @@ class ChemicalNetwork(object):
                     "float64"
                 ).tofile(f)
 
+    @staticmethod
+    def _make_jinja_env():
+        return jinja2.Environment(
+            extensions=["jinja2.ext.loopcontrols"],
+            loader=jinja2.PackageLoader("dengo", "templates"),
+        )
+
+    def _write_solver_core(self, solver_name, output_dir, env, template_vars):
+        """Shared by write_cython_solver()/write_wasm_solver(): renders
+        the generated C++ solver core (``{solver_name}_solver.h``/``.C``)
+        and copies the vendored ``BE_chem_solve.C`` integrator --
+        identical either way, since it's plain, target-agnostic C++;
+        only the thin wrapper around it (Cython vs. a hand-written-
+        equivalent wasm C API) differs per target.
+        """
+        files = [
+            ("cython_solver/cython_solver.h.template", "%s_solver.h" % solver_name),
+            ("cython_solver/cython_solver.C.template", "%s_solver.C" % solver_name),
+        ]
+        for iname, oname in files:
+            template_inst = env.get_template(iname)
+            with open(os.path.join(output_dir, oname), "w") as f:
+                f.write(template_inst.render(**template_vars))
+
+        solver_src = pkgutil.get_data(
+            "dengo", os.path.join("solvers", "BE_chem_solve.C")
+        )
+        with open(os.path.join(output_dir, "BE_chem_solve.C"), "wb") as f:
+            f.write(solver_src)
+
     def write_cython_solver(self, solver_name, output_dir="."):
         """Generate the self-contained Cython/C++ solver for this network.
 
@@ -960,29 +990,39 @@ class ChemicalNetwork(object):
         if not os.path.isdir(output_dir):
             os.makedirs(output_dir)
 
-        env = jinja2.Environment(
-            extensions=["jinja2.ext.loopcontrols"],
-            loader=jinja2.PackageLoader("dengo", "templates"),
-        )
+        env = self._make_jinja_env()
         template_vars = dict(network=self, solver_name=solver_name)
+        self._write_solver_core(solver_name, output_dir, env, template_vars)
 
-        files = [
-            ("cython_solver/cython_solver.h.template", "%s_solver.h" % solver_name),
-            ("cython_solver/cython_solver.C.template", "%s_solver.C" % solver_name),
-            (
-                "cython_solver/cython_solver_run.pyx.template",
-                "%s_solver_run.pyx" % solver_name,
-            ),
-        ]
-        for iname, oname in files:
-            template_inst = env.get_template(iname)
-            with open(os.path.join(output_dir, oname), "w") as f:
-                f.write(template_inst.render(**template_vars))
+        template_inst = env.get_template("cython_solver/cython_solver_run.pyx.template")
+        with open(os.path.join(output_dir, "%s_solver_run.pyx" % solver_name), "w") as f:
+            f.write(template_inst.render(**template_vars))
 
-        solver_src = pkgutil.get_data(
-            "dengo", os.path.join("solvers", "BE_chem_solve.C")
-        )
-        with open(os.path.join(output_dir, "BE_chem_solve.C"), "wb") as f:
-            f.write(solver_src)
+        self._write_solver_tables_bin(output_dir, solver_name)
+
+    def write_wasm_solver(self, solver_name, output_dir="."):
+        """Generate a WebAssembly-targetable version of the same solver
+        core: ``{solver_name}_solver.h``/``.C`` (identical to
+        ``write_cython_solver()``'s), ``BE_chem_solve.C``,
+        ``{solver_name}_tables.bin``, and ``dengo_wasm.cpp`` -- a small
+        hand-written-equivalent C API (``init``/``step``/``state_ptr``/
+        ``rhs_ptr``/``species_names``, always a single cell) meant to be
+        compiled with Emscripten instead of Cython, so the result needs
+        no Python runtime at all -- see ``wasm/README.md`` and
+        ``wasm/build.sh`` for how, and NOTES.md for how this was
+        validated (bit-for-bit identical to the native Cython solver on
+        the same initial conditions).
+        """
+        self.update_ode_species()
+        if not os.path.isdir(output_dir):
+            os.makedirs(output_dir)
+
+        env = self._make_jinja_env()
+        template_vars = dict(network=self, solver_name=solver_name)
+        self._write_solver_core(solver_name, output_dir, env, template_vars)
+
+        template_inst = env.get_template("wasm_solver/dengo_wasm.cpp.template")
+        with open(os.path.join(output_dir, "dengo_wasm.cpp"), "w") as f:
+            f.write(template_inst.render(**template_vars))
 
         self._write_solver_tables_bin(output_dir, solver_name)
