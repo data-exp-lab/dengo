@@ -78,10 +78,8 @@ typedef int(*rhs_f)(double *, double *, int, int, void *);
 typedef int(*jac_f)(double *, double *, int, int, void *);
 
 // function prototypes
-int BE_Resid_Fun(rhs_f, double *u, double *u0, double *gu, double dt, 
-                 int nstrip, int nchem, double *scaling, double *inv_scaling, void *sdata);
-int BE_Resid_Jac(jac_f, double *u, double *Ju, double dt, 
-                 int nstrip, int nchem, double *scaling, double *inv_scaling, void *sdata);
+int BE_Resid_FunJac(rhs_f, jac_f, double *u, double *u0, double *gu, double *Ju, double dt,
+                     int nstrip, int nchem, double *scaling, double *inv_scaling, void *sdata);
 int Gauss_Elim(double *A, double *x, double *b, int n);
 
 
@@ -145,8 +143,15 @@ int BE_chem_solve(rhs_f f, jac_f J,
   // perform Newton iterations
   for (isweep=0; isweep<sweeps; isweep++) {
 
-    // compute nonlinear residual and Jacobian
-    if (BE_Resid_Fun(f, u, u0, gu, dt, nstrip, nchem, scaling, inv_scaling, sdata) != 0) {
+    // compute nonlinear residual and Jacobian -- f() and J() are always
+    // evaluated at the same u within one sweep, so this rescales u to
+    // physical units once and calls both, rather than the old separate
+    // BE_Resid_Fun/BE_Resid_Jac each independently rescaling u to
+    // physical and back for the identical, unchanged values (see
+    // NOTES.md: a real, measured redundant-work finding, not just a
+    // style cleanup -- it also used to spend two avoidable floating-
+    // point round-trips on every Newton sweep instead of zero).
+    if (BE_Resid_FunJac(f, J, u, u0, gu, Ju, dt, nstrip, nchem, scaling, inv_scaling, sdata) != 0) {
       ///*
       // rescale back to input variables
       for (i=0; i<nstrip*nchem; i++)  u[i] *= scaling[i];
@@ -154,20 +159,7 @@ int BE_chem_solve(rhs_f f, jac_f J,
       for (i=0; i<nstrip*nchem; i++)  atol[i] *= scaling[i];
       //*/
 
-      //fprintf(stderr, "Error in BE_Resid_Fun \n");
-      delete[] inv_scaling;
-      return 1;
-    }
-
-    if (BE_Resid_Jac(J, u, Ju, dt, nstrip, nchem, scaling, inv_scaling, sdata) != 0) {
-      ///*
-      // rescale back to input variables
-      for (i=0; i<nstrip*nchem; i++)  u[i] *= scaling[i];
-      // also rescale the absolute tolerances back
-      for (i=0; i<nstrip*nchem; i++)  atol[i] *= scaling[i];
-      //*/
-
-      //fprintf(stderr, "Error in BE_Resid_Jac \n");
+      //fprintf(stderr, "Error in BE_Resid_FunJac \n");
       delete[] inv_scaling;
       return 1;
     }
@@ -268,82 +260,64 @@ int BE_chem_solve(rhs_f f, jac_f J,
 }
 
 
-// nonlinear residual calculation function, forms nonlinear residual defined 
-// by backwards Euler discretization, using user-provided RHS function f.
-int BE_Resid_Fun(rhs_f f, double *u, double *u0, double *gu, double dt, 
-                 int nstrip, int nchem, double *scaling, double*inv_scaling, void *sdata) 
+// Combined residual + Jacobian evaluation, forming the backward-Euler
+// residual g(u) = u - u0 - dt*f(u) and Jacobian J = I - dt*Jf(u), using
+// the user-provided f/J. f() and J() are always evaluated at the same
+// u within one Newton sweep (BE_chem_solve never updates u between the
+// two calls), so u is rescaled to physical units *once* here, not once
+// per function the way the old separate BE_Resid_Fun/BE_Resid_Jac did
+// -- that repeated the identical rescale (and its rounding error) for
+// no reason. Correspondingly, this is also where the Jacobian's
+// normalization rescale happens; the two loops the old BE_Resid_Jac
+// used (rows, then columns, as separate passes over the whole
+// nstrip*nchem*nchem array) are fused into one pass below, with `ivar`
+// innermost -- matching Ju's fastest-varying index (contiguous in
+// memory) -- rather than the old column-rescale loop's `jvar`
+// innermost, which strided by nchem (a fresh, non-contiguous cache
+// line on every access). See NOTES.md.
+int BE_Resid_FunJac(rhs_f f, jac_f J, double *u, double *u0, double *gu, double *Ju, double dt,
+                     int nstrip, int nchem, double *scaling, double *inv_scaling, void *sdata)
 {
-  // local variables
-  int i;
+  int i, ix, ivar, jvar;
 
-  ///*
-  // rescale back to input variables
+  // rescale to physical units -- shared by both f() and J()
   for (i=0; i<nstrip*nchem; i++)  u[i] *= scaling[i];
-  //*/
 
   // call user-supplied RHS function at current guess
   if (f(u, gu, nstrip, nchem, sdata) != 0)
     /*ENZO_FAIL("Error in user-supplied ODE RHS function f(u)");*/
+    return 1;   // u intentionally left in physical units here: the caller
+                // discards/overwrites it from a known-good state on any
+                // failure return, so nothing depends on its value.
+
+  // call user-supplied Jacobian function at the same (physical) guess
+  if (J(u, Ju, nstrip, nchem, sdata) != 0)
+    /*ENZO_FAIL("Error in user-supplied ODE Jacobian function J(u)");*/
     return 1;
 
-  ///*
-  // rescale u to scaled variables
+  // rescale u and the RHS back to normalized variables
   for (i=0; i<nstrip*nchem; i++)  u[i] *= inv_scaling[i];
-
-  // rescale rhs to normalized variables variables
   for (i=0; i<nstrip*nchem; i++)  gu[i] *= inv_scaling[i];
-  //*/
 
   // update RHS function to additionally include remaining terms for residual,
   //   g(u) = u - u0 - dt*f(u)
   for (i=0; i<nstrip*nchem; i++)  gu[i] = u[i] - u0[i] - dt*gu[i];
 
-  for (i=0; i<nstrip*nchem; i++){
-
   #ifdef DENGO_DEBUG
-  if ( gu[i] != gu[i] ) {  // NaN encountered!!
-    printf("[RHS] NaN encountered at gu[%d] = %0.5g\n", i, gu[i]);
+  for (i=0; i<nstrip*nchem; i++){
+    if ( gu[i] != gu[i] ) {  // NaN encountered!!
+      printf("[RHS] NaN encountered at gu[%d] = %0.5g\n", i, gu[i]);
+    }
   }
   #endif
-  }
-  return 0;
-}
 
-
-// nonlinear residual Jacobian function, forms Jacobian defined by backwards
-//  Euler discretization, using user-provided Jacobian function J.
-int BE_Resid_Jac(jac_f J, double *u, double *Ju, double dt, 
-		 int nstrip, int nchem, double *scaling, double*inv_scaling, void *sdata)
-{
-  // local variables
-  int ix, ivar, jvar, i;
-
-  ///*
-  // rescale back to input variables
-  for (i=0; i<nstrip*nchem; i++)  u[i] *= scaling[i];
-  //*/
-
-  // call user-supplied Jacobian function at current guess
-  if (J(u, Ju, nstrip, nchem, sdata) != 0)
-    /*ENZO_FAIL("Error in user-supplied ODE Jacobian function J(u)");*/
-    return 1;
-
-  ///*
-  // rescale u to scaled variables
-  for (i=0; i<nstrip*nchem; i++)  u[i] *= inv_scaling[i];
-
-  // rescale Jacobian rows to use normalization
+  // rescale Jacobian for normalization -- fused row+column rescale,
+  // ivar innermost (contiguous), one pass over the whole array instead
+  // of two
   for (ix=0; ix<nstrip; ix++)
-    for (jvar=0; jvar<nchem; jvar++) 
-      for (ivar=0; ivar<nchem; ivar++) 
-	Ju[(ix*nchem+jvar)*nchem+ivar] *= inv_scaling[ix*nchem+ivar];
-
-  // rescale Jacobian columns to account for normalization
-  for (ix=0; ix<nstrip; ix++)
-    for (ivar=0; ivar<nchem; ivar++) 
-      for (jvar=0; jvar<nchem; jvar++) 
-	Ju[(ix*nchem+jvar)*nchem+ivar] *= scaling[ix*nchem+jvar];
-  //*/
+    for (jvar=0; jvar<nchem; jvar++)
+      for (ivar=0; ivar<nchem; ivar++)
+        Ju[(ix*nchem+jvar)*nchem+ivar] *= inv_scaling[ix*nchem+ivar] * scaling[ix*nchem+jvar];
 
   // update Jacobian to additionally include remaining terms,
   //   J = I - dt*Jf(u)
@@ -351,15 +325,14 @@ int BE_Resid_Jac(jac_f J, double *u, double *Ju, double dt,
   for (ix=0; ix<nstrip; ix++)
     for (ivar=0; ivar<nchem; ivar++)
       Ju[ix*nchem*nchem + ivar*nchem + ivar] += 1.0;
-  
-  for (ix=0; ix<nstrip*nchem*nchem; ix++){
 
   #ifdef DENGO_DEBUG
-  if ( Ju[ix] != Ju[ix] ) {  // NaN encountered!!
-    printf("[JAC] NaN encountered at Jac[%d] = %0.5g\n", ix, Ju[ix]);
+  for (ix=0; ix<nstrip*nchem*nchem; ix++){
+    if ( Ju[ix] != Ju[ix] ) {  // NaN encountered!!
+      printf("[JAC] NaN encountered at Jac[%d] = %0.5g\n", ix, Ju[ix]);
+    }
   }
   #endif
-  }
   return 0;
 }
 

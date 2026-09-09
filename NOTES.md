@@ -1255,3 +1255,97 @@ OpenMP, a source build configured with `--enable-openmp` could behave
 differently at scale; dengo's `DENGO_OMP_MIN_CELLS=2048` threshold
 means grid patches smaller than that see none of the scaling benefit
 visible in the table above.
+
+**2026-09-09, continued: code-level (not algorithmic) audit of the hot
+path, per the user's request -- "cache issues, double loops that
+should be reversed, work done multiple times unnecessarily."** Read
+`calculate_rhs`/`calculate_jacobian`/`calculate_temperature` (generated
+from `cython_solver.C.template`) and `BE_chem_solve.C`'s Newton/linear-
+solve loop line by line. Found six concrete issues, matching all three
+categories:
+
+1. **Redundant table-interpolation pass** (not fixed, see below):
+   `calculate_rhs` calls `calculate_temperature` -- whose own per-cell
+   Newton loop already computes each cell's final `bin_id`/`Tdef`/`dT`
+   via `interpolate_gamma()`'s last iteration, once T converges -- then
+   immediately runs `interpolate_rates` as a second, wholly separate
+   full pass over all cells that recomputes the *identical*
+   `bin_id`/`Tdef`/`dT` from the same (now frozen) `logTs[i]`, just to
+   interpolate the other ~54 reaction/cooling tables.
+2. **Same rescale round-trip done twice per Newton sweep** (fixed):
+   the old `BE_Resid_Fun`/`BE_Resid_Jac` each independently did `u *=
+   scaling; call function; u *= inv_scaling` on the *same* u (nothing
+   changes it between the two calls within one sweep) -- the second
+   round-trip repeated the first's identical work and threw away two
+   floating-point roundings for nothing.
+3. **A real wrong-loop-order cache-stride bug** (fixed): `BE_Resid_Jac`'s
+   Jacobian row-rescale loop correctly nested `ivar` innermost (matching
+   `Ju`'s contiguous fastest-varying index); the column-rescale loop
+   right below it had `ivar`/`jvar` swapped, striding by `nchem` (80
+   bytes for nchem=10) on every access instead of walking contiguous
+   memory.
+4. **Two full-array passes that should be one** (fixed): those same two
+   loops each swept the entire `nstrip*nchem*nchem` Jacobian separately;
+   fused into `Ju[k] *= inv_scaling[row] * scaling[col]` in one pass,
+   with `ivar` innermost -- fixes #3 for free.
+5. **Missed parallelization + redundant serial pass** (fixed):
+   `calculate_rhs`'s NaN check ran in a second loop, *after and outside*
+   the per-cell `#pragma omp parallel for` block, with no OpenMP pragma
+   of its own -- a fully serial full-array re-scan on every single RHS
+   evaluation at any grid size. Moved inline, checked per-species right
+   after each `rhs[j]` is computed, inside the existing parallel loop.
+6. **~112 separate small heap allocations for per-cell interpolated
+   rates** (not fixed): `data->rs_k01`, `data->drs_k01`, etc. are each
+   their own `malloc(nstrip*sizeof(double))` rather than one combined
+   block -- fragmented, especially at small `nstrip`. (Correction to an
+   earlier session's speculation: the *read-only base* tables,
+   `r_k01[1024]` etc., are fixed inline struct members and already
+   contiguous -- only the per-cell *interpolated* result arrays are
+   fragmented like this.)
+
+Implemented #2/#3/#4/#5 (all mechanically-provable, equivalence-checkable
+transformations, safe to change without touching Newton-convergence
+internals other call sites depend on): combined `BE_Resid_Fun`/
+`BE_Resid_Jac` into `BE_Resid_FunJac` in `BE_chem_solve.C`; folded the
+NaN check into `calculate_rhs`'s existing parallel loop in the C
+template. Deliberately held off #1 and #6: #1 requires restructuring
+`calculate_temperature`'s internals in a way that would also add rate-
+table interpolation cost to every *standalone* T-only caller (`Solver.
+evaluate_temperature()`/`evaluate_temperature_bulk()`, used by the
+free-fall scripts to re-derive T after a compression step without
+advancing chemistry) unless carefully split into two variants -- real,
+but a bigger, riskier change than the others, better done as its own
+follow-up with its own before/after measurement. #6 is a genuine
+structural change (touches every generated network's data layout, not
+just the vendored solver), same reasoning.
+
+All 80 tests pass; `examples/free_fall_collapse.py` reproduces the
+*exact* same 1814-step trajectory as before the change (same n, T at
+every checkpoint) -- strong evidence the transformations are truly
+equivalent, not just "probably fine."
+
+**Measured, pure-C++ harness (`.grackle_compare/c_bench/dengo_bench`,
+no Python/Cython in the timed path -- see the entry above), same grid
+sweep, multiple repeated trials for a clean signal:**
+
+| dims    | before (us/cell) | after (us/cell) | improvement |
+|---------|-------------------|-------------------|-------------|
+| 1       | 588.2             | ~520.0            | ~11.6%      |
+| 100     | 322.3             | ~292.1            | ~9.4%       |
+| 2048    | 307.6             | ~278.8            | ~9.4%       |
+| 100000  | 110.1             | ~96.4             | ~12.4%      |
+
+A real, reproducible ~9-12% per-call speedup at every grid size tested,
+from three small, safe, equivalence-preserving changes -- no algorithm
+change, no new physics, nothing touched outside `BE_chem_solve.C`'s
+internal residual/Jacobian bookkeeping and one inlined check.
+Correspondingly narrows the dengo-vs-Grackle gap from the previous
+entry's 5.3x/7.0x/6.4x/1.7x to roughly 4.7x/6.4x/5.8x/1.45x across the
+same grid sizes.
+
+Remaining known opportunities, not attempted here: #1 and #6 above
+(each would need its own careful, isolated before/after measurement
+given their larger blast radius), and the OpenMP parallel-scaling
+efficiency question already on record two entries up (~19% efficiency
+at 24 threads) -- still the largest single lever if further narrowing
+the gap at grid scale is wanted, and unrelated to any of today's fixes.

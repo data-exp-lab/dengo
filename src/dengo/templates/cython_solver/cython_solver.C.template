@@ -322,14 +322,19 @@ int calculate_rhs_{{ solver_name }}(double *input, double *rhs, int nstrip, int 
         {%- if species.name == "ge" %}
         rhs[j] /= mdensity;
         {%- endif %}
+        /* Checked here, inline, rather than as a second full-array pass
+           after this loop (the previous version's `for (i=0;
+           i<nchem*nstrip; i++) if (rhs[i]!=rhs[i]) return 1;`) -- that
+           loop had no OpenMP pragma of its own, so at grid scale it was
+           a fully serial re-scan of the whole rhs[] array on every
+           single calculate_rhs call, right after a parallel loop that
+           had just computed (and already had hot in cache) the exact
+           same values. See NOTES.md. */
+        if (rhs[j] != rhs[j]) { had_error = 1; continue; }
         j++;
         {%- endfor %}
     }
     if (had_error) return 1;
-
-    for (int i = 0; i < nchem * nstrip; i++) {
-        if (rhs[i] != rhs[i]) return 1;
-    }
     return 0;
 }
 {% endblock %}
