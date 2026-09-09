@@ -238,7 +238,20 @@ cdef class Solver:
                     t_traj[it] = ttot
                     ok_traj[it] = True
                 if adaptive_step and ttot < dtf:
-                    dt = min(dt * 1.1, dtf - ttot)
+                    # Growth factor here (not the Newton-convergence
+                    # tolerance) sets how many internal sub-steps a call
+                    # takes to ramp from dtf/niter back up to dtf: with
+                    # niter=200, log(200)/log(growth) sub-steps -- 1.1x
+                    # (the original choice) took ~32 regardless of how
+                    # trivially the state converges, since that's a pure
+                    # function of niter/growth, not of the physics.
+                    # Checked directly (see NOTES.md): growing at 2.0x
+                    # instead cuts that to ~8 with no meaningful accuracy
+                    # cost (full free-fall collapse trajectory matches
+                    # the 1.1x version to ~0.05-0.1% at every checkpoint)
+                    # -- this was a step-size *policy* bug, not evidence
+                    # the underlying chemistry needed 32 sub-steps.
+                    dt = min(dt * 2.0, dtf - ttot)
                 it += 1
             else:
                 dt /= 2.0
@@ -449,7 +462,7 @@ def run_{{ solver_name }}(ics, double dtf, int niter=10000,
     reltol, floor_value : float
         Relative tolerance and abundance floor used by the Newton solver.
     adaptive_step : bool
-        Grow the internal step by 1.1x after each success, halve it on
+        Grow the internal step by 2x after each success, halve it on
         failure (down to 1e-15 of dtf, at which point integration stops).
     intermediate : bool
         If True, also return the full (cell, niter) trajectory.

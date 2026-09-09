@@ -1349,3 +1349,75 @@ given their larger blast radius), and the OpenMP parallel-scaling
 efficiency question already on record two entries up (~19% efficiency
 at 24 threads) -- still the largest single lever if further narrowing
 the gap at grid scale is wanted, and unrelated to any of today's fixes.
+
+**2026-09-09, continued: user correctly refused to accept the residual
+gap -- "iterating to convergence should indeed take longer, but a 5x
+difference is incredible, especially when we should expect the values
+to already be near converged equilibrium."** Right, and it led straight
+to the real, dominant bottleneck -- a step-size *policy* bug, not
+genuine physics-driven work.
+
+Checked directly: drove the same near-equilibrium state (n=1e13 cm^-3,
+T=1500K, 10% molecular) through 15 repeated `solver.step()` calls,
+printing the internal sub-step count each time. Result: **exactly 32
+internal iterations, every single call, completely flat**, even as T
+settled to a change of ~0.03K/call (i.e. visibly at quasi-equilibrium
+by the later calls). That's not a physics signal -- solving
+`(dtf/200)*(1.1^N-1)/0.1 = dtf` for N gives N=32 exactly, for *any*
+state at all. `_advance()`'s adaptive-step schedule always starts each
+external call at `dtf/niter` (tiny) and grows by a fixed 1.1x per
+success; the sub-step count is a pure function of `niter`/growth
+factor, never informed by how easily the Newton solve actually
+converges or how close to equilibrium the state already is. The
+solver never even tries a large step first to see if one would work.
+
+Tested growth factors 1.5 and 2.0 directly against this same
+near-equilibrium probe and, more importantly, against the *full*
+free-fall collapse trajectory (the hardest test available, spanning
+~15 decades of density including the rapid H2-formation transition,
+not just a near-equilibrium snapshot):
+
+| growth factor | internal iterations (near-eq. probe) |
+|---|---|
+| 1.1 (original) | 32 |
+| 1.5 | 12 |
+| 2.0 | 8 |
+
+Full collapse trajectory at growth=2.0: identical 1814 steps, T at
+every checkpoint matching the 1.1x baseline to ~0.05-0.12% (e.g. step
+1600: 1831.7 K baseline vs. 1832.4 K at growth=2.0) -- a legitimate,
+tiny truncation-level difference from taking fewer/larger backward-
+Euler sub-steps at the same `reltol=1e-5` Newton-convergence tolerance,
+nowhere near large enough to explain a 5x wall-clock gap. Changed the
+default growth factor from 1.1x to 2.0x in `cython_solver_run.pyx.
+template`'s `_advance()` (docstring/comments updated to match); all 80
+tests still pass.
+
+**Combined effect, measured with the pure-C++ harness (both this fix
+and the four code-optimizations from the previous entry stacked
+together), same grid sweep:**
+
+| dims | dengo, original | dengo, now | grackle | ratio, original | ratio, now |
+|------|-----------------|------------|---------|------------------|------------|
+| 1      | 588.2 us/cell | ~149 us/cell  | 109.3 us/cell | 5.3x  | **1.4x**  |
+| 100    | 322.3 us/cell | 90.4 us/cell  | 44.7 us/cell  | 7.0x  | **2.0x**  |
+| 2048   | 307.6 us/cell | 95.3 us/cell  | 47.6 us/cell  | 6.4x  | **2.0x**  |
+| 100000 | 110.1 us/cell | 28.9 us/cell  | 65.5 us/cell  | 1.7x  | **0.44x (dengo faster)** |
+
+At grid scale (dims=100000, the regime that matters for an actual
+simulation coupling), dengo is now measurably *faster* than this
+Grackle build, not ~1.7x slower -- purely from fixing how the internal
+step size ramps up, with no change to the chemistry, the tolerance, or
+any physics at all. This is by far the largest single change in this
+whole investigation's speed story, and it was found by taking the
+user's skepticism seriously rather than accepting "iterating to
+convergence takes longer" as a sufficient explanation for a gap this
+large.
+
+Open follow-up worth flagging: growth=2.0 was chosen because it's a
+clean, standard doubling policy that tested well here, not because it
+was tuned as an optimum -- a genuinely adaptive scheme (grow more
+aggressively after an *easy* convergence, more conservatively after a
+*hard* one, rather than a fixed multiplier regardless of how the
+previous sub-step went) would likely do even better and is a natural
+next step, but wasn't attempted here.

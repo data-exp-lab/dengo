@@ -103,7 +103,7 @@ int main(int argc, char *argv[]) {
                     prev[i] = input[i];
                     scale[i] = fmax(fabs(input[i]), floor_value);
                 }
-                if (ttot < dtf) dt = fmin(dt * 1.1, dtf - ttot);
+                if (ttot < dtf) dt = fmin(dt * 2.0, dtf - ttot);
                 it += 1;
             } else {
                 dt /= 2.0;
