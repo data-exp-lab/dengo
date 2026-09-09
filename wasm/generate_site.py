@@ -391,6 +391,11 @@ def main():
     shutil.copy(os.path.join(HERE, "app.js"), out_dir)
     shutil.copy(os.path.join(HERE, "rates.js"), out_dir)
     shutil.copy(os.path.join(HERE, "style.css"), out_dir)
+    # dengo-solver.js/.d.ts: a reusable wrapper around any dengo-generated
+    # wasm module, not specific to any one network -- copied once at the
+    # top level, same as the above, not duplicated per network.
+    shutil.copy(os.path.join(HERE, "dengo-solver.js"), out_dir)
+    shutil.copy(os.path.join(HERE, "dengo-solver.d.ts"), out_dir)
 
     succeeded, failed = [], []
     for name, cfg in FIDUCIAL_NETWORKS.items():

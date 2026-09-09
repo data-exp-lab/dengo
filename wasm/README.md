@@ -38,6 +38,13 @@ republishing whatever's already built).
   `examples/interactive_explorer.ipynb` (constant-density cooldown,
   free-fall collapse), and redraws on every slider `input` event,
   coalesced to once per animation frame.
+- `dengo-solver.js`/`.d.ts` -- a small, dependency-free `DengoSolver`
+  class wrapping the C API above (state get/set by species name, step,
+  rhs, temperature) for reuse in other JS/TS modules -- a real ES
+  module, works the same in a browser (`<script type="module">` or
+  dynamic `import()`) or Node (`import`/`require`, since the compiled
+  `dengo_wasm.js` supports both). Deliberately independent of `app.js`,
+  which keeps its own from-scratch plumbing for now -- see NOTES.md.
 
 Build locally with Emscripten on `PATH`:
 
