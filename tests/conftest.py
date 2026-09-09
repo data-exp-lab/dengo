@@ -11,23 +11,11 @@ from dengo.chemical_network import ChemicalNetwork
 import dengo.primordial_rates as primordial_rates
 import dengo.primordial_cooling as primordial_cooling  # noqa: F401 -- registers cooling actions
 import dengo.solver_build as solver_build
+from dengo.primordial_network import COOLING as PRIMORDIAL_COOLING
+from dengo.primordial_network import REACTIONS as PRIMORDIAL_REACTIONS
+from dengo.primordial_network import SPECIES as PRIMORDIAL_SPECIES
 
 primordial_rates.setup_primordial()
-
-
-PRIMORDIAL_SPECIES = [
-    "H_1", "H_2", "He_1", "He_2", "He_3", "H_m0", "H2_1", "H2_2", "de", "ge",
-]
-PRIMORDIAL_COOLING = [
-    "cie_cooling", "gloverabel08", "h2formation", "h2formation_extra",
-    "reHII", "reHeII1", "reHeII2", "reHeIII", "brem", "compton",
-    "ceHI", "ceHeI", "ceHeII", "ciHI", "ciHeI", "ciHeII", "ciHeIS",
-]
-PRIMORDIAL_REACTIONS = [
-    "k01", "k02", "k03", "k04", "k05", "k06", "k07", "k08", "k09", "k10",
-    "k11", "k12", "k13", "k14", "k15", "k16", "k17", "k18", "k19",
-    "k21", "k22", "k23",
-]
 
 
 def make_primordial_network(T_bounds=(1e1, 1e8)):

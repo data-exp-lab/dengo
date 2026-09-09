@@ -10,37 +10,18 @@ import os
 import matplotlib.pyplot as plt
 import numpy as np
 
-import dengo.primordial_cooling  # noqa: F401 -- registers cooling actions
-import dengo.primordial_rates as primordial_rates
-import dengo.solver_build as solver_build
-from dengo.chemical_network import ChemicalNetwork
+from dengo.primordial_network import build_network as _build_network
+from dengo.primordial_network import build_solver as _build_solver
 
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "_primordial_network_build")
 
-SPECIES = ["H_1", "H_2", "He_1", "He_2", "He_3", "H_m0",
-           "H2_1", "H2_2", "de", "ge"]
-COOLING = ["cie_cooling", "gloverabel08", "h2formation", "h2formation_extra",
-           "reHII", "reHeII1", "reHeII2", "reHeIII", "brem", "compton",
-           "ceHI", "ceHeI", "ceHeII", "ciHI", "ciHeI", "ciHeII", "ciHeIS"]
-REACTIONS = ["k01", "k02", "k03", "k04", "k05", "k06", "k07", "k08", "k09",
-             "k10", "k11", "k12", "k13", "k14", "k15", "k16", "k17", "k18",
-             "k19", "k21", "k22", "k23"]
-
 
 def build_network():
-    primordial_rates.setup_primordial()
-    network = ChemicalNetwork()
-    network.add_collection(
-        species_names=SPECIES, cooling_names=COOLING, reaction_names=REACTIONS,
-    )
-    network.init_temperature((1e1, 1e8))
-    return network
+    return _build_network()
 
 
 def build_solver(network):
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    network.write_cython_solver("primordial", output_dir=OUTPUT_DIR)
-    return solver_build.build_solver(OUTPUT_DIR, "primordial")
+    return _build_solver(network, OUTPUT_DIR)
 
 
 def initial_conditions(nH=1.0e4, T=8000.0):

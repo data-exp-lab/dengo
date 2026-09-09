@@ -91,10 +91,12 @@ cdef class Solver:
     cdef double *_diag_input
     cdef double *_diag_rhs
     cdef double *_diag_jac
+    cdef double *_rhs_bulk
     cdef readonly int dims
     cdef bint _closed
     cdef readonly object state
     cdef readonly object T
+    cdef readonly object rhs
 
     def __cinit__(self, int dims, table_file=None, double redshift=0.0):
         cdef int n = NSPECIES
@@ -122,6 +124,7 @@ cdef class Solver:
         self._diag_input = <double *> malloc(n * sizeof(double))
         self._diag_rhs   = <double *> malloc(n * sizeof(double))
         self._diag_jac   = <double *> malloc(n * n * sizeof(double))
+        self._rhs_bulk   = <double *> malloc(dims * n * sizeof(double))
 
         # Zero-copy numpy views straight onto the persistent `_input`/
         # `Ts` buffers, built once here and reused for the life of this
@@ -139,8 +142,10 @@ cdef class Solver:
         # underlying memory out from under it.
         cdef double[:, ::1] state_view = <double[:dims, :n]> self._input
         cdef double[::1] T_view = <double[:dims]> self._data.Ts
+        cdef double[:, ::1] rhs_view = <double[:dims, :n]> self._rhs_bulk
         self.state = np.asarray(state_view)
         self.T = np.asarray(T_view)
+        self.rhs = np.asarray(rhs_view)
 
         self._closed = False
 
@@ -166,6 +171,7 @@ cdef class Solver:
         free(self._atol); free(self._rtol)
         free(self._u0); free(self._s); free(self._gu); free(self._Ju)
         free(self._diag_input); free(self._diag_rhs); free(self._diag_jac)
+        free(self._rhs_bulk)
 
     @property
     def redshift(self):
@@ -330,6 +336,34 @@ cdef class Solver:
             trajectory["successful"] = ok_traj[:it]
 
         return final, trajectory
+
+    def evaluate_temperature_bulk(self):
+        """Recompute `self.T` for every one of this handle's `dims` cells
+        from whatever is currently in `self.state`, without advancing the
+        chemistry at all -- e.g. to re-derive T after manually rescaling
+        densities (a compression step), or to answer "what's T right now"
+        for a caller that only ever touches `self.state`/`step_inplace()`.
+        Unlike `evaluate_temperature()` (single cell, dict-based), this
+        covers all `dims` cells directly, no marshaling."""
+        if self._closed:
+            raise RuntimeError("this Solver has already been closed")
+        cdef int rv = {{ solver_name }}_calculate_temperature(self._data, self._input, self.dims, NSPECIES)
+        if rv != 0:
+            raise RuntimeError("{{ solver_name }}_calculate_temperature failed (rv=%d)" % rv)
+        return self.T
+
+    def evaluate_rhs_bulk(self):
+        """Evaluate d(state)/dt for every one of this handle's `dims`
+        cells from whatever is currently in `self.state`, writing the
+        result into `self.rhs` (same column order as `self.state`,
+        SPECIES_NAMES/SPECIES_INDEX) -- the multi-cell, marshaling-free
+        counterpart to `evaluate_rhs()`."""
+        if self._closed:
+            raise RuntimeError("this Solver has already been closed")
+        cdef int rv = calculate_rhs_{{ solver_name }}(self._input, self._rhs_bulk, self.dims, NSPECIES, <void *> self._data)
+        if rv != 0:
+            raise RuntimeError("calculate_rhs_{{ solver_name }} failed (rv=%d)" % rv)
+        return self.rhs
 
     def evaluate_temperature(self, state):
         """Compute T for one cell's state without advancing the

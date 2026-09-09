@@ -146,6 +146,50 @@ def test_solver_state_view_is_persistent_and_writable(primordial_solver):
         assert solver.state[0, h2_idx] == pytest.approx(2.0 * before)
 
 
+def test_evaluate_bulk_methods_match_single_cell_and_multi_cell(primordial_solver):
+    """evaluate_temperature_bulk()/evaluate_rhs_bulk() (all `dims` cells,
+    via self.state, no marshaling) have to agree with the existing
+    single-cell evaluate_temperature()/evaluate_rhs() dict-based API for
+    dims=1, and give an independent answer per cell for dims>1 (not just
+    broadcasting cell 0)."""
+    network, mod = primordial_solver
+    ics = primordial_ics()
+
+    with mod.Solver(1) as solver:
+        for name, arr in ics.items():
+            solver.state[:, mod.SPECIES_INDEX[name]] = arr
+        T_bulk = float(solver.evaluate_temperature_bulk()[0])
+        rhs_bulk = {name: solver.evaluate_rhs_bulk()[0, mod.SPECIES_INDEX[name]]
+                    for name in mod.SPECIES_NAMES}
+        T_single = solver.evaluate_temperature({name: ics[name][0] for name in mod.SPECIES_NAMES})
+        rhs_single = solver.evaluate_rhs({name: ics[name][0] for name in mod.SPECIES_NAMES})
+
+    # Both converge their own Newton iteration to 1e-8 relative internally
+    # (see calculate_temperature's Tdiff/Tnew check) from potentially
+    # different starting guesses, so they agree closely but not to
+    # floating-point precision -- rel=1e-10 is tighter than that solve
+    # itself guarantees.
+    assert T_bulk == pytest.approx(T_single, rel=1e-4)
+    for name in mod.SPECIES_NAMES:
+        assert rhs_bulk[name] == pytest.approx(rhs_single[name], rel=1e-4), name
+
+    # primordial_ics() takes T_guess as ge's literal value and holds
+    # abundance *fractions* fixed as nH scales, so density/gamma_factor
+    # (and hence T) is actually nH-independent unless T_guess also
+    # differs -- vary both to get a genuinely different T for cell 1.
+    ics2 = primordial_ics(nH=1e6, T_guess=5.0e4)
+    with mod.Solver(2) as solver:
+        for name in mod.SPECIES_NAMES:
+            solver.state[0, mod.SPECIES_INDEX[name]] = ics[name][0]
+            solver.state[1, mod.SPECIES_INDEX[name]] = ics2[name][0]
+        T2 = solver.evaluate_temperature_bulk()
+        rhs2 = solver.evaluate_rhs_bulk()
+        assert T2[0] == pytest.approx(T_single, rel=1e-4)
+        assert T2[1] != pytest.approx(T2[0])  # genuinely different, not broadcast
+        ge_idx = mod.SPECIES_INDEX["ge"]
+        assert rhs2[0, ge_idx] == pytest.approx(rhs_single["ge"], rel=1e-4)
+
+
 def test_zero_abundance_species_does_not_produce_nan(primordial_solver):
     """Regression test: He_2 = He_3 = 0 (fully neutral helium) used to
     poison the whole solver with NaN via BE_chem_solve's 1/scale
