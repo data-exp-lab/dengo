@@ -3514,3 +3514,45 @@ on every panel. Full `pytest` suite unaffected (120/120).
 
 Not done in this round, deliberately: splitting the parameter sweep
 out to its own page (a separate, larger piece of work, tackled next).
+
+**2026-09-10, continued: zoomed panel's axis mismatch, and a real
+chart-column scrollbar on an ordinary, plenty-wide screen.**
+
+Two more real bugs, both caught directly by the user rather than found
+proactively.
+
+**"Why don't the zoomed and ionization panels have the same x-axis
+right edge?"** -- the "zoomed" temperature panel's shock-event marker
+rule has its own tiny, separate one-row dataset (just `{x: nShock}`),
+which `zoomFilteredData()` never touched (it only filters the *main*
+data). Vega-Lite's default shared-scale-across-layers behavior then
+pulled that one raw, unfiltered point straight into the panel's
+x-domain regardless of the actual zoom range, silently stretching its
+right edge out to wherever the shock happened to be -- while the
+ionization panel, with no such extra layer, correctly showed just the
+zoomed range. New `extraForZoom()` filters the shock rule the same way
+as everything else when building the zoomed panel specifically (the
+overview panel keeps it unfiltered on purpose -- it always shows the
+full range anyway). Confirmed by screenshot in both directions: axes
+now match exactly when the shock falls outside the zoom, and the shock
+line correctly reappears when zooming in on it.
+
+**"I'm getting a horizontal scroll bar... it's the chart column."** --
+reported on an ordinary 1920px-wide window, not a narrow one. Measured
+directly: at this page's own capped body width (1100px, the same for
+any window past ~1158px wide), `.chart-box` has ~686px to give the
+chart, but the actual rendered chart (`PANEL_WIDTH` 620px plus
+axis-label margins) came out to ~705px -- overflowing by a real margin,
+not a rounding error, and not the "narrow window" case `.chart-box`'s
+own `overflow-x: auto` fallback exists for. `PANEL_WIDTH` 620 -> 580
+(confirmed by direct measurement to render at ~665px, comfortably under
+the ~686px budget) fixes it with real margin to spare -- confirmed at
+every width from 1158px up through 4K, zero local scrollbar anywhere in
+that range.
+
+Verified: real Emscripten rebuild, headless-Chrome regression across
+cool/free-fall modes, both themes, a network with H2 species and one
+without, zoom/re-zoom/clear, and the two specific bugs above (axis
+match with the shock both in and out of the zoomed range; chart-box
+scroll absence at 1158px through 3840px). Full `pytest` suite
+unaffected (120/120).
