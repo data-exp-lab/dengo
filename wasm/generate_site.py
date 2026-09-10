@@ -101,6 +101,21 @@ PAGE_TEMPLATE = """<!doctype html>
         chemistry network's own H2 collisional-dissociation reactions
         (H2 + H &rarr; 3H, H2 + H2 &rarr; 2H + H2) play out.</p>
 
+      <label>collapse rate: 10<sup>x</sup> &times; free-fall <span class="val" id="collapse-rate-val"></span></label>
+      <input type="range" id="collapse-rate" min="-2" max="2" step="0.1" value="0">
+      <p class="preset-note">Multiplies the ordinary free-fall compression
+        rate (and rescales the adaptive step size to match, so this changes
+        how much real time the chemistry gets per decade of density, not
+        just how many steps the run takes) -- below 1&times; is a
+        (schematic) stand-in for extra support slowing the contraction
+        below the free-fall rate (rotation, magnetic fields, pressure);
+        above 1&times; for whatever might make it collapse faster
+        (additional infall, turbulence). 10<sup>0</sup> = 1&times; is
+        ordinary, unmodified free-fall.</p>
+
+      <div class="row-inline">
+        <label class="checkbox-label"><input type="checkbox" id="shock-enabled" checked> Enable shock</label>
+      </div>
       <label>shock density: 10<sup>x</sup> cm<sup>-3</sup> <span class="val" id="nshock-val"></span></label>
       <input type="range" id="nshock" min="10" max="20" step="0.1" value="14">
       <label>shock Mach number <span class="val" id="mach-val"></span></label>
@@ -110,12 +125,25 @@ PAGE_TEMPLATE = """<!doctype html>
         a Rankine-Hugoniot jump (using the gas's own composition-weighted
         &gamma; at that moment and the Mach number here) applied to both
         density and thermal energy in a single step, on top of ordinary
-        free-fall compression. Set Mach to 1 to disable it (a Mach-1
-        "shock" is the zero-strength limit -- no jump at all). This
+        free-fall compression. Uncheck "Enable shock" above to disable it
+        outright without losing your density/Mach settings (setting Mach
+        to 1 does the same thing -- the zero-strength limit, no jump at
+        all -- but resets to 1 instead of just toggling off). This
         doesn't model a real accretion shock's radius/mass-dependent
         infall speed -- Mach number is a free dial here, not derived --
         so treat it as "how strong a shock would it take", not a
         prediction of where or how strong a real one occurs.</p>
+    </div>
+
+    <div class="row">
+      <label>solver tolerance: 10<sup>x</sup> <span class="val" id="tolerance-val"></span></label>
+      <input type="range" id="tolerance" min="-8" max="-3" step="0.5" value="-5">
+      <p class="preset-note">Convergence tolerance passed straight through
+        to the compiled solver's own per-step Newton iteration (nothing
+        about the solver itself changes) -- tighter (more negative) is
+        more accurate but slower and more prone to a step failing to
+        converge at all; looser trades accuracy for speed and robustness.
+        10<sup>-5</sup> is this page's original, unexposed default.</p>
     </div>
 
     <div class="status-row">

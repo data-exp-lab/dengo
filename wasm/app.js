@@ -253,7 +253,7 @@ function coolingTime(dtfTotal) {
 // relies on for its own (usually much larger) single jump.
 const SWEEP_CHECKPOINTS = 24;
 
-function runConstantDensity(nH, T, fractions, logDtf, safetyFactor = 0.1, maxSteps = 2000, forSweep = false) {
+function runConstantDensity(nH, T, fractions, logDtf, tolerance = 1e-5, safetyFactor = 0.1, maxSteps = 2000, forSweep = false) {
   setIcs(nH, T, fractions);
   const dtfTotal = Math.pow(10, logDtf);
   let t = 0;
@@ -288,7 +288,7 @@ function runConstantDensity(nH, T, fractions, logDtf, safetyFactor = 0.1, maxSte
   for (let i = 0; i < maxSteps; i++) {
     const dt = Math.min(safetyFactor * coolingTime(dtfTotal), dtfTotal - t);
     if (dt <= 0) break;
-    const converged = step(dt, 200, 1e-5);
+    const converged = step(dt, 200, tolerance);
     if (!converged) break;
     t += dt;
     const s = getScalar();
@@ -343,10 +343,28 @@ function shockJumpFactors(gammaAd, mach) {
 const SHOCK_COOLING_SAFETY = 0.05;
 const SHOCK_DISPLAY_POINTS = 40;
 
-function runFreefall(nH, T, fractions, logNTarget, logNShock, machShock, safetyFactor = 0.01, maxSteps = 10000) {
+// dρ/dt = FF_RATE_CONST * ρ^(3/2) is the ordinary free-fall compression
+// law (its closed-form solution is what freefallStep()'s `rhoNew` line
+// below is); `collapseFactor` scales this one rate constant, and only
+// this one, everywhere it appears (both the actual compression *and*
+// the free-fall *time* used to size the adaptive step) -- so a step
+// still represents the same fractional density change regardless of
+// collapseFactor (the scaling cancels out of `rate * dt` when `dt`
+// itself is sized from the same scaled rate), it just represents more
+// or less *real time* for the chemistry to act over, which is the
+// entire point: collapsing faster than free-fall (collapseFactor > 1)
+// gives chemistry less time per decade of density to respond; slower
+// (< 1) gives it more -- a schematic stand-in for whatever isn't
+// modeled here (rotation/magnetic/pressure support slowing a real
+// collapse below free-fall, or additional infall/turbulence speeding
+// one up), not a real dynamical mechanism in its own right.
+const FF_RATE_CONST = Math.sqrt(32 * G_GRAV / (3 * Math.PI));
+
+function runFreefall(nH, T, fractions, logNTarget, logNShock, machShock, collapseFactor = 1, tolerance = 1e-5, safetyFactor = 0.01, maxSteps = 10000) {
   setIcs(nH, T, fractions);
   const nTarget = Math.pow(10, logNTarget);
   const nShock = Math.pow(10, logNShock);
+  const rate = FF_RATE_CONST * collapseFactor;
   let nCurrent = nH, t = 0;
   let shocked = nCurrent >= nShock; // already past it at t=0 -- don't fire mid-run
   let shockApplied = false; // only set once the post-shock step actually converges -- see below
@@ -374,14 +392,14 @@ function runFreefall(nH, T, fractions, logNTarget, logNShock, machShock, safetyF
   // points, not one).
   function freefallStep(subDt) {
     const rho = nCurrent * MH;
-    const rhoNew = Math.pow(Math.pow(rho, -0.5) - Math.sqrt(32 * G_GRAV / (3 * Math.PI)) * subDt, -2);
+    const rhoNew = Math.pow(Math.pow(rho, -0.5) - rate * subDt, -2);
     const densityRatio = rhoNew / rho;
     const ptr = statePtr() >> 3;
     const gammaAd = thermodynamicGamma(getScalar());
     const tempRatio = 1 + (gammaAd - 1) * (densityRatio - 1);
     for (const name of speciesNames) if (name !== "ge") mod.HEAPF64[ptr + idx[name]] *= densityRatio;
     mod.HEAPF64[ptr + idx.ge] *= tempRatio;
-    if (!step(subDt, 200, 1e-5)) return false;
+    if (!step(subDt, 200, tolerance)) return false;
     t += subDt;
     const s = getScalar();
     nCurrent = 0;
@@ -394,9 +412,9 @@ function runFreefall(nH, T, fractions, logNTarget, logNShock, machShock, safetyF
   for (let i = 0; i < maxSteps; i++) {
     if (nCurrent >= nTarget) break;
     const rho = nCurrent * MH;
-    const tFf = Math.sqrt(3 * Math.PI / (32 * G_GRAV * rho));
+    const tFf = 1 / (rate * Math.sqrt(rho));
     const dt = safetyFactor * tFf;
-    const rhoNewOrdinary = Math.pow(Math.pow(rho, -0.5) - Math.sqrt(32 * G_GRAV / (3 * Math.PI)) * dt, -2);
+    const rhoNewOrdinary = Math.pow(Math.pow(rho, -0.5) - rate * dt, -2);
 
     // Would *this* step's ordinary free-fall compression carry us across
     // nShock? A shock is a genuine mathematical discontinuity -- that's
@@ -1054,18 +1072,35 @@ function redraw() {
 
   const t0 = performance.now();
   let result;
+  // Solver tolerance and (free-fall only) collapse-rate multiplier are
+  // both plain, already-exposed runtime arguments to the compiled
+  // solver/this file's own free-fall math -- neither needed any change
+  // to the generated C++ itself, just threading an existing knob (or,
+  // for collapse rate, one existing constant) through from a slider.
+  const logTolerance = parseFloat(document.getElementById("tolerance").value);
+  const tolerance = Math.pow(10, logTolerance);
+  document.getElementById("tolerance-val").textContent = logTolerance.toFixed(1);
   if (currentMode === "freefall") {
     const logNTarget = parseFloat(document.getElementById("ntarget").value);
     document.getElementById("ntarget-val").textContent = logNTarget.toFixed(1);
     const logNShock = parseFloat(document.getElementById("nshock").value);
-    const machShock = parseFloat(document.getElementById("mach").value);
+    const machSlider = parseFloat(document.getElementById("mach").value);
+    // Forced to 1 (the zero-strength/no-op limit -- see shockJumpFactors())
+    // when unchecked, regardless of the slider's own value, so toggling
+    // the checkbox back on restores exactly the Mach number it was left
+    // at instead of having reset it to 1.
+    const shockEnabled = document.getElementById("shock-enabled").checked;
+    const machShock = shockEnabled ? machSlider : 1;
     document.getElementById("nshock-val").textContent = logNShock.toFixed(1);
-    document.getElementById("mach-val").textContent = machShock.toFixed(1);
-    result = runFreefall(nH, T, fractions, logNTarget, logNShock, machShock);
+    document.getElementById("mach-val").textContent = machSlider.toFixed(1);
+    const logCollapse = parseFloat(document.getElementById("collapse-rate").value);
+    const collapseFactor = Math.pow(10, logCollapse);
+    document.getElementById("collapse-rate-val").textContent = logCollapse.toFixed(1);
+    result = runFreefall(nH, T, fractions, logNTarget, logNShock, machShock, collapseFactor, tolerance);
   } else {
     const logDtf = parseFloat(document.getElementById("dtf").value);
     document.getElementById("dtf-val").textContent = logDtf.toFixed(1);
-    result = runConstantDensity(nH, T, fractions, logDtf);
+    result = runConstantDensity(nH, T, fractions, logDtf, tolerance);
   }
   const elapsed = performance.now() - t0;
 
@@ -1443,7 +1478,7 @@ function runSweepBody() {
       result = runFreefall(nH, T, fractions, logNTarget, logNShock, machShock);
     } else {
       const logDtf = parseFloat(document.getElementById("dtf").value);
-      result = runConstantDensity(nH, T, fractions, logDtf, undefined, undefined, true);
+      result = runConstantDensity(nH, T, fractions, logDtf, undefined, undefined, undefined, true);
     }
     xKey = result.xKey;
     const label = sweepFormat(param, param.toPhysical(v));
@@ -1518,9 +1553,16 @@ function initPage(config) {
   document.getElementById("ic-preset").addEventListener("change", (e) => applyPreset(e.target.value));
   document.getElementById("run-sweep").addEventListener("click", runSweep);
   document.getElementById("sweep-param").addEventListener("change", updateSweepParamUI);
-  for (const id of ["nH", "T", "dtf", "ntarget", "nshock", "mach"]) {
+  for (const id of ["nH", "T", "dtf", "ntarget", "nshock", "mach", "collapse-rate", "tolerance"]) {
     document.getElementById(id).addEventListener("input", scheduleRedraw);
   }
+  const shockEnabledEl = document.getElementById("shock-enabled");
+  const updateShockEnabledUI = () => {
+    document.getElementById("nshock").disabled = !shockEnabledEl.checked;
+    document.getElementById("mach").disabled = !shockEnabledEl.checked;
+  };
+  shockEnabledEl.addEventListener("change", () => { updateShockEnabledUI(); scheduleRedraw(); });
+  updateShockEnabledUI();
   // Charts bake current colors into the Vega-Lite spec at render time
   // (see vlConfig()), so a live OS theme flip needs an explicit redraw --
   // it won't happen on its own the way the CSS-variable-driven rest of
