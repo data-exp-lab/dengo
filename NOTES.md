@@ -3165,3 +3165,107 @@ chart-box scrollbar genuinely reaches hidden content (scrolled it
 programmatically and screenshotted the result), and 120/120 pytest
 still passing (a pure CSS change, but re-run anyway rather than
 assumed).
+
+**2026-09-10, continued: redesign the run chart -- vertical single-chart
+stack, and a real fix for a genuinely-broken zoom.**
+
+The multi-column grid from earlier today ("clunky", per direct
+feedback) is replaced with a single vertical stack, one panel per
+row, reordered and reworked per explicit direction:
+
+1. **density vs. time** (free-fall mode only -- density is held
+   constant in cool mode, so this would just be a flat line there).
+   Deliberately **x = density, y = time** -- the reverse of how this
+   looked when first added -- specifically so its x-axis is the same
+   field as panel 2's, letting one brush there zoom both. Density is
+   log (never legitimately zero); time is symlog on the *y* axis now
+   (still can legitimately be exactly 0 -- same reasoning as always,
+   just on the other axis this time).
+2. **temperature/thermal-energy vs. x** (x = density in free-fall
+   mode, time in cool mode). The one panel that actually holds the
+   zoom brush.
+3. **ionization/H2 fraction**.
+4. **species mass fraction**.
+
+**Zoom model changed entirely.** The previous "overview never
+rescales, a separate zoomed *copy* of the same metric does" pattern
+(the multi-column grid's `tempDetail`/`tnDetail`) is gone. Instead,
+exactly one panel (temperature-vs-x) declares the brush; every *other*
+panel in the stack binds its own x-domain to that one selection by
+name, so dragging a range there rescales every other panel sharing
+that axis *in place* -- no separate zoomed duplicates left to draw.
+The brush-holding panel itself is excluded on purpose (stays at the
+full range, showing the selection box) -- explicitly asked for
+("zoom on all *other* charts"), and it's also the only technically
+sound option: a single view can't simultaneously show the full-range
+selection box *and* be rescaled by its own selection.
+
+**A real "zooming doesn't work" bug got fixed along the way -- and it
+turns out to predate today's redesign entirely.** Confirmed directly
+in an isolated repro before touching `app.js`: a panel built as a
+*layered* spec (main line + an invisible hover-capture layer + a
+crosshair rule layer, `layer: [...]`, i.e. every panel in this file)
+only rescales correctly if **every** layer's x-scale gets the *same*
+explicit `domain: {param: "brush", field: "x"}`, not just the visible
+line's. Vega-Lite's default is to *share* one merged scale across
+sibling layers within one view, and the merge is a **union** -- if
+only one layer has an explicit narrow domain and the others don't,
+the union with their own full-auto-range domain is just the full
+range again, so the panel visibly never rescales at all even though
+the brush param itself fires correctly (confirmed the param value was
+right the whole time; only the rendered domain was wrong). This
+exact shape (`xDomainFromBrush` applied only to the main line, not to
+that panel's own hover-capture/crosshair layers) was already present
+in the *previous* design's zoomed detail panels, meaning that "zoomed"
+row was probably already silently broken before today, not something
+this redesign introduced. Fixed by threading `xDomainFromBrush`
+through `crosshairLayer()`/`hoverCaptureLayer()` too, applying the
+identical domain object everywhere a panel needs it -- confirmed
+directly: before the fix, an isolated repro with a layered follower
+panel reproduced the exact "stays at full range" bug; after applying
+the domain to every layer, the same repro rescaled correctly, and the
+real app followed the same pattern.
+
+**Species colors**: switched from a hand-picked 10-color array (d3's
+older "category10") to Vega-Lite's own `scheme: "tableau10"` --
+flagged directly ("the species all seem to have only orange and blue
+colors... we should use a standard set of colors that are all
+different"). `category10` includes several low-saturation
+grays/browns that read as much less distinct than tableau10's set in
+practice against this chart's many overlapping log-scale lines, even
+though both are nominally "10 different colors." `SPECIES_COLORS`/
+`speciesColor()` are gone entirely -- nothing else referenced them.
+
+**Legend independence**: explicit `resolve: {legend: {color:
+"independent"}, scale: {color: "independent"}}` at the composition's
+top level, so the ionization and species charts' legends can never
+merge -- belt-and-suspenders (they already use different color fields,
+"quantity" vs. "species", so Vega-Lite wouldn't have merged them by
+default regardless), made explicit because it was asked for directly.
+
+**Zoom-timespan text**: moved from below the whole combined chart to
+just above it (directly under the mode buttons), per "put it up...
+closer to where the zooming occurs" -- as close as this architecture
+allows without reintroducing multiple `vegaEmbed()` calls (one
+combined spec renders as one continuous SVG; HTML can't be interleaved
+mid-panel), landing one panel away from the brush-holding chart
+instead of three. Also corrected the explanatory text's claim about
+how to clear a zoom: confirmed directly it's a plain click (no drag),
+not "drag an empty area" as worded before.
+
+Verified: real Emscripten rebuild, headless-Chrome regression --
+zero console errors across cool mode, free-fall mode, both themes, a
+network with H2 species and one without. Specifically confirmed (not
+assumed): dragging a narrow range on the temperature-vs-density panel
+visibly rescales the density-vs-time, ionization, and species panels
+to the same range while the temperature-vs-density panel itself stays
+at the full range showing the selection box; dragging on the
+density-vs-time panel does nothing (no brush there, by design);
+clicking (no drag) on the temperature-vs-density panel clears the
+zoom and restores every panel to the full range; the brush-timespan
+text tracks correctly in both modes; species now render in visibly
+distinct colors (confirmed by screenshot, not just by scheme name);
+isolating one species via its legend dims every other species'
+*own* color at reduced opacity (not a flat gray) and leaves the
+ionization chart's own legend/lines completely unaffected. Full
+`pytest` suite unaffected (120/120), rerun after this change.
