@@ -515,18 +515,22 @@ function updateZoomTimespan(value, rows) {
 // possible, not just handled.
 
 const PANEL_WIDTH = 620, OVERVIEW_HEIGHT = 150, DETAIL_HEIGHT = 170;
-// Every panel in this composition is a single, standalone instance now --
-// no more paired "overview" (never rescales) + "zoomed" (bound to the
-// overview's own brush) copies of the same metric. Zooming instead comes
-// from *one* panel (the temperature-vs-x chart, see runViewSpec() below)
-// declaring the brush, while every *other* panel binds its own x-domain
-// to that one selection -- so dragging a range rescales every other
-// panel sharing that axis in place, and there's nothing left to
-// duplicate. DETAIL_HEIGHT is kept only for the ion/species panels
-// (unrelated to zooming, just their own slightly taller size).
+// One panel (the temperature-vs-x chart, see runViewSpec() below)
+// declares the brush; every *other* panel binds its own x-domain to
+// that one selection -- so dragging a range rescales every other panel
+// sharing that axis in place, no separate "zoomed" copy needed for any
+// of them, *except* temperature itself gets one anyway (directly below
+// it, showing points): the panel holding the brush can't also be the
+// one that rescales to it (it has to stay at the full range to show
+// the selection box), so it's the one metric here that still needs an
+// actual second, zoomed instance to see rescaled at all.
 
+// Light gray, deliberately -- not a color that competes with the shock
+// event's own red dashed rule (the two used to read as similar enough
+// to be mistaken for each other; the shock line's own color is
+// untouched, only this one moved).
 function crosshairColor() {
-  return isDarkMode() ? "#ffd54f" : "#c77700";
+  return isDarkMode() ? "#9aa0a6" : "#8a8a8a";
 }
 
 // The shared crosshair: a `rule` mark filtered by the one "hover"
@@ -570,18 +574,32 @@ function crosshairLayer(data, xField, xDomainFromBrush) {
 }
 
 // nearest-by-x-pixel-distance only (`encodings: ["x"]`) so this behaves
-// like a vertical crosshair, not a 2D nearest-neighbor search; `line`
-// marks don't support `nearest` directly (confirmed directly -- it
-// warns and does nothing without a separate point-mark capture layer,
-// which is why this is its own tiny invisible layer, not part of the
-// visible line).
-function hoverCaptureLayer(data, xField, yField, xDomainFromBrush) {
+// like a vertical crosshair, not a 2D nearest-neighbor search. Every
+// panel uses this same separate invisible layer for `hover`, even the
+// ones that already show their own visible point markers (ionPanel(),
+// speciesPanel(), metricPanel()'s `showPoints`) -- confirmed directly
+// (not assumed) that attaching `hover` straight to a `line`-with-`point`
+// composite mark instead doesn't work: Vega-Lite warns "nearest
+// transform is not supported for line marks" for that mark exactly like
+// it does for a bare line, silently breaking the selection there (and
+// therefore, once `hover` is globally resolved, the crosshair on every
+// *other* panel too) rather than erroring loudly. `nearest` genuinely
+// does need its own dedicated `point`-marked layer, full stop.
+//
+// It gets its own `tooltip` encoding, matching whatever the visible
+// mark below it would have shown -- found directly (a real regression,
+// not a hypothetical): being invisible doesn't stop this layer from
+// being the topmost mark under the cursor, so *it* is what actually
+// receives every pointer event, silently starving the visible mark's
+// own tooltip encoding of ever seeing one.
+function hoverCaptureLayer(data, xField, yField, xDomainFromBrush, tooltip) {
   return {
     data: { values: data },
     mark: { type: "point", opacity: 0 },
     encoding: {
       x: { field: xField, type: "quantitative", scale: domainScale(xDomainFromBrush, xField) },
       y: { field: yField, type: "quantitative" },
+      tooltip,
     },
     params: [{
       name: "hover",
@@ -599,8 +617,17 @@ function hoverCaptureLayer(data, xField, yField, xDomainFromBrush) {
 // including `extra` layers like the shock-event rule that have no x
 // field at all); `xDomainFromBrush`, when given, binds this panel's
 // x-domain to *another* panel's brush by name, so it rescales as that
-// brush is dragged without ever holding one itself.
-function metricPanel({ data, xField, yField, xKind, yTitle, tooltip, extra, brushName, xDomainFromBrush, withHoverParam, title }) {
+// brush is dragged without ever holding one itself. `showPoints`, when
+// true, draws the line with visible point markers (only ever asked for
+// on the zoomed temperature panel) -- purely visual; `hover` still goes
+// on its own separate invisible capture layer regardless, same as every
+// other panel. Confirmed directly (not assumed) that attaching `hover`
+// straight to a `line`-with-`point` mark instead doesn't work: Vega-Lite
+// warns "nearest transform is not supported for line marks" for this
+// composite mark exactly like it does for a bare line, silently
+// breaking that selection (and, once it's globally resolved, every
+// other panel's crosshair along with it) rather than erroring loudly.
+function metricPanel({ data, xField, yField, xKind, yTitle, tooltip, extra, brushName, xDomainFromBrush, withHoverParam, showPoints, pointSize, title }) {
   const xAxis = {
     // No external KaTeX-rendered label div for this one shared axis
     // title the way single-chart panels used to have -- with several
@@ -625,7 +652,7 @@ function metricPanel({ data, xField, yField, xKind, yTitle, tooltip, extra, brus
   };
   const mainLayer = {
     data: { values: data },
-    mark: "line",
+    mark: showPoints ? { type: "line", point: { filled: true, size: pointSize || 50, opacity: 0.9 } } : "line",
     encoding: {
       x: { field: xField, type: "quantitative", scale: xScale, axis: xAxis },
       y: { field: yField, type: "quantitative", scale: { type: "log" }, axis: { title: yTitle, titleFontSize: 10 } },
@@ -635,10 +662,10 @@ function metricPanel({ data, xField, yField, xKind, yTitle, tooltip, extra, brus
   };
   return {
     title: title ? { text: title, fontSize: 12, fontWeight: "bold", anchor: "start", offset: 6 } : undefined,
-    width: PANEL_WIDTH, height: OVERVIEW_HEIGHT,
+    width: PANEL_WIDTH, height: showPoints ? DETAIL_HEIGHT : OVERVIEW_HEIGHT,
     layer: [
       ...(extra || []), mainLayer,
-      ...(withHoverParam ? [hoverCaptureLayer(data, xField, yField, xDomainFromBrush)] : []),
+      ...(withHoverParam ? [hoverCaptureLayer(data, xField, yField, xDomainFromBrush, tooltip)] : []),
       crosshairLayer(data, xField, xDomainFromBrush),
     ],
   };
@@ -648,12 +675,20 @@ function metricPanel({ data, xField, yField, xKind, yTitle, tooltip, extra, brus
 // y=time (the reverse of how this looked before) specifically so its
 // x-axis is the exact same field/scale as the temperature-vs-density
 // panel below it, letting that panel's brush rescale this one too (see
-// runViewSpec()). Density is log (never legitimately zero); time is
-// symlog, same reasoning as everywhere else time appears (the initial
-// condition's t=0 point is real and worth showing, not silently
-// dropped). Never itself holds a brush -- it's purely a *follower* of
-// the temperature-vs-density chart's, same as ionPanel/speciesPanel.
+// runViewSpec()). Drops the very first row (the initial condition
+// itself, at t=0) rather than plotting it -- found directly, not
+// hypothetical: free-fall time is heavily front-loaded (almost all of
+// it elapses while density is still low and barely changing; the
+// actual collapse through the remaining many decades of density is
+// comparatively instantaneous), so a scale that has to include an
+// exact t=0 point is forced to spend a lot of its range on a mostly
+// flat, uninformative rise and squeezes the rest into a sliver. Once
+// the t=0 point is gone, y (elapsed time) never needs to include zero
+// either, so it can just be `log` like everything else here instead of
+// `symlog` -- more of the chart's vertical space goes to the range
+// that's actually interesting.
 function densityTimePanel(rows, xDomainFromBrush) {
+  const plotRows = rows.filter((r) => r.t > 0);
   const xScale = {
     type: "log",
     ...(xDomainFromBrush ? { domain: { param: xDomainFromBrush, field: "x" } } : {}),
@@ -665,12 +700,12 @@ function densityTimePanel(rows, xDomainFromBrush) {
     { field: "t", title: "t (s)", type: "quantitative", format: ".3~g" },
   ];
   const mainLayer = {
-    data: { values: rows },
+    data: { values: plotRows },
     mark: "line",
     encoding: {
       x: { field: "x", type: "quantitative", scale: xScale, axis: { title: "n (cm⁻³)", titleFontSize: 10, labelOverlap: "greedy" } },
       y: {
-        field: "t", type: "quantitative", scale: { type: "symlog" },
+        field: "t", type: "quantitative", scale: { type: "log" },
         axis: { title: "t (s)", titleFontSize: 10, labelAngle: 0, labelExpr: TIME_LABEL_EXPR },
       },
       tooltip,
@@ -679,7 +714,11 @@ function densityTimePanel(rows, xDomainFromBrush) {
   return {
     title: { text: "density vs. time", fontSize: 12, fontWeight: "bold", anchor: "start", offset: 6 },
     width: PANEL_WIDTH, height: OVERVIEW_HEIGHT,
-    layer: [mainLayer, hoverCaptureLayer(rows, "x", "t", xDomainFromBrush), crosshairLayer(rows, "x", xDomainFromBrush)],
+    layer: [
+      mainLayer,
+      hoverCaptureLayer(plotRows, "x", "t", xDomainFromBrush, tooltip),
+      crosshairLayer(plotRows, "x", xDomainFromBrush),
+    ],
   };
 }
 
@@ -699,6 +738,14 @@ function ionPanel(xKind, rows, width, xDomainFromBrush) {
   const present = new Set(rows.map((r) => r.quantity));
   const domain = [ION_H2_LABELS.ion, ION_H2_LABELS.h2].filter((label) => present.has(label));
   const range = domain.map((label) => (label === ION_H2_LABELS.ion ? palette.ion : palette.h2));
+  const ionTooltip = [
+    { field: "quantity", title: "quantity", type: "nominal" },
+    { field: "i", title: "step", type: "quantitative" },
+    { field: "x", title: xKind === "time" ? "t (s)" : "n (cm⁻³)", type: "quantitative", format: ".3~g" },
+    { field: "tHuman", title: "t", type: "nominal" },
+    { field: "dt", title: "step Δt (s)", type: "quantitative", format: ".3~g" },
+    { field: "value", title: "fraction", type: "quantitative", format: ".4~g" },
+  ];
   return {
     title: { text: "Ionized / H₂ fraction", fontSize: 12, fontWeight: "bold", anchor: "start", offset: 6 },
     width, height: DETAIL_HEIGHT,
@@ -721,17 +768,10 @@ function ionPanel(xKind, rows, width, xDomainFromBrush) {
         y: { field: "value", type: "quantitative", scale: { type: "log" }, axis: { title: "fraction", titleFontSize: 10 } },
         color: { field: "quantity", type: "nominal", scale: { domain, range }, legend: { title: null, orient: "bottom", direction: "horizontal" } },
         opacity: { condition: { param: "ionToggle", value: 1 }, value: 0.15 },
-        tooltip: [
-          { field: "quantity", title: "quantity", type: "nominal" },
-          { field: "i", title: "step", type: "quantitative" },
-          { field: "x", title: xKind === "time" ? "t (s)" : "n (cm⁻³)", type: "quantitative", format: ".3~g" },
-          { field: "tHuman", title: "t", type: "nominal" },
-          { field: "dt", title: "step Δt (s)", type: "quantitative", format: ".3~g" },
-          { field: "value", title: "fraction", type: "quantitative", format: ".4~g" },
-        ],
+        tooltip: ionTooltip,
       },
       params: [{ name: "ionToggle", select: { type: "point", fields: ["quantity"] }, bind: "legend" }],
-    }, crosshairLayer(rows, "x", xDomainFromBrush)],
+    }, hoverCaptureLayer(rows, "x", "value", xDomainFromBrush, ionTooltip), crosshairLayer(rows, "x", xDomainFromBrush)],
   };
 }
 
@@ -749,6 +789,14 @@ function speciesPanel(xKind, rows, width, xDomainFromBrush) {
   const n = rows.length;
   const pointSize = Math.max(4, Math.min(30, 2000 / Math.max(n, 1)));
   const domain = plotableSpecies().filter((name) => speciesMassAmu(name) !== undefined);
+  const speciesTooltip = [
+    { field: "species", title: "species", type: "nominal" },
+    { field: "i", title: "step", type: "quantitative" },
+    { field: "x", title: xKind === "time" ? "t (s)" : "n (cm⁻³)", type: "quantitative", format: ".3~g" },
+    { field: "tHuman", title: "t", type: "nominal" },
+    { field: "dt", title: "step Δt (s)", type: "quantitative", format: ".3~g" },
+    { field: "value", title: "X_i (mass frac.)", type: "quantitative", format: ".4~g" },
+  ];
   return {
     title: { text: "Species mass fraction (click a legend entry to isolate it)", fontSize: 12, fontWeight: "bold", anchor: "start", offset: 6 },
     width, height: DETAIL_HEIGHT + 20,
@@ -779,36 +827,33 @@ function speciesPanel(xKind, rows, width, xDomainFromBrush) {
         // to share one.
         color: { field: "species", type: "nominal", scale: { domain, scheme: "tableau10" }, legend: { title: null, orient: "bottom", direction: "horizontal", columns: 0 } },
         opacity: { condition: { param: "speciesToggle", value: 1 }, value: 0.12 },
-        tooltip: [
-          { field: "species", title: "species", type: "nominal" },
-          { field: "i", title: "step", type: "quantitative" },
-          { field: "x", title: xKind === "time" ? "t (s)" : "n (cm⁻³)", type: "quantitative", format: ".3~g" },
-          { field: "tHuman", title: "t", type: "nominal" },
-          { field: "dt", title: "step Δt (s)", type: "quantitative", format: ".3~g" },
-          { field: "value", title: "X_i (mass frac.)", type: "quantitative", format: ".4~g" },
-        ],
+        tooltip: speciesTooltip,
       },
       params: [{ name: "speciesToggle", select: { type: "point", fields: ["species"] }, bind: "legend" }],
-    }, crosshairLayer(rows, "x", xDomainFromBrush)],
+    }, hoverCaptureLayer(rows, "x", "value", xDomainFromBrush, speciesTooltip), crosshairLayer(rows, "x", xDomainFromBrush)],
   };
 }
 
-// The whole current-run view: a single vertical stack (density vs. time,
-// only in free-fall mode; temperature/thermal-energy vs. x; ionization/
-// H2 fraction; species mass fraction), all sharing one crosshair and one
-// zoom-brush. `resolve.selection.hover: "global"` is what makes each
-// hover-capturing panel's own "hover" param apply across every sibling
-// panel in this whole composition -- confirmed directly in an isolated
-// repro before relying on it here (see NOTES.md).
+// The whole current-run view: a single vertical stack -- density vs.
+// time (free-fall only), temperature/thermal-energy vs. x, *zoomed*
+// temperature vs. x, ionization/H2 fraction, species mass fraction --
+// all sharing one crosshair and one zoom-brush. `resolve.selection.
+// hover: "global"` is what makes every panel's own "hover" param apply
+// across every sibling panel in this whole composition -- confirmed
+// directly in an isolated repro before relying on it here (see
+// NOTES.md).
 //
 // Zooming: exactly one panel (temperature-vs-x, `tempOverview` below)
-// declares the actual brush; every *other* panel binds its own x-domain
-// to that one selection by name (`xDomainFromBrush`), so dragging a
-// range there rescales every other panel sharing that axis in place --
-// the brush-holding panel itself is deliberately excluded (it stays at
-// the full range, showing the selection box, the standard Vega-Lite
-// "overview" role), not a separate "zoomed" copy of each metric the way
-// this looked before landing on this design (see NOTES.md).
+// declares the actual brush; every *other* panel -- including the
+// dedicated zoomed copy of temperature itself, `tempZoomed` -- binds
+// its own x-domain to that one selection by name (`xDomainFromBrush`),
+// so dragging a range there rescales every other panel sharing that
+// axis in place. The brush-holding panel itself is deliberately
+// excluded from rescaling (it stays at the full range, showing the
+// selection box, the standard Vega-Lite "overview" role) -- which is
+// exactly why temperature alone still needs a real second, zoomed
+// instance: it's the one metric whose own overview can't double as its
+// own zoomed view.
 //
 // The composition is a single flat top-level `vconcat` -- every panel a
 // direct item, never wrapped in an intermediate row spec -- both because
@@ -838,6 +883,16 @@ function runViewSpec({ mode, rows, tempField, tempExtra, ionRows, speciesRows })
     brushName: "brush", withHoverParam: true,
     title: `${tempTitle} vs. ${xKindOfMode}`,
   });
+  // The one *zoomed* panel this composition has -- directly below the
+  // temperature-vs-x panel above, bound to that one's brush. Circles/
+  // points on this one specifically (not on any other panel here) --
+  // an explicit, standing preference from earlier in this project.
+  const tempZoomed = metricPanel({
+    data: rows, xField: "x", yField: tempField, xKind: xKindOfMode, yTitle: FIELD_TITLE[tempField] || tempField,
+    tooltip: tempTooltip, extra: tempExtra,
+    xDomainFromBrush: "brush", withHoverParam: true, showPoints: true, pointSize: 50,
+    title: "zoomed",
+  });
 
   const items = [];
   // Density-vs-time only makes sense in free-fall mode -- density is
@@ -845,7 +900,7 @@ function runViewSpec({ mode, rows, tempField, tempExtra, ionRows, speciesRows })
   // line there (matches the previous design's same free-fall-only
   // gating for this chart).
   if (mode === "freefall") items.push(densityTimePanel(rows, "brush"));
-  items.push(tempOverview);
+  items.push(tempOverview, tempZoomed);
   if (ionRows.length) items.push(ionPanel(xKindOfMode, ionRows, PANEL_WIDTH, "brush"));
   if (speciesRows.length) items.push(speciesPanel(xKindOfMode, speciesRows, PANEL_WIDTH, "brush"));
 
