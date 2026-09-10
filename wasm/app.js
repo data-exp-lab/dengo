@@ -516,7 +516,17 @@ function updateZoomTimespan(value, rows) {
 // independently-resolving vegaEmbed() promises won a race" bugs (see
 // NOTES.md) stops being possible, not just handled.
 
-const PANEL_WIDTH = 620, OVERVIEW_HEIGHT = 150, DETAIL_HEIGHT = 170;
+// 620 (what this used to be) rendered a real chart ~705px wide once
+// axis-label margins are added in -- comfortably more than the ~686px
+// `.chart-box` actually has to give it at this page's *capped* body
+// width (1100px, minus padding/sidebar/gap -- see style.css), on any
+// window wide enough to hit that cap (roughly >=1158px, i.e. most
+// windows people actually use, confirmed directly on a real 1920px-wide
+// one). That's not the "narrow window" case `.chart-box`'s own
+// `overflow-x: auto` exists for -- it was overflowing on an ordinary,
+// plenty-wide screen. 580 (~700px rendered) fits with a real margin to
+// spare, confirmed directly at 1920px width.
+const PANEL_WIDTH = 580, OVERVIEW_HEIGHT = 150, DETAIL_HEIGHT = 170;
 // One panel (the temperature-vs-x chart, see runViewSpec() below)
 // declares the brush; every *other* panel binds its own x-domain to
 // that one selection -- so dragging a range rescales every other panel
@@ -817,6 +827,29 @@ function speciesPanel(xKind, rows, width, zoomDomain) {
 // The composition is a single flat top-level `vconcat` -- every panel a
 // direct item, never wrapped in an intermediate row spec -- simply the
 // vertical single-chart-per-row layout asked for.
+// `tempExtra`'s shock-event rule has its own single-row dataset (just
+// `{x: nShock}`), entirely separate from `rows` -- so it was never
+// touched by `zoomFilteredData()` at all, and Vega-Lite's default
+// shared-scale-across-layers behavior pulled that one raw, unfiltered
+// point straight into the "zoomed" panel's x-domain regardless of the
+// actual zoom range, silently widening its right edge out to wherever
+// the shock happened to be (found directly: reported as "the left edge
+// is the same but not the right" against the ionization panel, which
+// has no such extra layer to do this). The temperature *overview*
+// panel is unaffected on purpose -- it always shows the full range
+// anyway, so an unfiltered shock point there was never wrong. Only the
+// zoomed copy needs its shock rule (not the shaded 1500-2500K band,
+// which has no `x` field to begin with) dropped once it falls outside
+// the current zoom.
+function extraForZoom(tempExtra, zoomDomain) {
+  if (!zoomDomain) return tempExtra;
+  return tempExtra.filter((layer) => {
+    const row = layer.data && layer.data.values && layer.data.values[0];
+    if (!row || row.x === undefined) return true; // no x field (the band) -- always keep
+    return row.x >= zoomDomain[0] && row.x <= zoomDomain[1];
+  });
+}
+
 function runViewSpec({ mode, rows, tempField, tempExtra, ionRows, speciesRows, zoomDomain }) {
   const tempTitle = (FIELD_TITLE[tempField] || tempField).replace(/\s*\(.*\)/, "");
   const xKindOfMode = mode === "freefall" ? "density" : "time";
@@ -845,7 +878,7 @@ function runViewSpec({ mode, rows, tempField, tempExtra, ionRows, speciesRows, z
   // preference from earlier in this project.
   const tempZoomed = metricPanel({
     data: rows, xField: "x", yField: tempField, xKind: xKindOfMode, yTitle: FIELD_TITLE[tempField] || tempField,
-    tooltip: tempTooltip, extra: tempExtra,
+    tooltip: tempTooltip, extra: extraForZoom(tempExtra, zoomDomain),
     zoomDomain, showPoints: true, pointSize: 50,
     title: "zoomed",
   });
