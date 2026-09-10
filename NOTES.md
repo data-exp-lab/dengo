@@ -3404,3 +3404,113 @@ tooltip content on every panel, crosshair sync via direct DOM
 inspection, shift-click multi-select on the species legend, and zero
 page-level horizontal scroll at five viewport widths. Full `pytest`
 suite unaffected (120/120).
+
+**2026-09-10, continued: run-metadata readout, a genuinely more useful
+density-vs-time chart, and disabling the crosshair -- plus a second,
+independent, real Vega bug found while trying to fix zoom speed.**
+
+**Run metadata**: a new, prominent `#run-summary` block right below the
+page's own subtitle -- steps, wall-clock solve time, elapsed simulated
+time, final T, final ionized/H2 fraction, shock-crossing density, each
+labeled -- replacing what used to be one small, easy-to-miss, unlabeled
+line at the very bottom of the sidebar (below every slider, where a
+species-heavy network could push it well out of view). `#status` in the
+sidebar keeps its own narrower original job (module-loading state only:
+"loading solver..." / "ready").
+
+**Density-vs-time panel now plots *lookback* time (time remaining until
+this run's last step), not elapsed time** -- flagged directly as "not
+that useful" the way it was: free-fall time is heavily front-loaded
+(almost all of it elapses while density is still low; the collapse
+through the remaining many decades of density is comparatively
+instantaneous), so elapsed-time-vs-density rises steeply for a couple of
+density decades and goes flat for the rest of the run -- which, for this
+project, means exactly the regime it cares most about (H2-formation-
+heating/shock physics, all at high density) falls in the boring flat
+part. Counting backward from the run's own last step instead flips
+which part is flat, moving the detail to line up with the high-density
+regime that's actually interesting -- exactly the "lookback time" idea
+suggested directly. Confirmed by screenshot: what used to be a rapid
+rise into a long flat plateau is now a single, smoothly decaying curve
+using the *entire* vertical range, decade after decade, no flat part at
+all.
+
+**The shared crosshair is gone, for now** -- disabled outright, not
+just tuned, per direct instruction once a real, measured performance
+regression was confirmed (a single mouse move took ~1.6s on this chart
+vs. ~20ms on a blank page). `crosshairColor()`/`crosshairLayer()`/
+`hoverCaptureLayer()`/`withHoverParam` and the `hover`-selection
+`resolve` entry are removed outright (not just unused) -- a future,
+deliberately *simpler* mechanism (a bar that just tracks the pointer's
+raw x pixel position, no per-panel nearest-point lookup or cross-view
+selection resolution at all -- explicitly suggested as worth trying:
+"we would not necessarily need it to do a 'nearest finder'") is different
+enough in kind that nothing here was worth keeping around unused for it.
+Removing it also surfaced a real side-effect regression of its own: the
+invisible hover-capture layer had also been serving, incidentally, as a
+much more forgiving tooltip target than a bare `line` mark's 1px stroke
+-- confirmed directly (tooltips on the two line-only panels stopped
+working reliably once that layer was gone). Fixed by giving even the
+non-`showPoints` panels real (just invisible, `opacity: 0`) point
+geometry instead of a bare line, so tooltips have *something* to
+hit-test against -- less forgiving than the old full-panel "nearest"
+search was, but confirmed directly to genuinely work again, just not as
+buttery smooth.
+
+**Zooming was independently, severely slow too -- confirmed directly
+this was NOT just the crosshair's fault, and root-caused separately.**
+After removing the crosshair, a single brush-drag gesture still took
+~6.6-7 *seconds*. Traced to binding every follower panel's x-domain
+*live* to the anchor panel's own brush `param` (`domain: {param:
+"brush", field: ...}`, continuously rescaling while dragging) -- the
+same ~700-900ms-per-signal-update Vega dataflow tax an earlier
+investigation had already found for the crosshair, just triggered by
+the brush's own many intermediate drag-position updates instead of
+hover ticks. Fixed by switching zooming from *live* (rescale
+continuously while dragging) to *debounced-commit* (read the brush's
+final value once dragging actually pauses for ~250ms, then rebuild the
+whole chart with that range baked in as a literal value, via a new
+`embedChart()` that reuses the last solve's cached inputs -- no
+re-running the solver). Confirmed directly: brush-drag time dropped
+from ~6.6-7s to ~850ms-1.05s.
+
+**That fix immediately hit a second real, independent Vega bug of its
+own.** The natural way to "bake in" a committed zoom range is an
+explicit `scale.domain: [lo, hi]` literal array -- and that turned out
+to be badly broken: giving a `log`-typed x-scale an explicit literal
+domain, with *nothing else different* about the spec, made Vega render
+the chart at close to *4x* its declared width. Confirmed in an isolated
+repro completely unrelated to this app's own composition (a single,
+fresh-embedded, non-composed 300px-wide panel, one mark, no vconcat, no
+re-embedding): adding `scale.domain` alone took it from 360px to 1357px;
+`nice: true` alongside it helped some (1114px) but nowhere near enough;
+an explicit `autosize: {type: "pad"}` made no difference at all. The
+compiled Vega JSON's own declared `width` was unaffected in both cases
+(confirmed by diffing `vegaLite.compile(...).spec` directly -- the
+*only* structural difference was the domain itself), so whatever
+inflates the rendered width happens at Vega's own runtime layout step,
+not something visible in -- or fixable from -- the spec Vega-Lite hands
+it. Fixed by not touching `scale.domain` for the zoom at all: instead,
+each follower panel's own *data* is filtered to the committed `[lo,
+hi]` range in plain JS before being embedded (`zoomFilteredData()`),
+letting Vega-Lite compute the (now naturally narrower) domain from data
+the normal way -- confirmed directly, back to the correct width, and
+arguably simpler than the domain-override version besides. The one
+real trade-off: an extremely tight zoom that happens to fall entirely
+between two adjacent data points would show nothing (no interpolated
+line, since there's no data left to draw) rather than a clipped
+segment the old domain-override approach would still have shown -- a
+rare edge case, accepted rather than adding padding logic for it.
+
+Verified: real Emscripten rebuild, headless-Chrome regression across
+cool/free-fall modes, both themes, a network with H2 species and one
+without, run-summary content in both modes, the lookback-time chart's
+shape (confirmed by screenshot, not just by the underlying math),
+zoom/re-zoom/clear (including a stress sequence: zoom, zoom again to a
+different range without clearing first, then clear), zero page-width
+regression from the zoom fix (confirmed the SVG's own `width` attribute
+stays correct through repeated re-embeds), and tooltip content restored
+on every panel. Full `pytest` suite unaffected (120/120).
+
+Not done in this round, deliberately: splitting the parameter sweep
+out to its own page (a separate, larger piece of work, tackled next).

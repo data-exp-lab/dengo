@@ -33,6 +33,19 @@ body {
 h1 { font-size: 1.3em; margin: 0 0 4px; }
 p.sub { color: var(--muted); margin: 0 0 20px; }
 a { color: var(--accent); }
+/* The current run's metadata, up near the top where it can't be missed
+   or scrolled out of view the way the old one-line, easy-to-miss
+   status text (at the bottom of the sidebar, below every slider) could
+   be. */
+.run-summary {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 22px;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+  padding: 10px 16px; margin: 0 0 20px; font-size: 0.9em; color: var(--muted);
+}
+.run-summary .stat { white-space: nowrap; color: var(--fg); }
+.run-summary .label { color: var(--muted); font-size: 0.85em; margin-right: 5px; }
+.run-summary strong { font-variant-numeric: tabular-nums; font-weight: 600; }
+.run-summary .stat-extra { color: var(--muted); font-size: 0.85em; }
 .layout { display: grid; grid-template-columns: 340px 1fr; gap: 24px; align-items: start; }
 @media (max-width: 760px) { .layout { grid-template-columns: 1fr; } }
 .panel {
