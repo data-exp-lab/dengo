@@ -18,6 +18,8 @@ let temperatureDisplayMode = "T"; // "T" (K) or "ge" (specific internal energy, 
 let temperatureZoomEnabled = false; // opt-in: drag-to-zoom detail view under the Temperature chart
 let lastResult = null; // the current mode's most recent full run (redraw()'s own result), for CSV export
 let pageTitle = "dengo"; // network title, for the exported CSV's filename only
+let tnChartEnabled = false; // opt-in: the density-vs-time companion chart + its crosshair link to chart-T
+let tChartView = null, tnChartView = null; // current Vega View objects, re-set on every redraw() -- see wireHoverLink()
 
 // -- LaTeX axis labels (rendered via KaTeX, not Vega-Lite's own plain-text
 // titles -- see NOTES.md for why: Vega-Lite axis titles are just SVG
@@ -470,7 +472,113 @@ function runFreefall(nH, T, fractions, logNTarget, logNShock, machShock, safetyF
 
 const FIELD_TITLE = { T: "T (K)", ge: "ε (erg/g)" };
 
-function chartSpec(field, xKey, data, extra, extraTooltip, withZoom) {
+// Two extra layers driving a hover crosshair that stays in sync between
+// two *independently embedded* charts (the Temperature chart and the
+// opt-in density-vs-time chart) -- not something Vega-Lite has a
+// built-in cross-view mechanism for (its own linked-selection recipes
+// are all within one composed spec, like the zoom feature's brush
+// above). Deliberately split into two concerns kept as separate,
+// well-documented Vega API touchpoints rather than one clever
+// mechanism, after the brush selection bug above already showed how
+// fragile assuming Vega-Lite's internal compiled-signal names can be:
+//   1. A `point` selection with `nearest: true` on an *invisible* point
+//      layer (the "nearest" transform isn't supported on a line mark
+//      itself, confirmed directly -- it warns and silently does nothing
+//      useful without this separate capture layer) finds which row the
+//      mouse is closest to, restricted to horizontal distance only
+//      (`encodings: ["x"]`) so it behaves like a vertical crosshair, not
+//      a 2D nearest-neighbor search. Reading its result back out uses
+//      only the one stable, documented touchpoint this needs:
+//      `view.addSignalListener(paramName, ...)`, giving the selected
+//      row's own field value(s) directly (`value[xField]`) -- no
+//      reliance on any further internal signal-naming details.
+//   2. The actual crosshair line is a `rule` mark bound to a small,
+//      explicitly-managed named dataset (`cursor`) that JS pushes new
+//      values into via `view.data("cursor", [...]).runAsync()` --
+//      ordinary, first-class Vega API, not a selection-driven
+//      conditional encoding. Both this chart's own crosshair and the
+//      *other* chart's mirrored one are driven the same way, from the
+//      one JS callback in wireHoverLink() below.
+function hoverLinkLayers(data, xField, yField, xScale) {
+  return [
+    {
+      data: { values: data },
+      mark: { type: "point", opacity: 0 },
+      encoding: {
+        x: { field: xField, type: "quantitative", scale: xScale },
+        y: { field: yField, type: "quantitative" },
+      },
+      params: [{
+        name: "hover",
+        select: { type: "point", on: "pointermove", nearest: true, encodings: ["x"], fields: [xField], clear: "pointerout" },
+      }],
+    },
+    {
+      data: { name: "cursor" },
+      mark: { type: "rule", strokeDash: [4, 3], opacity: 0.8, color: isDarkMode() ? "#ffd54f" : "#c77700" },
+      encoding: { x: { field: "v", type: "quantitative" } },
+    },
+  ];
+}
+
+// Reads this view's own "hover" selection (see hoverLinkLayers() above)
+// and mirrors it onto both this chart's own crosshair and, if the
+// paired chart currently exists, the other one's -- via
+// `getOtherView()` rather than a captured reference, since the other
+// chart may not exist yet (or may be re-created) at the time this is
+// called. `ownField`/`otherField` are which of a row's fields each
+// chart's own x-axis uses (e.g. "x" (density) for the Temperature
+// chart, "t" (time) for the density-vs-time chart).
+function wireHoverLink(view, ownField, otherField, rows, getOtherView) {
+  view.addSignalListener("hover", (name, value) => {
+    const sel = value && value[ownField];
+    const row = sel && sel.length ? rows.find((r) => r[ownField] === sel[0]) : null;
+    view.data("cursor", row ? [{ v: row[ownField] }] : []).runAsync();
+    const other = getOtherView();
+    if (other) other.data("cursor", row ? [{ v: row[otherField] }] : []).runAsync();
+  });
+}
+
+// Elapsed time at an arbitrary density `xVal`, linearly interpolated
+// between whichever two adjacent rows bracket it (rows are sorted
+// ascending by x -- density strictly increases over a free-fall run).
+// Used only for the zoom brush's time-span readout below, where a
+// label needs *a* reasonable time for a continuous, dragged density
+// value, not the precision runFreefall's own bisection-grade care goes
+// into elsewhere -- linear interpolation between adjacent steps is
+// plenty for that.
+function interpolateT(rows, xVal) {
+  if (rows.length === 0) return null;
+  if (xVal <= rows[0].x) return rows[0].t;
+  if (xVal >= rows[rows.length - 1].x) return rows[rows.length - 1].t;
+  let lo = 0, hi = rows.length - 1;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (rows[mid].x <= xVal) lo = mid; else hi = mid;
+  }
+  const a = rows[lo], b = rows[hi];
+  if (b.x === a.x) return a.t;
+  return a.t + ((xVal - a.x) / (b.x - a.x)) * (b.t - a.t);
+}
+
+// Reads the zoom feature's own "brush" selection (the same param
+// chartSpec() attaches to the overview layer) and shows what elapsed
+// *time* that dragged density range corresponds to -- the brush itself
+// only ever operates in density, so without this there'd be no way to
+// tell from the zoomed view alone how much real time a given zoomed-in
+// stretch actually spans.
+function updateZoomTimespan(value, rows) {
+  const el = document.getElementById("zoom-timespan");
+  if (!el) return;
+  const xRange = value && value.x;
+  if (!xRange || xRange.length < 2) { el.textContent = ""; return; }
+  const lo = Math.min(xRange[0], xRange[1]), hi = Math.max(xRange[0], xRange[1]);
+  const tLo = interpolateT(rows, lo), tHi = interpolateT(rows, hi);
+  el.textContent = `Selected range: ${formatTimeAuto(tLo)} to ${formatTimeAuto(tHi)} `
+    + `(Δt ≈ ${formatTimeAuto(tHi - tLo)}).`;
+}
+
+function chartSpec(field, xKey, data, extra, extraTooltip, withZoom, withHoverLink) {
   // Point markers double as an annotation of *where* the adaptive
   // stepper actually placed a step -- their spacing on the log x-axis
   // directly shows the step-size ramp (small at first, growing ~2x per
@@ -495,6 +603,13 @@ function chartSpec(field, xKey, data, extra, extraTooltip, withZoom) {
     labelAngle: xKey === "time" ? -40 : 0,
     labelExpr: xKey === "time" ? TIME_LABEL_EXPR : undefined,
   };
+  // Time (unlike density) can legitimately be exactly 0 now that the
+  // initial condition itself is plotted -- symlog (linear near zero,
+  // log further out) shows that point instead of silently dropping it
+  // the way a pure log scale would. Shared with hoverLinkLayers()'s
+  // capture layer below so its invisible points land in exactly the
+  // same pixels as the visible line's.
+  const xScale = { type: xKey === "time" ? "symlog" : "log" };
   const tooltip = [
     { field: "i", title: "step", type: "quantitative" },
     { field: "x", title: xKey === "time" ? "t (s)" : "n (cm⁻³)", type: "quantitative", format: ".3~g" },
@@ -515,27 +630,27 @@ function chartSpec(field, xKey, data, extra, extraTooltip, withZoom) {
   // layers below that don't even have an x field, and Vega-Lite's
   // compiler doesn't handle that cleanly. Scoping the selection to just
   // the one layer that actually needs it avoids the whole problem.
-  function mainLayer(pointSize, xDomain, withBrush) {
+  function mainLayer(pointSize, xDomain, withBrush, showPoints = true) {
     return {
       data: { values: data },
-      mark: { type: "line", point: { filled: true, size: pointSize, opacity: 0.9 } },
+      mark: showPoints
+        ? { type: "line", point: { filled: true, size: pointSize, opacity: 0.9 } }
+        : { type: "line" },
       encoding: {
-        x: {
-          field: "x", type: "quantitative",
-          // Time (unlike density) can legitimately be exactly 0 now
-          // that the initial condition itself is plotted -- symlog
-          // (linear near zero, log further out) shows that point
-          // instead of silently dropping it the way a pure log scale
-          // would.
-          scale: { type: xKey === "time" ? "symlog" : "log", ...(xDomain || {}) },
-          axis: xAxis,
-        },
+        x: { field: "x", type: "quantitative", scale: { ...xScale, ...(xDomain || {}) }, axis: xAxis },
         y: { field: field, type: "quantitative", scale: { type: "log" }, axis: { title: null } },
         tooltip,
       },
       ...(withBrush ? { params: [{ name: "brush", select: { type: "interval", encodings: ["x"] } }] } : {}),
     };
   }
+
+  // withHoverLink (opt-in, alongside the density-vs-time chart) adds a
+  // crosshair kept in sync with that separately-embedded chart -- see
+  // hoverLinkLayers()/wireHoverLink() above. Only on the primary view
+  // (plain, or the overview when zoom is also on) -- not the zoomed
+  // detail view below, to keep this bounded.
+  const hoverExtra = withHoverLink ? hoverLinkLayers(data, "x", field, xScale) : [];
 
   // The zoom view is opt-in (gated behind the "zoom view" checkbox next
   // to this chart) -- a plain single chart, no brush, is the plainer/
@@ -545,7 +660,7 @@ function chartSpec(field, xKey, data, extra, extraTooltip, withZoom) {
       $schema: "https://vega.github.io/schema/vega-lite/v5.json",
       width: 600, height: 220, background: null,
       config: vlConfig(),
-      layer: [...(extra || []), mainLayer(overviewPointSize)],
+      layer: [...(extra || []), mainLayer(overviewPointSize), ...hoverExtra],
     };
   }
 
@@ -556,15 +671,19 @@ function chartSpec(field, xKey, data, extra, extraTooltip, withZoom) {
   // second view's scale domain to an interval selection param, no
   // custom pan/zoom event handling needed. Before anything is selected
   // the detail view just shows the same full range as the overview.
+  // Points are the zoomed (detail) chart's job only -- the overview
+  // stays a plain line so its own point-count-driven sizing/shrinking
+  // (see overviewPointSize above) doesn't also fight for attention with
+  // the brush selection sitting on top of it.
   const overview = {
     width: 600, height: 140,
-    layer: [...(extra || []), mainLayer(overviewPointSize, undefined, true)],
+    layer: [...(extra || []), mainLayer(overviewPointSize, undefined, true, false), ...hoverExtra],
   };
   const detail = {
     width: 600, height: 160,
     layer: [
       ...(extra || []),
-      mainLayer(detailPointSize, { domain: { param: "brush", field: "x" } }, false),
+      mainLayer(detailPointSize, { domain: { param: "brush", field: "x" } }, false, true),
     ],
   };
 
@@ -573,6 +692,43 @@ function chartSpec(field, xKey, data, extra, extraTooltip, withZoom) {
     background: null,
     config: vlConfig(),
     vconcat: [overview, detail],
+  };
+}
+
+// Free-fall's own charts all plot density on x (that's the natural
+// independent variable for a collapse), leaving elapsed time visible
+// only in tooltips -- this opt-in companion chart puts time on x and
+// density on y instead, the same run's own rows, no new computation.
+// Always paired with a crosshair synced to the Temperature chart (see
+// hoverLinkLayers()/wireHoverLink() above) -- on its own, a separate
+// density-vs-time chart is just a second static curve; the point of
+// having both is seeing which point on one corresponds to the other as
+// the mouse moves, per the user's own framing of this feature.
+function tnChartSpec(data) {
+  const xScale = { type: "symlog" }; // t=0 (the initial condition) is real here too
+  const xAxis = { title: null, labelOverlap: "greedy", labelAngle: -40, labelExpr: TIME_LABEL_EXPR };
+  const tooltip = [
+    { field: "i", title: "step", type: "quantitative" },
+    { field: "tHuman", title: "t", type: "nominal" },
+    { field: "x", title: "n (cm⁻³)", type: "quantitative", format: ".3~g" },
+  ];
+  const pointSize = Math.max(6, Math.min(36, 2500 / Math.max(data.length, 1)));
+  return {
+    $schema: "https://vega.github.io/schema/vega-lite/v5.json",
+    width: 600, height: 220, background: null,
+    config: vlConfig(),
+    layer: [
+      {
+        data: { values: data },
+        mark: { type: "line", point: { filled: true, size: pointSize, opacity: 0.9 } },
+        encoding: {
+          x: { field: "t", type: "quantitative", scale: xScale, axis: xAxis },
+          y: { field: "x", type: "quantitative", scale: { type: "log" }, axis: { title: null } },
+          tooltip,
+        },
+      },
+      ...hoverLinkLayers(data, "t", "x", xScale),
+    ],
   };
 }
 
@@ -792,7 +948,7 @@ function redraw() {
   // gamma": pick thermal energy mode (ge is what the solver actually
   // conserves/evolves) and watch gamma in the tooltip while T bends.
   const rows = result.x.map((x, i) => ({
-    x, T: result.T[i], ge: result.s[i].ge, ion: result.ion[i],
+    x, t: result.t[i], T: result.T[i], ge: result.s[i].ge, ion: result.ion[i],
     gamma: thermodynamicGamma(result.s[i]),
     i, dt: result.dt[i], tHuman: formatTimeAuto(result.t[i]),
   }));
@@ -814,8 +970,22 @@ function redraw() {
       encoding: { x: { field: "x", type: "quantitative" } },
     });
   }
-  vegaEmbed("#chart-T", chartSpec(tempField, result.xKey, rows, tempExtra, gammaTooltip, temperatureZoomEnabled),
-            { actions: false, renderer: "svg" });
+  // The density-vs-time chart only makes sense in free-fall mode (cool
+  // mode holds density fixed, so it'd just be a flat line) -- linking
+  // only actually happens once both charts genuinely exist.
+  const linkHover = tnChartEnabled && currentMode === "freefall";
+  vegaEmbed("#chart-T", chartSpec(tempField, result.xKey, rows, tempExtra, gammaTooltip, temperatureZoomEnabled, linkHover),
+            { actions: false, renderer: "svg" }).then((res) => {
+    tChartView = res.view;
+    if (linkHover) wireHoverLink(tChartView, "x", "t", rows, () => tnChartView);
+    if (temperatureZoomEnabled) {
+      res.view.addSignalListener("brush", (name, value) => updateZoomTimespan(value, rows));
+      updateZoomTimespan(null, rows); // nothing selected yet on a fresh embed
+    } else {
+      document.getElementById("zoom-timespan").textContent = "";
+    }
+  });
+  updateTnChart(rows, linkHover);
   const ionRows = [];
   for (let i = 0; i < result.x.length; i++) {
     const base = { x: result.x[i], i, dt: result.dt[i], tHuman: formatTimeAuto(result.t[i]) };
@@ -925,6 +1095,38 @@ function downloadResultsCsv() {
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
+}
+
+// The density-vs-time companion chart -- opt-in (the "show" checkbox
+// next to it), and only meaningful in free-fall mode (cool mode holds
+// density fixed, so there's no density-vs-time curve to show at all).
+// Graceful placeholder text either way, matching the rest of this page's
+// convention (e.g. the species chart's "toggle one to plot it") rather
+// than an empty box or a misleading flat line.
+function updateTnChart(rows, linkHover) {
+  const el = document.getElementById("chart-tn");
+  if (!tnChartEnabled) {
+    tnChartView = null;
+    el.innerHTML = '<p class="chart-placeholder">Toggle "show" above to view.</p>';
+    renderLatex("ylabel-tn", "density");
+    renderLatex("xlabel-tn", "time");
+    return;
+  }
+  if (currentMode !== "freefall") {
+    tnChartView = null;
+    el.innerHTML = '<p class="chart-placeholder">Only meaningful in free-fall mode '
+      + '(density is held fixed in cool mode).</p>';
+    renderLatex("ylabel-tn", "density");
+    renderLatex("xlabel-tn", "time");
+    return;
+  }
+  el.innerHTML = "";
+  vegaEmbed(el, tnChartSpec(rows), { actions: false, renderer: "svg" }).then((res) => {
+    tnChartView = res.view;
+    if (linkHover) wireHoverLink(tnChartView, "t", "x", rows, () => tChartView);
+  });
+  renderLatex("ylabel-tn", "density");
+  renderLatex("xlabel-tn", "time");
 }
 
 function setMode(mode) {
@@ -1250,6 +1452,10 @@ function initPage(config) {
   document.getElementById("T-mode-ge").addEventListener("click", () => setTemperatureDisplayMode("ge"));
   document.getElementById("T-zoom-toggle").addEventListener("change", (e) => {
     temperatureZoomEnabled = e.target.checked;
+    scheduleRedraw();
+  });
+  document.getElementById("tn-chart-toggle").addEventListener("change", (e) => {
+    tnChartEnabled = e.target.checked;
     scheduleRedraw();
   });
   document.getElementById("ic-preset").addEventListener("change", (e) => applyPreset(e.target.value));

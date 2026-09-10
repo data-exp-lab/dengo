@@ -2931,3 +2931,81 @@ pages themselves are completely unaffected (all three networks, both
 themes, zero console errors) -- adding two new unreferenced files
 changes nothing about what `app.js` does. Full `pytest` suite
 unaffected (120/120) -- no Python path touched.
+
+**2026-09-10, new branch `wasm-tn-chart-crosshair`: an opt-in density-
+vs-time chart, a crosshair synced between it and the Temperature chart,
+and a time-span readout for the zoom feature's brush.** Free-fall's own
+charts all plot density on x, leaving elapsed time visible only in
+tooltips -- asked whether putting time on a secondary top axis was
+feasible; it wasn't a clean fit (density and time are related by
+free-fall's own inverse-square-root law, not a simple linear/log
+transform, so a naive secondary axis's gridlines wouldn't align with
+the data at all). Asked instead for a genuinely new chart (time vs.
+density, gated behind a checkbox like the zoom feature) with a hover
+crosshair mirrored onto the Temperature chart, plus (mid-build) two
+smaller asks: points only on the zoomed chart, not the overview, and a
+time-span readout when brushing to zoom.
+
+**Points-on-overview removed** (`mainLayer()`'s new `showPoints` param,
+default `true`, `false` only for the overview layer when zoom is on) --
+now only the detail/zoomed chart shows dots, the overview stays a plain
+line. Small, mechanical, verified via DOM inspection (one symbol group
+instead of two) and a screenshot.
+
+**New `tnChartSpec()`** (`app.js`): a second, independently-embedded
+chart (`#chart-tn`), x=time/y=density, built from the exact same `rows`
+array `chart-T` already has -- no new computation, just a different
+pair of encodings. Gated behind a new "show" checkbox next to it (off
+by default); shows a placeholder in cool mode (density is held fixed
+there, so there's nothing to plot) and before being toggled on, same
+graceful-degradation convention as the species chart's "toggle one to
+plot it."
+
+**The hover crosshair was the harder piece, and worth explaining why:**
+Vega-Lite has no built-in mechanism for linking a selection across two
+*independently embedded* views (its own linked-selection recipes are
+all within one composed spec, like the zoom feature's brush). Given the
+brush-selection bug earlier in this project (relying on an assumption
+about Vega-Lite's internal compiled signal names, which turned out
+wrong), this was deliberately built and verified as an isolated,
+minimal standalone repro *before* touching the real page -- same
+methodology, since this had even more surface for exactly that kind of
+surprise. Landed on splitting it into two independent, well-documented
+touchpoints rather than one clever mechanism: (1) a `point` selection
+with `nearest: true` on an *invisible* point layer (`nearest` isn't
+supported on a `line` mark directly -- confirmed directly, it warns and
+does nothing without this separate capture layer), read back via the
+one stable, documented API this needs, `view.addSignalListener(name,
+...)`; (2) the actual crosshair is a `rule` mark bound to a small,
+explicitly-managed named dataset (`cursor`), pushed to via
+`view.data("cursor", [...]).runAsync()` -- ordinary first-class Vega
+API, not a selection-driven conditional encoding. Both this chart's own
+crosshair and the *other* chart's mirrored one are driven the same way
+from one JS callback (`wireHoverLink()`), keyed off the row's own
+step index so no cross-field translation/interpolation is needed --
+both charts already have every field for the same row.
+
+**Brush time-span readout**: reads the zoom feature's own existing
+`"brush"` param (the same one that already drives the detail view's
+domain) via `addSignalListener`, linearly interpolates the selected
+density range's two endpoints against the run's own `(x, t)` pairs
+(`interpolateT()`), and writes "Selected range: 513 kyr to 556 kyr
+(Δt ≈ 42.7 kyr)" into a note under the chart -- clears when the
+selection does. The brush only ever operates in density; without this
+there'd be no way to tell from the zoomed-in view alone how much real
+time a given zoomed stretch actually covers.
+
+Verified: full regression across all three networks, both themes, and
+every combination of the zoom/tn-chart toggles together (each alone,
+both together, plus a sweep run and a CSV download on top) -- zero
+console errors throughout. Confirmed directly, not assumed: the
+crosshair's underlying `cursor` datasets update correctly and
+bit-exactly on real mouse movement in both directions (hovering either
+chart moves both), confirmed visually via screenshots showing the
+marker on both charts at once; the brush text appears/updates/clears
+correctly using the zoom feature's own already-established clear
+gesture (a drag, not a plain click -- confirmed by replaying the
+original zoom-clear test unchanged against this build, ruling out a
+regression before concluding the behavior was already like this).
+Full `pytest` suite unaffected (120/120) -- pure `app.js`/HTML-template
+change.
