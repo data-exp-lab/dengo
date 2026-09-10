@@ -68,6 +68,12 @@ a { color: var(--accent); }
 .row { margin-bottom: 16px; }
 .row label { display: flex; justify-content: space-between; font-size: 0.9em; margin-bottom: 4px; }
 .row label span.val { font-variant-numeric: tabular-nums; color: var(--accent); font-weight: 600; }
+/* A plain checkbox + its own text label, side by side -- unlike .row
+   label's flex/space-between (built for a label-and-numeric-readout
+   pair, like every slider above it), this one just wants the box and
+   its text sitting next to each other. */
+.row-inline { margin-bottom: 12px; }
+.checkbox-label { display: flex; align-items: center; gap: 6px; font-size: 0.9em; cursor: pointer; }
 input[type=range] { width: 100%; }
 #ic-preset {
   width: 100%; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border);

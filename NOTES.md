@@ -3556,3 +3556,83 @@ without, zoom/re-zoom/clear, and the two specific bugs above (axis
 match with the shock both in and out of the zoomed range; chart-box
 scroll absence at 1158px through 3840px). Full `pytest` suite
 unaffected (120/120).
+
+**2026-09-10, continued: a free-fall collapse-rate multiplier, an
+exposed solver tolerance, and a shock on/off checkbox.**
+
+Three new free-fall controls, all implementable without touching the
+compiled dengo-generated solver at all -- confirmed directly before
+building anything: the solver's own C++ already treats convergence
+tolerance as a genuine runtime argument (`dengo_wasm_step(dt, maxIter,
+tolerance)`, already called with a literal `1e-5` at every call site),
+and the collapse-rate question is purely about a rate constant in this
+file's own free-fall math, nothing the solver ever sees.
+
+**Collapse rate (× free-fall)** -- a new slider multiplying the
+ordinary free-fall compression rate by a user-chosen factor (0.01x to
+100x, log-scale), answering a direct thought-experiment question ("is
+there value in... collapsing faster/slower than free-fall by some
+factor"). Judged yes: real collapsing gas doesn't necessarily contract
+at exactly the free-fall rate (rotation/magnetic fields/pressure can
+slow it below free-fall; additional infall/turbulence can speed it up
+past it), and how much *real time* the chemistry gets per decade of
+density to react is exactly the physically meaningful thing this
+project's whole 1500-2500K fragmentation question already cares about.
+Implemented as a single new constant, `FF_RATE_CONST`, with a
+`collapseFactor` multiplier applied consistently everywhere it's used
+-- both the actual density-compression formula *and* the free-fall time
+used to size the adaptive step -- so a step still represents the same
+fractional density change regardless of the factor (the two scalings
+cancel out of the step-sizing math), it just represents proportionally
+more or less real elapsed time. Confirmed directly: at 10x, elapsed
+simulated time for the same density range dropped to almost exactly
+1/10th of the baseline; at 0.1x, it rose to almost exactly 10x --
+matching the intended physics exactly, not just running without
+erroring.
+
+**Solver tolerance** -- a new slider (10^-8 to 10^-3, default 10^-5,
+matching this page's previous hardcoded value) exposing the same
+tolerance argument every `step()` call already accepted, threaded
+through both `runFreefall()` and `runConstantDensity()`'s single-run
+path (not the sweep path -- sweep is out of scope for now, deliberately
+left on its own unexposed `1e-5`, matching how it already worked).
+Confirmed directly: loosening it measurably speeds up the solve (206ms
+-> 106ms in one test run) with only a tiny change in the converged
+answer; tightening it measurably slows it down (206ms -> 505ms) with
+an equally tiny change the other way -- exactly the accuracy/speed
+trade a tolerance control should show, not a no-op.
+
+**Shock on/off checkbox** -- explicit "Enable shock" checkbox next to
+the existing shock density/Mach sliders, requested directly ("I know
+setting to Mach 1 does it, but I want it manually specifiable"). When
+unchecked, the *sliders themselves* also get visually disabled, and the
+Mach number actually passed into `runFreefall()` is forced to 1 (the
+same zero-strength/no-op limit `shockJumpFactors()` already treated as
+"no shock") regardless of the slider's own value -- but the slider's
+value itself is left untouched, so re-checking the box restores exactly
+the Mach number it was left at, instead of the old "set Mach to 1"
+approach silently discarding whatever it was set to. Confirmed
+directly: unchecking removes the "shock crossed at" chip from the run
+summary entirely (a real behavior change, not just a UI state); the
+Mach slider's own value is unchanged the whole time; re-checking
+reproduces the exact original with-shock result.
+
+One real regression caught and fixed while wiring these through:
+inserting the new parameters into `runFreefall()`'s and
+`runConstantDensity()`'s signatures shifted the positional arguments at
+their sweep call sites (`runSweep()`), which still call them with
+explicit trailing `undefined`s for the older parameters -- confirmed
+directly (by reading the call sites, not just assuming) and fixed by
+adding one more `undefined` at the affected call site so `forSweep`
+still lands in the right position; the other sweep call site needed no
+change (it never explicitly overrode anything past the first new
+parameter's position).
+
+Verified: real Emscripten rebuild, headless-Chrome regression across
+cool/free-fall modes, both themes, a network with H2 species and one
+without, collapse-rate at 1x/10x/0.1x (confirmed the resulting elapsed
+time scales correctly), tolerance at loose/tight/default (confirmed
+solve time and converged answer both move the expected direction), the
+shock checkbox's full on/off/on-again cycle, zoom/re-zoom/clear
+unaffected, and the CSV download button still enabling correctly. Full
+`pytest` suite unaffected (120/120).
