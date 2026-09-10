@@ -113,6 +113,15 @@ PAGE_TEMPLATE = """<!doctype html>
         (additional infall, turbulence). 10<sup>0</sup> = 1&times; is
         ordinary, unmodified free-fall.</p>
 
+      <label>step size: 10<sup>x</sup> &times; t<sub>ff</sub> <span class="val" id="ff-step-val"></span></label>
+      <input type="range" id="ff-step" min="-2.5" max="-1" step="0.1" value="-2">
+      <p class="preset-note">How large a fraction of the local free-fall
+        time each step advances -- smaller is finer-grained (more,
+        smaller steps; slower but more resolved, especially the
+        compress-then-react approximation each step itself makes) and
+        larger is coarser (fewer, bigger steps; faster but blockier).
+        10<sup>-2</sup> is this page's original, unexposed default.</p>
+
       <div class="row-inline">
         <label class="checkbox-label"><input type="checkbox" id="shock-enabled" checked> Enable shock</label>
       </div>

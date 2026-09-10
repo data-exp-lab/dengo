@@ -1,16 +1,16 @@
 :root {
   color-scheme: light dark;
   --bg: #ffffff; --fg: #1a1a1a; --muted: #666; --border: #d8d8d8;
-  --accent: #3366cc; --panel: #f7f7f9;
+  --accent: #3366cc; --panel: #f7f7f9; --warn: #b35900;
 }
 @media (prefers-color-scheme: dark) {
-  :root { --bg: #16181d; --fg: #e8e8e8; --muted: #9aa0a6; --border: #30333a; --panel: #1e2128; }
+  :root { --bg: #16181d; --fg: #e8e8e8; --muted: #9aa0a6; --border: #30333a; --panel: #1e2128; --warn: #ffb454; }
 }
 /* explicit overrides, for a page-provided toggle -- unused today (the
    page currently only follows the OS preference above) but harmless to
    have ready, and mirrors the pattern other dengo surfaces use. */
-:root[data-theme="dark"] { --bg: #16181d; --fg: #e8e8e8; --muted: #9aa0a6; --border: #30333a; --panel: #1e2128; }
-:root[data-theme="light"] { --bg: #ffffff; --fg: #1a1a1a; --muted: #666; --border: #d8d8d8; --panel: #f7f7f9; }
+:root[data-theme="dark"] { --bg: #16181d; --fg: #e8e8e8; --muted: #9aa0a6; --border: #30333a; --panel: #1e2128; --warn: #ffb454; }
+:root[data-theme="light"] { --bg: #ffffff; --fg: #1a1a1a; --muted: #666; --border: #d8d8d8; --panel: #f7f7f9; --warn: #b35900; }
 * { box-sizing: border-box; }
 body {
   margin: 0; background: var(--bg); color: var(--fg);
@@ -46,6 +46,7 @@ a { color: var(--accent); }
 .run-summary .label { color: var(--muted); font-size: 0.85em; margin-right: 5px; }
 .run-summary strong { font-variant-numeric: tabular-nums; font-weight: 600; }
 .run-summary .stat-extra { color: var(--muted); font-size: 0.85em; }
+.run-summary .stat-warn { color: var(--warn); font-weight: 600; white-space: normal; }
 .layout { display: grid; grid-template-columns: 340px 1fr; gap: 24px; align-items: start; }
 @media (max-width: 760px) { .layout { grid-template-columns: 1fr; } }
 .panel {
