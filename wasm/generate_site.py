@@ -128,19 +128,22 @@ PAGE_TEMPLATE = """<!doctype html>
         <button type="button" id="T-mode-T" class="active">temperature</button>
         <button type="button" id="T-mode-ge">thermal energy</button>
       </div>
-      <div id="chart-run"></div>
       <p class="preset-note" id="zoom-timespan"></p>
+      <div id="chart-run"></div>
       <p class="preset-note">One combined view of the current run (a
-        single Vega-Lite spec): in free-fall mode, density-vs-time and
-        temperature-vs-density side by side, each with its own zoomed-in
-        row underneath -- drag a rectangle on either top chart to select
-        a range and see it enlarged below it (the top chart itself never
-        pans or rescales, only the selection box moves; drag an empty
-        area to clear it). Cool mode shows just the one column, since
-        density doesn't change there. Every panel (including the
-        ionization/H₂ and species charts below) shares one crosshair:
-        hover anywhere to see the same step marked everywhere at once.
-        The shaded band on the temperature panel marks 1500-2500 K, the
+        single Vega-Lite spec), stacked vertically: in free-fall mode,
+        density vs. time, then temperature vs. density, then ionization/
+        H₂ fraction, then species mass fraction -- cool mode drops the
+        density-vs-time panel (density is held constant there, so it'd
+        just be a flat line). Drag a rectangle on the
+        temperature-vs-density (or, in cool mode, temperature-vs-time)
+        panel to zoom every *other* panel sharing that axis to the same
+        range at once; that one panel itself stays at the full range,
+        showing the selection box -- click it (without dragging) to
+        clear the zoom. The selected range's real elapsed time is read
+        out just above. Every panel shares one crosshair: hover anywhere to
+        see the same step marked everywhere at once. The shaded band on
+        the temperature panel marks 1500-2500 K, the
         H2-formation-heating-driven fragmentation regime this project
         targets -- orientation only, not a solver threshold. Click a
         legend entry (ionization/H₂, species) to isolate just that
