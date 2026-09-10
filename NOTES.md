@@ -3009,3 +3009,130 @@ original zoom-clear test unchanged against this build, ruling out a
 regression before concluding the behavior was already like this).
 Full `pytest` suite unaffected (120/120) -- pure `app.js`/HTML-template
 change.
+
+**2026-09-10: unify the free-fall/cool-mode charts, ionization/H2 chart,
+and species chart into one Vega-Lite spec (sweep charts untouched).**
+
+Previously four separate charts (temperature, optionally a density-vs-time
+companion behind a checkbox, ionization/H2, species with a checkbox
+subset and a density/mass-fraction toggle) are now one composed Vega-Lite
+spec per run, `runViewSpec()`, driving a single `#chart-run` div. Three
+requirement changes came with it, all from the user directly:
+- Species: always all of them, always mass fraction (removes both the
+  species checkbox row and the density/mass-fraction toggle -- one fewer
+  decision for the user, and mass fraction is the physically comparable
+  quantity across species of very different absolute abundance anyway).
+- Species/ionization selection no longer checkboxes -- both now use
+  Vega-Lite's own "Legends as Interactive Filters" recipe (a `point`
+  selection with `bind: "legend"`, `opacity` conditioned on it): click a
+  legend entry to isolate it, click again to show all. First-class
+  Vega-Lite, not a bespoke mechanism.
+- Every panel (temperature, density, zoomed views, ionization, species)
+  shares one crosshair via Vega-Lite's own `resolve: {selection: {hover:
+  "global"}}`, replacing last week's entirely hand-rolled
+  `wireHoverLink()`/`view.data("cursor",...)` cross-chart JS bridge for
+  this same feature -- confirmed directly in an isolated repro before
+  relying on it (see below), the declarative version is strictly less
+  code and no longer needs a manually-managed shared dataset at all.
+  Each overview panel's crosshair line is now just a `rule` mark with
+  `transform: [{filter: {param: "hover", empty: false}}]`, reading the
+  resolved selection directly -- no signal listener needed for
+  rendering, only for the (still JS-side) brush timespan readout.
+
+Sweep charts explicitly excluded from this ("skip the sweep charts for
+this") -- they still use the old per-chart `chartSpec()`-style path,
+untouched, and still show the old checkbox-driven species subset.
+
+**A real, reproduced-in-isolation Vega bug shaped the final
+composition.** The natural structure -- `vconcat` of `hconcat` rows
+(overview row, zoomed row) plus ion/species panels as further `vconcat`
+siblings -- throws real Vega runtime `TypeError`s on hover
+("Cannot read properties of undefined (reading '0')" / "...('datum')")
+as soon as *any* panel with an `interval` (brush) selection and *any*
+panel with a globally-resolved `point` (hover) selection coexist
+anywhere beneath two or more levels of concat nesting (`vconcat: [{hconcat:
+[...]}]` alone is enough, even with only one row and only one panel
+declaring the brush). It does not reproduce with only one level of
+nesting (a flat top-level `hconcat` or `vconcat`, brush and hover
+included), confirmed with a battery of minimal repros using placeholder
+data completely unrelated to this app (see below) before touching
+`app.js` at all, and confirmed again against a real build under a
+stress test that swept the mouse across empty regions, multiple panels,
+and both directions repeatedly -- the flat version threw nothing; every
+nested variant, several restructurings of it (`hconcat`-of-`vconcat`
+columns instead of `vconcat`-of-`hconcat` rows, explicit
+`resolve: {selection: {brushX: "independent"}}`, per-selection `resolve:
+"global"` on the select objects themselves, reordering layers, dropping
+`nearest`/`fields` from the hover selection), threw the same pair of
+errors. The fix: the whole composition is one single flat top-level
+`concat` (with `columns: 2` doing the row-wrapping) with every panel --
+overview, zoomed, ion, species alike -- as a direct sibling in that one
+array, never wrapped in an intermediate row/column spec. The one real
+cost: ion/species panels have no natural row partner, so they end up
+paired with each other at `PANEL_WIDTH` (620px) instead of each
+spanning the full combined width the way they used to when built as
+`vconcat` siblings -- a genuinely fine trade in practice, confirmed by
+screenshot (two legend-driven charts side by side, each still plenty
+readable with its horizontal wrapped legend underneath).
+
+**Legend position**: also fixed along the way, found via a screenshot
+(the user caught it too, independently: "Legend seems to bump into the
+species. Shouldn't the legend be down at the bottom, too?"). Both the
+ionization and species legends now use `orient: "bottom", direction:
+"horizontal"` (species additionally `columns: 0` to auto-wrap many
+entries) instead of the earlier default/`top-right` placement, which
+had been overlapping the first panel of the (then still nested)
+composition rather than sitting near its own panel.
+
+**Captions**: kept the previous explanatory prose (one consolidated
+`.preset-note` paragraph below the whole combined chart, in the HTML
+template, not the spec -- Vega-Lite has no rich-text/paragraph mark, so
+this is the practical way to "include that as captions inside the
+spec"), plus a short bold `title` on every individual panel inside the
+spec itself (e.g. "density vs. time", "Species mass fraction (click a
+legend entry to isolate it)") as the more literal in-spec captioning
+the user also asked for.
+
+**Axis titles**: plain Vega-Lite `axis: {title: "...", titleFontSize:
+10}` strings now (e.g. "T (K)", "n (cm⁻³)", "X_i (mass frac.)") instead
+of the external-KaTeX-div-next-to-chart trick (`renderLatex`/
+`AXIS_LATEX`) the old one-chart-per-box layout used -- a deliberate
+simplification, not just a workaround: one combined spec with several
+differently-labeled panels can't cleanly share one external label div
+per axis the way separate single-chart boxes could. `renderLatex`/
+`AXIS_LATEX` themselves are unchanged and still used by the untouched
+sweep charts.
+
+**Page width**: `body` max-width 1100px -> 1700px, `.layout` sidebar
+column 320px -> 340px ("there's a lot of remaining real estate on my
+desktop monitor... If we need to make the charts wider we should do
+that, too").
+
+Removed entirely: `hoverLinkLayers()`, `wireHoverLink()`, the old
+`chartSpec()`/`tnChartSpec()`/`ionizationChartSpec()`/
+`speciesChartSpec()`/`updateTnChart()`/`selectedSpeciesNames()`/
+`setSpeciesDisplayMode()`/`buildSpeciesToggle()`, and the
+`temperatureZoomEnabled`/`tnChartEnabled`/`tChartView`/`tnChartView`/
+`speciesDisplayMode` state vars, plus their HTML (species checkboxes,
+species mode buttons, T-zoom-toggle/tn-chart-toggle checkboxes) and CSS
+(`.zoom-toggle`, `.species-toggle-controls`, `.species-toggle .swatch`).
+`.species-toggle`'s base rules are kept -- still used by `rates.js`'s
+own `#rate-toggle`.
+
+Verified: full rebuild (real Emscripten build, all three fiducial
+networks) + headless-Chrome/Playwright against the real generated site,
+not just the isolated repros -- zero console errors across cool mode,
+freefall mode, both themes, a network with H2 species and one without
+(`hydrogen_minimal`), a stress-tested mouse sweep across every panel and
+both overview columns (including deliberately crossing empty regions to
+exercise the selection-clear path), a brush-zoom drag with correct
+timespan text ("Selected range: 0 s to 553 kyr (Δt ≈ 553 kyr)."), and a
+legend click. Full `pytest` suite unaffected (120/120) -- pure JS/HTML/
+CSS change, confirmed by rerunning it after this work, not assumed.
+
+Not yet shipped -- staying on local `main`, no branch/commit/push yet,
+per the same "don't commit until I say so" instruction this feature
+started under; a fresh go-ahead is needed for this specific piece of
+work before it ships (the last one covered the now-superseded
+density-vs-time-chart-with-checkbox feature, already shipped separately
+as PR #19).

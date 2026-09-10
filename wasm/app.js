@@ -13,13 +13,10 @@ const YEAR = 3.1557e7; // Julian year, seconds -- matches primordial_cooling.py'
 let mod, idx, speciesNames;
 let init, step, statePtr, rhsPtr, temperature;
 let currentMode = "cool";
-let speciesDisplayMode = "density"; // "density" (cm^-3) or "massfrac" (X_i, dimensionless)
 let temperatureDisplayMode = "T"; // "T" (K) or "ge" (specific internal energy, erg/g)
-let temperatureZoomEnabled = false; // opt-in: drag-to-zoom detail view under the Temperature chart
 let lastResult = null; // the current mode's most recent full run (redraw()'s own result), for CSV export
 let pageTitle = "dengo"; // network title, for the exported CSV's filename only
-let tnChartEnabled = false; // opt-in: the density-vs-time companion chart + its crosshair link to chart-T
-let tChartView = null, tnChartView = null; // current Vega View objects, re-set on every redraw() -- see wireHoverLink()
+let runView = null; // the current run-view's Vega View object, re-set on every redraw()
 
 // -- LaTeX axis labels (rendered via KaTeX, not Vega-Lite's own plain-text
 // titles -- see NOTES.md for why: Vega-Lite axis titles are just SVG
@@ -472,73 +469,6 @@ function runFreefall(nH, T, fractions, logNTarget, logNShock, machShock, safetyF
 
 const FIELD_TITLE = { T: "T (K)", ge: "ε (erg/g)" };
 
-// Two extra layers driving a hover crosshair that stays in sync between
-// two *independently embedded* charts (the Temperature chart and the
-// opt-in density-vs-time chart) -- not something Vega-Lite has a
-// built-in cross-view mechanism for (its own linked-selection recipes
-// are all within one composed spec, like the zoom feature's brush
-// above). Deliberately split into two concerns kept as separate,
-// well-documented Vega API touchpoints rather than one clever
-// mechanism, after the brush selection bug above already showed how
-// fragile assuming Vega-Lite's internal compiled-signal names can be:
-//   1. A `point` selection with `nearest: true` on an *invisible* point
-//      layer (the "nearest" transform isn't supported on a line mark
-//      itself, confirmed directly -- it warns and silently does nothing
-//      useful without this separate capture layer) finds which row the
-//      mouse is closest to, restricted to horizontal distance only
-//      (`encodings: ["x"]`) so it behaves like a vertical crosshair, not
-//      a 2D nearest-neighbor search. Reading its result back out uses
-//      only the one stable, documented touchpoint this needs:
-//      `view.addSignalListener(paramName, ...)`, giving the selected
-//      row's own field value(s) directly (`value[xField]`) -- no
-//      reliance on any further internal signal-naming details.
-//   2. The actual crosshair line is a `rule` mark bound to a small,
-//      explicitly-managed named dataset (`cursor`) that JS pushes new
-//      values into via `view.data("cursor", [...]).runAsync()` --
-//      ordinary, first-class Vega API, not a selection-driven
-//      conditional encoding. Both this chart's own crosshair and the
-//      *other* chart's mirrored one are driven the same way, from the
-//      one JS callback in wireHoverLink() below.
-function hoverLinkLayers(data, xField, yField, xScale) {
-  return [
-    {
-      data: { values: data },
-      mark: { type: "point", opacity: 0 },
-      encoding: {
-        x: { field: xField, type: "quantitative", scale: xScale },
-        y: { field: yField, type: "quantitative" },
-      },
-      params: [{
-        name: "hover",
-        select: { type: "point", on: "pointermove", nearest: true, encodings: ["x"], fields: [xField], clear: "pointerout" },
-      }],
-    },
-    {
-      data: { name: "cursor" },
-      mark: { type: "rule", strokeDash: [4, 3], opacity: 0.8, color: isDarkMode() ? "#ffd54f" : "#c77700" },
-      encoding: { x: { field: "v", type: "quantitative" } },
-    },
-  ];
-}
-
-// Reads this view's own "hover" selection (see hoverLinkLayers() above)
-// and mirrors it onto both this chart's own crosshair and, if the
-// paired chart currently exists, the other one's -- via
-// `getOtherView()` rather than a captured reference, since the other
-// chart may not exist yet (or may be re-created) at the time this is
-// called. `ownField`/`otherField` are which of a row's fields each
-// chart's own x-axis uses (e.g. "x" (density) for the Temperature
-// chart, "t" (time) for the density-vs-time chart).
-function wireHoverLink(view, ownField, otherField, rows, getOtherView) {
-  view.addSignalListener("hover", (name, value) => {
-    const sel = value && value[ownField];
-    const row = sel && sel.length ? rows.find((r) => r[ownField] === sel[0]) : null;
-    view.data("cursor", row ? [{ v: row[ownField] }] : []).runAsync();
-    const other = getOtherView();
-    if (other) other.data("cursor", row ? [{ v: row[otherField] }] : []).runAsync();
-  });
-}
-
 // Elapsed time at an arbitrary density `xVal`, linearly interpolated
 // between whichever two adjacent rows bracket it (rows are sorted
 // ascending by x -- density strictly increases over a free-fall run).
@@ -561,11 +491,11 @@ function interpolateT(rows, xVal) {
   return a.t + ((xVal - a.x) / (b.x - a.x)) * (b.t - a.t);
 }
 
-// Reads the zoom feature's own "brush" selection (the same param
-// chartSpec() attaches to the overview layer) and shows what elapsed
-// *time* that dragged density range corresponds to -- the brush itself
-// only ever operates in density, so without this there'd be no way to
-// tell from the zoomed view alone how much real time a given zoomed-in
+// Reads the Temperature-vs-density column's own "brushTemp" selection
+// (see metricPanel()/runViewSpec() above) and shows what elapsed *time*
+// that dragged density range corresponds to -- the brush itself only
+// ever operates in density, so without this there'd be no way to tell
+// from the zoomed view alone how much real time a given zoomed-in
 // stretch actually spans.
 function updateZoomTimespan(value, rows) {
   const el = document.getElementById("zoom-timespan");
@@ -578,156 +508,121 @@ function updateZoomTimespan(value, rows) {
     + `(Δt ≈ ${formatTimeAuto(tHi - tLo)}).`;
 }
 
-function chartSpec(field, xKey, data, extra, extraTooltip, withZoom, withHoverLink) {
-  // Point markers double as an annotation of *where* the adaptive
-  // stepper actually placed a step -- their spacing on the log x-axis
-  // directly shows the step-size ramp (small at first, growing ~2x per
-  // step; see BE_chem_solve.C / NOTES.md). Always drawn (not just below
-  // some point-count cutoff), sized down as steps pile up so a
-  // few-thousand-step free-fall run doesn't turn into a solid smear.
-  const n = data.length;
-  const overviewPointSize = Math.max(6, Math.min(36, 2500 / Math.max(n, 1)));
-  // The zoomed detail view below is specifically for looking closely at
-  // individual steps (e.g. runFreefall's shock-refinement points) -- its
-  // dots are always drawn at a comfortably visible fixed size regardless
-  // of how many points the whole run has, since that's the point of
-  // zooming in at all.
-  const detailPointSize = 50;
+// -- One unified spec for the whole current-run view --------------------
+// Everything below builds ONE composed Vega-Lite spec (Temperature/
+// density panels, the ionization/H2 chart, the species chart), all
+// sharing one crosshair and each zoom pair's own brush -- replacing what
+// used to be several independently-`vegaEmbed()`-ed charts kept in sync
+// by hand-rolled JS (view.addSignalListener() + view.data().runAsync()
+// puppeting one view from another's events). That worked, but Vega-Lite
+// already has a real, documented feature for exactly this ("Multi-View
+// Displays": `resolve: {selection: {name: "global"}}` shares one
+// selection param across every sibling view in a composition) -- once
+// everything is *one* spec, there's no second view left to bridge by
+// hand, and the whole class of "which of two independently-resolving
+// vegaEmbed() promises won a race" bugs (see NOTES.md) stops being
+// possible, not just handled.
 
+const PANEL_WIDTH = 620, OVERVIEW_HEIGHT = 150, DETAIL_HEIGHT = 170;
+
+function crosshairColor() {
+  return isDarkMode() ? "#ffd54f" : "#c77700";
+}
+
+// The shared crosshair: a `rule` mark filtered by the one "hover"
+// selection every panel below either declares (the first one built) or
+// merely references (via the top-level `resolve` -- see runViewSpec()).
+// Filtering by `i` (each row's own step index), not by whatever field
+// this panel's x-axis happens to encode, is what lets a density-axis
+// panel and a time-axis panel share the exact same selection at all --
+// every panel's data already carries `i`, so this works regardless of
+// what's actually plotted, and it's immune to the one real edge case
+// that ruled out using `x`/`t` directly: runFreefall's shock-refinement
+// can give two adjacent rows the *same* elapsed time (the instantaneous
+// post-jump point), which would make `t` ambiguous as a join key -- `i`
+// never is.
+function crosshairLayer(data, xField) {
+  return {
+    data: { values: data },
+    transform: [{ filter: { param: "hover", empty: false } }],
+    mark: { type: "rule", strokeDash: [4, 3], opacity: 0.85, color: crosshairColor() },
+    encoding: { x: { field: xField, type: "quantitative" } },
+  };
+}
+
+// nearest-by-x-pixel-distance only (`encodings: ["x"]`) so this behaves
+// like a vertical crosshair, not a 2D nearest-neighbor search; `line`
+// marks don't support `nearest` directly (confirmed directly -- it
+// warns and does nothing without a separate point-mark capture layer,
+// which is why this is its own tiny invisible layer, not part of the
+// visible line).
+function hoverCaptureLayer(data, xField, yField) {
+  return {
+    data: { values: data },
+    mark: { type: "point", opacity: 0 },
+    encoding: {
+      x: { field: xField, type: "quantitative" },
+      y: { field: yField, type: "quantitative" },
+    },
+    params: [{
+      name: "hover",
+      select: { type: "point", on: "pointermove", nearest: true, encodings: ["x"], fields: ["i"], clear: "pointerout" },
+    }],
+  };
+}
+
+// One "metric vs x" panel -- used for both zoom levels of both the
+// density-vs-time and temperature-vs-density columns. `xKind` is
+// "time" or "density" (axis scale/formatting only); `brushName`, when
+// given, attaches this panel's own zoom-brush (scoped to just this one
+// layer -- see the note on that in NOTES.md, a selection declared at a
+// layered view's outer level gets incorrectly projected onto every
+// layer in it, including `extra` layers like the shock-event rule that
+// have no x field at all); `xDomainFromBrush`, when given, binds this
+// panel's x-domain to *another* panel's brush by name -- the standard
+// Vega-Lite "zoom to a dragged range" recipe, still exactly as before.
+function metricPanel({ data, xField, yField, xKind, yTitle, tooltip, extra, showPoints, pointSize, brushName, xDomainFromBrush, withHoverParam, title }) {
   const xAxis = {
-    title: null, labelOverlap: "greedy",
-    // human-unit labels ("254 kyr") run wider than the plain numbers
-    // this axis used to show, so angle them -- greedy overlap removal
-    // alone still let neighbors visually touch on a busy log axis with
-    // many same-decade ticks.
-    labelAngle: xKey === "time" ? -40 : 0,
-    labelExpr: xKey === "time" ? TIME_LABEL_EXPR : undefined,
+    // No external KaTeX-rendered label div for this one shared axis
+    // title the way single-chart panels used to have -- with several
+    // differently-labeled panels now inside one combined spec, a real
+    // (plain, not LaTeX) Vega-Lite axis title per panel is simpler than
+    // trying to externally position several correctly. Genuinely a
+    // deliberate simplification, not just a workaround -- these are all
+    // short unit-bearing strings anyway ("T (K)", "n (cm⁻³)"), which
+    // read fine without full math typesetting.
+    title: xKind === "time" ? "t (s)" : "n (cm⁻³)",
+    titleFontSize: 10, labelOverlap: "greedy",
+    labelAngle: xKind === "time" ? -40 : 0,
+    labelExpr: xKind === "time" ? TIME_LABEL_EXPR : undefined,
   };
   // Time (unlike density) can legitimately be exactly 0 now that the
   // initial condition itself is plotted -- symlog (linear near zero,
   // log further out) shows that point instead of silently dropping it
-  // the way a pure log scale would. Shared with hoverLinkLayers()'s
-  // capture layer below so its invisible points land in exactly the
-  // same pixels as the visible line's.
-  const xScale = { type: xKey === "time" ? "symlog" : "log" };
-  const tooltip = [
-    { field: "i", title: "step", type: "quantitative" },
-    { field: "x", title: xKey === "time" ? "t (s)" : "n (cm⁻³)", type: "quantitative", format: ".3~g" },
-    { field: "tHuman", title: "t", type: "nominal" },
-    { field: "dt", title: "step Δt (s)", type: "quantitative", format: ".3~g" },
-    { field: field, title: FIELD_TITLE[field] || field, type: "quantitative", format: ".4~g" },
-    ...(extraTooltip || []),
-  ];
-
-  // `xDomain`, when given, is a `{domain: ...}` scale-property object
-  // spread in alongside the ordinary type -- used below to bind the
-  // detail view's x-axis to the overview's brush selection. `withBrush`
-  // attaches the brush selection itself to *this one layer* -- not to
-  // the outer multi-layer view, which is what a first attempt did and
-  // is exactly what triggered a "Duplicate signal name" error: a
-  // selection declared at a layered view's top level gets projected
-  // onto every layer in that view, including the band/shock-rule extra
-  // layers below that don't even have an x field, and Vega-Lite's
-  // compiler doesn't handle that cleanly. Scoping the selection to just
-  // the one layer that actually needs it avoids the whole problem.
-  function mainLayer(pointSize, xDomain, withBrush, showPoints = true) {
-    return {
-      data: { values: data },
-      mark: showPoints
-        ? { type: "line", point: { filled: true, size: pointSize, opacity: 0.9 } }
-        : { type: "line" },
-      encoding: {
-        x: { field: "x", type: "quantitative", scale: { ...xScale, ...(xDomain || {}) }, axis: xAxis },
-        y: { field: field, type: "quantitative", scale: { type: "log" }, axis: { title: null } },
-        tooltip,
-      },
-      ...(withBrush ? { params: [{ name: "brush", select: { type: "interval", encodings: ["x"] } }] } : {}),
-    };
-  }
-
-  // withHoverLink (opt-in, alongside the density-vs-time chart) adds a
-  // crosshair kept in sync with that separately-embedded chart -- see
-  // hoverLinkLayers()/wireHoverLink() above. Only on the primary view
-  // (plain, or the overview when zoom is also on) -- not the zoomed
-  // detail view below, to keep this bounded.
-  const hoverExtra = withHoverLink ? hoverLinkLayers(data, "x", field, xScale) : [];
-
-  // The zoom view is opt-in (gated behind the "zoom view" checkbox next
-  // to this chart) -- a plain single chart, no brush, is the plainer/
-  // more compact look this defaults away from being forced on everyone.
-  if (!withZoom) {
-    return {
-      $schema: "https://vega.github.io/schema/vega-lite/v5.json",
-      width: 600, height: 220, background: null,
-      config: vlConfig(),
-      layer: [...(extra || []), mainLayer(overviewPointSize), ...hoverExtra],
-    };
-  }
-
-  // Drag a rectangle on the overview (top) chart to select a range;
-  // its own axes never pan or rescale from that drag, only the
-  // selection rectangle itself moves. The detail (bottom) chart's axes
-  // zoom to match instead -- the standard Vega-Lite recipe of binding a
-  // second view's scale domain to an interval selection param, no
-  // custom pan/zoom event handling needed. Before anything is selected
-  // the detail view just shows the same full range as the overview.
-  // Points are the zoomed (detail) chart's job only -- the overview
-  // stays a plain line so its own point-count-driven sizing/shrinking
-  // (see overviewPointSize above) doesn't also fight for attention with
-  // the brush selection sitting on top of it.
-  const overview = {
-    width: 600, height: 140,
-    layer: [...(extra || []), mainLayer(overviewPointSize, undefined, true, false), ...hoverExtra],
+  // the way a pure log scale would.
+  const xScale = {
+    type: xKind === "time" ? "symlog" : "log",
+    ...(xDomainFromBrush ? { domain: { param: xDomainFromBrush, field: xField } } : {}),
   };
-  const detail = {
-    width: 600, height: 160,
-    layer: [
-      ...(extra || []),
-      mainLayer(detailPointSize, { domain: { param: "brush", field: "x" } }, false, true),
-    ],
+  const mainLayer = {
+    data: { values: data },
+    mark: showPoints
+      ? { type: "line", point: { filled: true, size: pointSize, opacity: 0.9 } }
+      : { type: "line" },
+    encoding: {
+      x: { field: xField, type: "quantitative", scale: xScale, axis: xAxis },
+      y: { field: yField, type: "quantitative", scale: { type: "log" }, axis: { title: yTitle, titleFontSize: 10 } },
+      tooltip,
+    },
+    ...(brushName ? { params: [{ name: brushName, select: { type: "interval", encodings: ["x"] } }] } : {}),
   };
-
   return {
-    $schema: "https://vega.github.io/schema/vega-lite/v5.json",
-    background: null,
-    config: vlConfig(),
-    vconcat: [overview, detail],
-  };
-}
-
-// Free-fall's own charts all plot density on x (that's the natural
-// independent variable for a collapse), leaving elapsed time visible
-// only in tooltips -- this opt-in companion chart puts time on x and
-// density on y instead, the same run's own rows, no new computation.
-// Always paired with a crosshair synced to the Temperature chart (see
-// hoverLinkLayers()/wireHoverLink() above) -- on its own, a separate
-// density-vs-time chart is just a second static curve; the point of
-// having both is seeing which point on one corresponds to the other as
-// the mouse moves, per the user's own framing of this feature.
-function tnChartSpec(data) {
-  const xScale = { type: "symlog" }; // t=0 (the initial condition) is real here too
-  const xAxis = { title: null, labelOverlap: "greedy", labelAngle: -40, labelExpr: TIME_LABEL_EXPR };
-  const tooltip = [
-    { field: "i", title: "step", type: "quantitative" },
-    { field: "tHuman", title: "t", type: "nominal" },
-    { field: "x", title: "n (cm⁻³)", type: "quantitative", format: ".3~g" },
-  ];
-  const pointSize = Math.max(6, Math.min(36, 2500 / Math.max(data.length, 1)));
-  return {
-    $schema: "https://vega.github.io/schema/vega-lite/v5.json",
-    width: 600, height: 220, background: null,
-    config: vlConfig(),
+    title: title ? { text: title, fontSize: 12, fontWeight: "bold", anchor: "start", offset: 6 } : undefined,
+    width: PANEL_WIDTH, height: showPoints ? DETAIL_HEIGHT : OVERVIEW_HEIGHT,
     layer: [
-      {
-        data: { values: data },
-        mark: { type: "line", point: { filled: true, size: pointSize, opacity: 0.9 } },
-        encoding: {
-          x: { field: "t", type: "quantitative", scale: xScale, axis: xAxis },
-          y: { field: "x", type: "quantitative", scale: { type: "log" }, axis: { title: null } },
-          tooltip,
-        },
-      },
-      ...hoverLinkLayers(data, "t", "x", xScale),
+      ...(extra || []), mainLayer,
+      ...(withHoverParam ? [hoverCaptureLayer(data, xField, yField)] : []),
+      crosshairLayer(data, xField),
     ],
   };
 }
@@ -737,102 +632,186 @@ function tnChartSpec(data) {
 // human-readable legend label) -- see ION_H2_LABELS/ION_H2_COLORS above.
 // h2 rows are simply absent for a network with no H2 species (rather
 // than plotting a bogus flat line), same graceful-degradation as the
-// status line's H2/H_tot readout.
-function ionizationChartSpec(xKey, rows) {
+// status line's H2/H_tot readout. Legend click isolates one series
+// (Vega-Lite's own "bind: legend" selection, an officially documented
+// recipe -- not a bespoke mechanism) instead of a fixed on/off toggle,
+// since there are only ever one or two series here anyway.
+function ionPanel(xKind, rows, width) {
   const n = rows.length;
   const pointSize = Math.max(4, Math.min(30, 2000 / Math.max(n, 1)));
   const palette = isDarkMode() ? ION_H2_COLORS.dark : ION_H2_COLORS.light;
-  // Built from what's actually *present* in `rows`, not unconditionally
-  // both labels -- a hardcoded domain would draw a legend entry for H2
-  // even on a network with no H2 species at all (no h2 rows are ever
-  // pushed for one; see redraw()), which is misleading on its own.
   const present = new Set(rows.map((r) => r.quantity));
   const domain = [ION_H2_LABELS.ion, ION_H2_LABELS.h2].filter((label) => present.has(label));
   const range = domain.map((label) => (label === ION_H2_LABELS.ion ? palette.ion : palette.h2));
   return {
-    $schema: "https://vega.github.io/schema/vega-lite/v5.json",
-    width: 600, height: 220, background: null,
-    config: vlConfig(),
-    data: { values: rows },
-    mark: { type: "line", point: { filled: true, size: pointSize, opacity: 0.9 } },
-    encoding: {
-      x: {
-        field: "x", type: "quantitative",
-        // Time (unlike density) can legitimately be exactly 0 now that
-        // the initial condition itself is plotted -- symlog (linear
-        // near zero, log further out) shows that point instead of
-        // silently dropping it the way a pure log scale would.
-        scale: { type: xKey === "time" ? "symlog" : "log" },
-        axis: {
-          title: null, labelOverlap: "greedy",
-          labelAngle: xKey === "time" ? -40 : 0,
-          labelExpr: xKey === "time" ? TIME_LABEL_EXPR : undefined,
+    title: { text: "Ionized / H₂ fraction", fontSize: 12, fontWeight: "bold", anchor: "start", offset: 6 },
+    width, height: DETAIL_HEIGHT,
+    layer: [{
+      data: { values: rows },
+      mark: { type: "line", point: { filled: true, size: pointSize, opacity: 0.9 } },
+      encoding: {
+        x: {
+          field: "x", type: "quantitative",
+          scale: { type: xKind === "time" ? "symlog" : "log" },
+          axis: {
+            title: xKind === "time" ? "t (s)" : "n (cm⁻³)", titleFontSize: 10, labelOverlap: "greedy",
+            labelAngle: xKind === "time" ? -40 : 0,
+            labelExpr: xKind === "time" ? TIME_LABEL_EXPR : undefined,
+          },
         },
+        y: { field: "value", type: "quantitative", scale: { type: "log" }, axis: { title: "fraction", titleFontSize: 10 } },
+        color: { field: "quantity", type: "nominal", scale: { domain, range }, legend: { title: null, orient: "bottom", direction: "horizontal" } },
+        opacity: { condition: { param: "ionToggle", value: 1 }, value: 0.15 },
+        tooltip: [
+          { field: "quantity", title: "quantity", type: "nominal" },
+          { field: "i", title: "step", type: "quantitative" },
+          { field: "x", title: xKind === "time" ? "t (s)" : "n (cm⁻³)", type: "quantitative", format: ".3~g" },
+          { field: "tHuman", title: "t", type: "nominal" },
+          { field: "dt", title: "step Δt (s)", type: "quantitative", format: ".3~g" },
+          { field: "value", title: "fraction", type: "quantitative", format: ".4~g" },
+        ],
       },
-      y: { field: "value", type: "quantitative", scale: { type: "log" }, axis: { title: null } },
-      color: {
-        field: "quantity", type: "nominal",
-        scale: { domain, range },
-        legend: { title: null, orient: "top-right" },
-      },
-      tooltip: [
-        { field: "quantity", title: "quantity", type: "nominal" },
-        { field: "i", title: "step", type: "quantitative" },
-        { field: "x", title: xKey === "time" ? "t (s)" : "n (cm⁻³)", type: "quantitative", format: ".3~g" },
-        { field: "tHuman", title: "t", type: "nominal" },
-        { field: "dt", title: "step Δt (s)", type: "quantitative", format: ".3~g" },
-        { field: "value", title: "fraction", type: "quantitative", format: ".4~g" },
-      ],
-    },
+      params: [{ name: "ionToggle", select: { type: "point", fields: ["quantity"] }, bind: "legend" }],
+    }, crosshairLayer(rows, "x")],
   };
 }
 
-// A multi-series companion to chartSpec(): one line+points per selected
-// species (long-format `rows`, one row per (step, species) pair), color
-// keyed to the same fixed per-species palette the toggle checkboxes use.
-// This is the direct answer to "I can't get an impression of the full
-// range of values" -- T and the H+/H_tot ratio were the only things
-// plotted before; nothing showed the actual per-species number densities
-// or how many decades they span.
-function speciesChartSpec(xKey, rows, valueTitle) {
+// Every plotable species' mass fraction, always all of them (no
+// checkbox subset -- "they should all be included in the document").
+// Click a legend entry to isolate it (dims every other series via the
+// `opacity` condition below); click it again to show all -- Vega-Lite's
+// own "Legends as Interactive Filters" recipe (`bind: "legend"` on a
+// point selection), the same mechanism the ionization chart's legend
+// above uses, just with more than two entries. Always mass fraction
+// (not a density/mass-fraction toggle) -- one fewer control, and mass
+// fraction is the more physically comparable quantity across species
+// spanning very different absolute number densities anyway.
+function speciesPanel(xKind, rows, width) {
   const n = rows.length;
   const pointSize = Math.max(4, Math.min(30, 2000 / Math.max(n, 1)));
-  const domain = plotableSpecies();
+  const domain = plotableSpecies().filter((name) => speciesMassAmu(name) !== undefined);
+  return {
+    title: { text: "Species mass fraction (click a legend entry to isolate it)", fontSize: 12, fontWeight: "bold", anchor: "start", offset: 6 },
+    width, height: DETAIL_HEIGHT + 20,
+    layer: [{
+      data: { values: rows },
+      mark: { type: "line", point: { filled: true, size: pointSize, opacity: 0.9 } },
+      encoding: {
+        x: {
+          field: "x", type: "quantitative",
+          scale: { type: xKind === "time" ? "symlog" : "log" },
+          axis: {
+            title: xKind === "time" ? "t (s)" : "n (cm⁻³)", titleFontSize: 10, labelOverlap: "greedy",
+            labelAngle: xKind === "time" ? -40 : 0,
+            labelExpr: xKind === "time" ? TIME_LABEL_EXPR : undefined,
+          },
+        },
+        y: { field: "value", type: "quantitative", scale: { type: "log" }, axis: { title: "X_i (mass frac.)", titleFontSize: 10 } },
+        color: { field: "species", type: "nominal", scale: { domain, range: domain.map((n) => speciesColor(n)) }, legend: { title: null, orient: "bottom", direction: "horizontal", columns: 0 } },
+        opacity: { condition: { param: "speciesToggle", value: 1 }, value: 0.12 },
+        tooltip: [
+          { field: "species", title: "species", type: "nominal" },
+          { field: "i", title: "step", type: "quantitative" },
+          { field: "x", title: xKind === "time" ? "t (s)" : "n (cm⁻³)", type: "quantitative", format: ".3~g" },
+          { field: "tHuman", title: "t", type: "nominal" },
+          { field: "dt", title: "step Δt (s)", type: "quantitative", format: ".3~g" },
+          { field: "value", title: "X_i (mass frac.)", type: "quantitative", format: ".4~g" },
+        ],
+      },
+      params: [{ name: "speciesToggle", select: { type: "point", fields: ["species"] }, bind: "legend" }],
+    }, crosshairLayer(rows, "x")],
+  };
+}
+
+// The whole current-run view: one column (metric vs time) in cool mode,
+// two (density vs time, alongside temperature/thermal-energy vs
+// density) in free-fall mode -- since free-fall has two genuinely
+// independent axes worth seeing directly, not one hidden in tooltips.
+// `resolve.selection.hover: "global"` is what makes each overview
+// panel's own "hover" param apply across every sibling panel in this
+// whole composition -- confirmed directly in an isolated repro before
+// relying on it here (see NOTES.md).
+//
+// The composition itself MUST be a single flat top-level `concat`
+// (with `columns` doing the row-wrapping) rather than the more natural
+// `vconcat` of `hconcat` rows it started as -- a real Vega bug (not
+// this file's own logic; reproduced in isolation with plain
+// placeholder data, unrelated to anything in this app) throws runtime
+// TypeErrors on hover as soon as an `interval` (brush) selection and a
+// globally-resolved `point` (hover) selection coexist anywhere beneath
+// *two or more* levels of concat nesting -- e.g. `vconcat: [{hconcat:
+// [...]}]`, even with only one row. It doesn't reproduce at a single
+// nesting level, flat `hconcat`/`vconcat` included. So every panel
+// here -- overview, zoomed, ion, species alike -- must be a direct
+// item in the one top-level `concat` array below, never wrapped in an
+// intermediate row spec, even though that means ion/species (having no
+// natural partner) end up paired with each other at `PANEL_WIDTH`
+// rather than spanning the full row's width the way they used to.
+function runViewSpec({ mode, rows, tempField, tempExtra, ionRows, speciesRows }) {
+  const overviewPointSize = Math.max(6, Math.min(36, 2500 / Math.max(rows.length, 1)));
+  const tempTitle = (FIELD_TITLE[tempField] || tempField).replace(/\s*\(.*\)/, "");
+  const xKindOfMode = mode === "freefall" ? "density" : "time";
+  const tempTooltip = [
+    { field: "i", title: "step", type: "quantitative" },
+    { field: "x", title: xKindOfMode === "time" ? "t (s)" : "n (cm⁻³)", type: "quantitative", format: ".3~g" },
+    { field: "tHuman", title: "t", type: "nominal" },
+    { field: "dt", title: "step Δt (s)", type: "quantitative", format: ".3~g" },
+    { field: tempField, title: FIELD_TITLE[tempField] || tempField, type: "quantitative", format: ".4~g" },
+  ];
+
+  const tempOverview = metricPanel({
+    data: rows, xField: "x", yField: tempField, xKind: xKindOfMode, yTitle: FIELD_TITLE[tempField] || tempField,
+    tooltip: tempTooltip, extra: tempExtra,
+    showPoints: false, pointSize: overviewPointSize, brushName: "brushTemp",
+    // Every overview panel declares its own "hover" capture layer (not
+    // just one) -- `resolve.selection.hover: "global"` below merges
+    // same-named selections declared in separate sibling views into one
+    // shared value (confirmed directly, a real documented Vega-Lite
+    // recipe, not the kind of internal-signal-name assumption that
+    // caused the brush-selection bug elsewhere in this file), so
+    // hovering *either* overview column drives the one shared crosshair
+    // -- true "hover anywhere," not just one designated panel.
+    withHoverParam: true,
+    title: `${tempTitle} vs. ${xKindOfMode}`,
+  });
+  const tempDetail = metricPanel({
+    data: rows, xField: "x", yField: tempField, xKind: xKindOfMode, yTitle: FIELD_TITLE[tempField] || tempField,
+    tooltip: tempTooltip, extra: tempExtra,
+    showPoints: true, pointSize: 50, xDomainFromBrush: "brushTemp",
+    title: "zoomed",
+  });
+
+  let items;
+  if (mode === "freefall") {
+    const tnTooltip = [
+      { field: "i", title: "step", type: "quantitative" },
+      { field: "tHuman", title: "t", type: "nominal" },
+      { field: "x", title: "n (cm⁻³)", type: "quantitative", format: ".3~g" },
+    ];
+    const tnOverview = metricPanel({
+      data: rows, xField: "t", yField: "x", xKind: "time", yTitle: "n (cm⁻³)", tooltip: tnTooltip,
+      showPoints: false, pointSize: overviewPointSize, brushName: "brushDensity", withHoverParam: true,
+      title: "density vs. time",
+    });
+    const tnDetail = metricPanel({
+      data: rows, xField: "t", yField: "x", xKind: "time", yTitle: "n (cm⁻³)", tooltip: tnTooltip,
+      showPoints: true, pointSize: 50, xDomainFromBrush: "brushDensity",
+      title: "zoomed",
+    });
+    items = [tnOverview, tempOverview, tnDetail, tempDetail];
+  } else {
+    items = [tempOverview, tempDetail];
+  }
+  if (ionRows.length) items.push(ionPanel(xKindOfMode, ionRows, PANEL_WIDTH));
+  if (speciesRows.length) items.push(speciesPanel(xKindOfMode, speciesRows, PANEL_WIDTH));
+
   return {
     $schema: "https://vega.github.io/schema/vega-lite/v5.json",
-    width: 600, height: 240, background: null,
+    background: null,
     config: vlConfig(),
-    data: { values: rows },
-    mark: { type: "line", point: { filled: true, size: pointSize, opacity: 0.9 } },
-    encoding: {
-      x: {
-        field: "x", type: "quantitative",
-        // Time (unlike density) can legitimately be exactly 0 now that
-        // the initial condition itself is plotted -- symlog (linear
-        // near zero, log further out) shows that point instead of
-        // silently dropping it the way a pure log scale would.
-        scale: { type: xKey === "time" ? "symlog" : "log" },
-        axis: {
-          title: null, labelOverlap: "greedy",
-          labelAngle: xKey === "time" ? -40 : 0,
-          labelExpr: xKey === "time" ? TIME_LABEL_EXPR : undefined,
-        },
-      },
-      y: { field: "value", type: "quantitative", scale: { type: "log" }, axis: { title: null } },
-      color: {
-        field: "species", type: "nominal",
-        scale: { domain, range: domain.map((n) => speciesColor(n)) },
-        legend: null, // the toggle checkboxes (with matching swatches) are the legend
-      },
-      tooltip: [
-        { field: "species", title: "species", type: "nominal" },
-        { field: "i", title: "step", type: "quantitative" },
-        { field: "x", title: xKey === "time" ? "t (s)" : "n (cm⁻³)", type: "quantitative", format: ".3~g" },
-        { field: "tHuman", title: "t", type: "nominal" },
-        { field: "dt", title: "step Δt (s)", type: "quantitative", format: ".3~g" },
-        { field: "value", title: valueTitle, type: "quantitative", format: ".4~g" },
-      ],
-    },
+    resolve: { selection: { hover: "global" } },
+    columns: 2,
+    concat: items,
   };
 }
 
@@ -894,14 +873,23 @@ function scheduleRedraw() {
   requestAnimationFrame(() => { redrawQueued = false; redraw(); });
 }
 
-function selectedSpeciesNames() {
-  const out = [];
-  for (const name of plotableSpecies()) {
-    const el = document.getElementById("toggle-" + name);
-    if (el && el.checked) out.push(name);
-  }
-  return out;
-}
+// Two rapid, separate scheduleRedraw() calls can each land in their
+// *own* animation frame rather than being coalesced into one
+// (coalescing only helps when both happen before the same pending
+// frame fires) -- meaning two overlapping redraw() calls, each starting
+// its own async vegaEmbed("#chart-run", ...). Whichever call's promise
+// happens to resolve *last* would otherwise win, overwriting `runView`
+// and wiring the brush-timespan listener onto a view whose SVG has
+// already been replaced by the other, newer call -- a real bug this
+// surfaced once (see NOTES.md) back when there were two separately-
+// embedded charts to keep in sync by hand; folding everything into one
+// composed spec removed the *need* for most of that cross-view JS, but
+// the same stale-resolution risk still applies to this one remaining
+// listener, so the same guard stays. Every redraw() captures its own
+// generation number and the callback that touches `runView` checks
+// it's still current before doing anything, discarding a stale,
+// superseded resolution instead of acting on it.
+let redrawGeneration = 0;
 
 function currentFractions() {
   const fractions = {};
@@ -914,6 +902,7 @@ function currentFractions() {
 }
 
 function redraw() {
+  const myGeneration = ++redrawGeneration; // see the comment on redrawGeneration above
   const nH = Math.pow(10, parseFloat(document.getElementById("nH").value));
   const T = Math.pow(10, parseFloat(document.getElementById("T").value));
   document.getElementById("nH-val").textContent = nH.toExponential(2);
@@ -970,22 +959,6 @@ function redraw() {
       encoding: { x: { field: "x", type: "quantitative" } },
     });
   }
-  // The density-vs-time chart only makes sense in free-fall mode (cool
-  // mode holds density fixed, so it'd just be a flat line) -- linking
-  // only actually happens once both charts genuinely exist.
-  const linkHover = tnChartEnabled && currentMode === "freefall";
-  vegaEmbed("#chart-T", chartSpec(tempField, result.xKey, rows, tempExtra, gammaTooltip, temperatureZoomEnabled, linkHover),
-            { actions: false, renderer: "svg" }).then((res) => {
-    tChartView = res.view;
-    if (linkHover) wireHoverLink(tChartView, "x", "t", rows, () => tnChartView);
-    if (temperatureZoomEnabled) {
-      res.view.addSignalListener("brush", (name, value) => updateZoomTimespan(value, rows));
-      updateZoomTimespan(null, rows); // nothing selected yet on a fresh embed
-    } else {
-      document.getElementById("zoom-timespan").textContent = "";
-    }
-  });
-  updateTnChart(rows, linkHover);
   const ionRows = [];
   for (let i = 0; i < result.x.length; i++) {
     const base = { x: result.x[i], i, dt: result.dt[i], tHuman: formatTimeAuto(result.t[i]) };
@@ -995,40 +968,30 @@ function redraw() {
       ionRows.push({ ...base, quantity: ION_H2_LABELS.h2, value: h2v });
     }
   }
-  vegaEmbed("#chart-ion", ionizationChartSpec(result.xKey, ionRows),
-            { actions: false, renderer: "svg" });
-  renderLatex("ylabel-T", tempField);
-  renderLatex("xlabel-T", result.xKey);
-  renderLatex("ylabel-ion", "ionfrac");
-  renderLatex("xlabel-ion", result.xKey);
-
-  const massFracMode = speciesDisplayMode === "massfrac";
-  const selectedSpecies = massFracMode
-    ? selectedSpeciesNames().filter((name) => speciesMassAmu(name) !== undefined)
-    : selectedSpeciesNames();
-  const chartSpeciesEl = document.getElementById("chart-species");
-  if (selectedSpecies.length) {
-    const speciesRows = [];
-    for (let i = 0; i < result.x.length; i++) {
-      const tHuman = formatTimeAuto(result.t[i]);
-      const denom = massFracMode ? totalMassAmu(result.s[i]) : 1;
-      for (const name of selectedSpecies) {
-        let v = result.s[i][name];
-        if (massFracMode) v = (v * speciesMassAmu(name)) / denom;
-        if (v > 0) speciesRows.push({ x: result.x[i], i, dt: result.dt[i], tHuman, species: name, value: v });
-      }
+  // Always every plotable species with a known mass, always mass
+  // fraction -- no checkbox subset, no density/mass-fraction toggle
+  // (removed; see NOTES.md). Species without a known mass (an
+  // unrecognized future network) simply can't appear in a *fraction*
+  // at all, same reasoning the old mass-fraction mode already had.
+  const speciesRows = [];
+  for (let i = 0; i < result.x.length; i++) {
+    const tHuman = formatTimeAuto(result.t[i]);
+    const denom = totalMassAmu(result.s[i]);
+    for (const name of plotableSpecies()) {
+      const massAmu = speciesMassAmu(name);
+      if (massAmu === undefined) continue;
+      const v = (result.s[i][name] * massAmu) / denom;
+      if (v > 0) speciesRows.push({ x: result.x[i], i, dt: result.dt[i], tHuman, species: name, value: v });
     }
-    chartSpeciesEl.innerHTML = "";
-    const valueTitle = massFracMode ? "X_i (mass frac.)" : "n_i (cm⁻³)";
-    vegaEmbed(chartSpeciesEl, speciesChartSpec(result.xKey, speciesRows, valueTitle), { actions: false, renderer: "svg" });
-  } else if (massFracMode) {
-    chartSpeciesEl.innerHTML = '<p class="chart-placeholder">No selected species has a known mass -- '
-      + 'toggle one on, or switch back to number density.</p>';
-  } else {
-    chartSpeciesEl.innerHTML = '<p class="chart-placeholder">Toggle one or more species above to plot them.</p>';
   }
-  renderLatex("ylabel-species", massFracMode ? "massfrac" : "species");
-  renderLatex("xlabel-species", result.xKey);
+
+  const spec = runViewSpec({ mode: currentMode, rows, tempField, tempExtra, ionRows, speciesRows });
+  vegaEmbed("#chart-run", spec, { actions: false, renderer: "svg" }).then((res) => {
+    if (myGeneration !== redrawGeneration) return; // a newer redraw() already superseded this one
+    runView = res.view;
+    res.view.addSignalListener("brushTemp", (name, value) => updateZoomTimespan(value, rows));
+    updateZoomTimespan(null, rows); // nothing selected yet on a fresh embed
+  });
 
   const finalT = result.T[result.T.length - 1];
   const finalIon = result.ion[result.ion.length - 1];
@@ -1095,38 +1058,6 @@ function downloadResultsCsv() {
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
-}
-
-// The density-vs-time companion chart -- opt-in (the "show" checkbox
-// next to it), and only meaningful in free-fall mode (cool mode holds
-// density fixed, so there's no density-vs-time curve to show at all).
-// Graceful placeholder text either way, matching the rest of this page's
-// convention (e.g. the species chart's "toggle one to plot it") rather
-// than an empty box or a misleading flat line.
-function updateTnChart(rows, linkHover) {
-  const el = document.getElementById("chart-tn");
-  if (!tnChartEnabled) {
-    tnChartView = null;
-    el.innerHTML = '<p class="chart-placeholder">Toggle "show" above to view.</p>';
-    renderLatex("ylabel-tn", "density");
-    renderLatex("xlabel-tn", "time");
-    return;
-  }
-  if (currentMode !== "freefall") {
-    tnChartView = null;
-    el.innerHTML = '<p class="chart-placeholder">Only meaningful in free-fall mode '
-      + '(density is held fixed in cool mode).</p>';
-    renderLatex("ylabel-tn", "density");
-    renderLatex("xlabel-tn", "time");
-    return;
-  }
-  el.innerHTML = "";
-  vegaEmbed(el, tnChartSpec(rows), { actions: false, renderer: "svg" }).then((res) => {
-    tnChartView = res.view;
-    if (linkHover) wireHoverLink(tnChartView, "t", "x", rows, () => tChartView);
-  });
-  renderLatex("ylabel-tn", "density");
-  renderLatex("xlabel-tn", "time");
 }
 
 function setMode(mode) {
@@ -1396,46 +1327,16 @@ function buildSpeciesSliders(config) {
   }
 }
 
+// The actual "Temperature vs. ..." / "Thermal energy vs. ..." panel
+// title text is computed fresh from temperatureDisplayMode inside
+// runViewSpec() on every redraw -- no separate DOM title element to
+// keep in sync here anymore, now that it's baked into the Vega-Lite
+// spec itself.
 function setTemperatureDisplayMode(mode) {
   temperatureDisplayMode = mode;
   document.getElementById("T-mode-T").classList.toggle("active", mode === "T");
   document.getElementById("T-mode-ge").classList.toggle("active", mode === "ge");
-  document.getElementById("chart-T-title").textContent = mode === "ge" ? "Thermal energy" : "Temperature";
   scheduleRedraw();
-}
-
-function setSpeciesDisplayMode(mode) {
-  speciesDisplayMode = mode;
-  document.getElementById("species-mode-density").classList.toggle("active", mode === "density");
-  document.getElementById("species-mode-massfrac").classList.toggle("active", mode === "massfrac");
-  scheduleRedraw();
-}
-
-function buildSpeciesToggle() {
-  const container = document.getElementById("species-toggle");
-  container.innerHTML = "";
-
-  const controls = document.createElement("div");
-  controls.className = "species-toggle-controls";
-  controls.innerHTML = `<button type="button" id="species-all">all</button><button type="button" id="species-none">none</button>`;
-  container.appendChild(controls);
-
-  for (const name of plotableSpecies()) {
-    const label = document.createElement("label");
-    label.innerHTML = `<input type="checkbox" id="toggle-${name}" checked>`
-      + `<span class="swatch" style="background:${speciesColor(name)}"></span>${name}`;
-    container.appendChild(label);
-    label.querySelector("input").addEventListener("change", scheduleRedraw);
-  }
-
-  document.getElementById("species-all").addEventListener("click", () => {
-    for (const name of plotableSpecies()) document.getElementById("toggle-" + name).checked = true;
-    scheduleRedraw();
-  });
-  document.getElementById("species-none").addEventListener("click", () => {
-    for (const name of plotableSpecies()) document.getElementById("toggle-" + name).checked = false;
-    scheduleRedraw();
-  });
 }
 
 function initPage(config) {
@@ -1446,18 +1347,8 @@ function initPage(config) {
   document.getElementById("download-csv").addEventListener("click", downloadResultsCsv);
   document.getElementById("mode-cool").addEventListener("click", () => setMode("cool"));
   document.getElementById("mode-freefall").addEventListener("click", () => setMode("freefall"));
-  document.getElementById("species-mode-density").addEventListener("click", () => setSpeciesDisplayMode("density"));
-  document.getElementById("species-mode-massfrac").addEventListener("click", () => setSpeciesDisplayMode("massfrac"));
   document.getElementById("T-mode-T").addEventListener("click", () => setTemperatureDisplayMode("T"));
   document.getElementById("T-mode-ge").addEventListener("click", () => setTemperatureDisplayMode("ge"));
-  document.getElementById("T-zoom-toggle").addEventListener("change", (e) => {
-    temperatureZoomEnabled = e.target.checked;
-    scheduleRedraw();
-  });
-  document.getElementById("tn-chart-toggle").addEventListener("change", (e) => {
-    tnChartEnabled = e.target.checked;
-    scheduleRedraw();
-  });
   document.getElementById("ic-preset").addEventListener("change", (e) => applyPreset(e.target.value));
   document.getElementById("run-sweep").addEventListener("click", runSweep);
   document.getElementById("sweep-param").addEventListener("change", updateSweepParamUI);
@@ -1484,7 +1375,6 @@ function initPage(config) {
     speciesNames = namesFn().split(",");
     idx = Object.fromEntries(speciesNames.map((n, i) => [n, i]));
     buildSpeciesSliders(config);
-    buildSpeciesToggle();
     buildSweepParamOptions();
     updateSweepParamUI(); // sets up the "No sweep" default state (run-sweep button included) immediately, not just after the dropdown is touched
     document.getElementById("ic-preset").disabled = false;

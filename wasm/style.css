@@ -15,12 +15,17 @@
 body {
   margin: 0; background: var(--bg); color: var(--fg);
   font: 14px/1.4 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
-  padding: 24px; max-width: 1100px; margin-inline: auto;
+  /* Wide enough for free-fall's two-column chart grid (each column
+     ~620px, side by side) without the sidebar's own width having to
+     shrink to make room -- most desktop monitors have the room, and
+     the .layout/.panel media query below still collapses to one
+     column on anything narrower. */
+  padding: 24px; max-width: 1700px; margin-inline: auto;
 }
 h1 { font-size: 1.3em; margin: 0 0 4px; }
 p.sub { color: var(--muted); margin: 0 0 20px; }
 a { color: var(--accent); }
-.layout { display: grid; grid-template-columns: 320px 1fr; gap: 24px; align-items: start; }
+.layout { display: grid; grid-template-columns: 340px 1fr; gap: 24px; align-items: start; }
 @media (max-width: 760px) { .layout { grid-template-columns: 1fr; } }
 .panel {
   background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px;
@@ -91,10 +96,10 @@ input[type=range] { width: 100%; }
   background: var(--bg); color: var(--fg); cursor: pointer;
 }
 .mini-modebar button.active { background: var(--accent); color: white; border-color: var(--accent); }
-.zoom-toggle {
-  display: inline-flex; align-items: center; gap: 4px; margin-left: auto;
-  font-size: 0.78em; color: var(--muted);
-}
+/* Still used by rates.js's own reaction-toggle list (#rate-toggle) --
+   the main widget's species/zoom checkboxes that used to share this
+   class are gone (species/zoom are always-on now, see NOTES.md), but
+   this one's still live. */
 .species-toggle { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; margin: 0 4px 8px; }
 .species-toggle label {
   display: inline-flex; align-items: center; gap: 4px;
@@ -103,13 +108,7 @@ input[type=range] { width: 100%; }
   cursor: pointer; user-select: none;
 }
 .species-toggle label:has(input:not(:checked)) { color: var(--muted); opacity: 0.6; }
-.species-toggle .swatch { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
 .species-toggle input[type=checkbox] { margin: 0; }
-.species-toggle-controls { display: flex; gap: 4px; margin-right: 2px; }
-.species-toggle-controls button {
-  font-size: 0.72em; padding: 2px 8px; border-radius: 10px; border: 1px solid var(--border);
-  background: var(--bg); color: var(--muted); cursor: pointer;
-}
 .chart-placeholder { color: var(--muted); font-size: 0.85em; padding: 16px 8px; margin: 0; }
 /* Opt-in, additive, and deliberately not live (a sweep is several full
    runs, not one) -- collapsed by default so it never competes with or

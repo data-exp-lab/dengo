@@ -124,69 +124,27 @@ PAGE_TEMPLATE = """<!doctype html>
 
   <div id="charts">
     <div class="chart-box">
-      <div class="chart-title" id="chart-T-title">Temperature</div>
       <div class="mini-modebar">
         <button type="button" id="T-mode-T" class="active">temperature</button>
         <button type="button" id="T-mode-ge">thermal energy</button>
-        <label class="zoom-toggle"><input type="checkbox" id="T-zoom-toggle">zoom view</label>
       </div>
-      <div class="chart-row">
-        <div class="axis-y" id="ylabel-T"></div>
-        <div id="chart-T"></div>
-      </div>
-      <div class="axis-x" id="xlabel-T"></div>
+      <div id="chart-run"></div>
       <p class="preset-note" id="zoom-timespan"></p>
-      <p class="preset-note">The shaded band (temperature view only --
-        it's a T range, so it disappears in thermal-energy view) marks
-        1500-2500 K, the H2-formation-heating-driven fragmentation
-        regime this project targets. It's for orientation only, not a
-        solver threshold or a prediction that any given run passes
-        through it.</p>
-      <p class="preset-note">Turn on "zoom view" above to drag-select a
-        range and see it enlarged in a second chart underneath (e.g. to
-        look closely at the individual steps right around a shock) --
-        the top chart never pans or rescales itself, only the selection
-        box moves;
-        drag an empty area to clear it. Dots on both mark each actual
-        solver step.</p>
-    </div>
-    <div class="chart-box">
-      <div class="chart-title">Density vs. time</div>
-      <div class="mini-modebar">
-        <label class="zoom-toggle"><input type="checkbox" id="tn-chart-toggle">show</label>
-      </div>
-      <div class="chart-row">
-        <div class="axis-y" id="ylabel-tn"></div>
-        <div id="chart-tn"></div>
-      </div>
-      <div class="axis-x" id="xlabel-tn"></div>
-      <p class="preset-note">Free-fall's own charts all plot density on
-        the x-axis, leaving elapsed time visible only in tooltips -- this
-        puts time on x and density on y instead, the same run, no new
-        computation. Hover over either this chart or the Temperature
-        chart above to see a marker on both, following the same point in
-        the run as you move the mouse. Only meaningful in free-fall mode.</p>
-    </div>
-    <div class="chart-box">
-      <div class="chart-title">Ionization &amp; molecular fraction</div>
-      <div class="chart-row">
-        <div class="axis-y" id="ylabel-ion"></div>
-        <div id="chart-ion"></div>
-      </div>
-      <div class="axis-x" id="xlabel-ion"></div>
-    </div>
-    <div class="chart-box">
-      <div class="chart-title">Species abundance</div>
-      <div class="mini-modebar">
-        <button type="button" id="species-mode-density" class="active">number density</button>
-        <button type="button" id="species-mode-massfrac">mass fraction</button>
-      </div>
-      <div class="species-toggle" id="species-toggle"></div>
-      <div class="chart-row">
-        <div class="axis-y" id="ylabel-species"></div>
-        <div id="chart-species"></div>
-      </div>
-      <div class="axis-x" id="xlabel-species"></div>
+      <p class="preset-note">One combined view of the current run (a
+        single Vega-Lite spec): in free-fall mode, density-vs-time and
+        temperature-vs-density side by side, each with its own zoomed-in
+        row underneath -- drag a rectangle on either top chart to select
+        a range and see it enlarged below it (the top chart itself never
+        pans or rescales, only the selection box moves; drag an empty
+        area to clear it). Cool mode shows just the one column, since
+        density doesn't change there. Every panel (including the
+        ionization/H₂ and species charts below) shares one crosshair:
+        hover anywhere to see the same step marked everywhere at once.
+        The shaded band on the temperature panel marks 1500-2500 K, the
+        H2-formation-heating-driven fragmentation regime this project
+        targets -- orientation only, not a solver threshold. Click a
+        legend entry (ionization/H₂, species) to isolate just that
+        series; click it again to show all.</p>
     </div>
   </div>
 </div>
