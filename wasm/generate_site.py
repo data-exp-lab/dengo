@@ -135,6 +135,7 @@ PAGE_TEMPLATE = """<!doctype html>
         <div id="chart-T"></div>
       </div>
       <div class="axis-x" id="xlabel-T"></div>
+      <p class="preset-note" id="zoom-timespan"></p>
       <p class="preset-note">The shaded band (temperature view only --
         it's a T range, so it disappears in thermal-energy view) marks
         1500-2500 K, the H2-formation-heating-driven fragmentation
@@ -148,6 +149,23 @@ PAGE_TEMPLATE = """<!doctype html>
         box moves;
         drag an empty area to clear it. Dots on both mark each actual
         solver step.</p>
+    </div>
+    <div class="chart-box">
+      <div class="chart-title">Density vs. time</div>
+      <div class="mini-modebar">
+        <label class="zoom-toggle"><input type="checkbox" id="tn-chart-toggle">show</label>
+      </div>
+      <div class="chart-row">
+        <div class="axis-y" id="ylabel-tn"></div>
+        <div id="chart-tn"></div>
+      </div>
+      <div class="axis-x" id="xlabel-tn"></div>
+      <p class="preset-note">Free-fall's own charts all plot density on
+        the x-axis, leaving elapsed time visible only in tooltips -- this
+        puts time on x and density on y instead, the same run, no new
+        computation. Hover over either this chart or the Temperature
+        chart above to see a marker on both, following the same point in
+        the run as you move the mouse. Only meaningful in free-fall mode.</p>
     </div>
     <div class="chart-box">
       <div class="chart-title">Ionization &amp; molecular fraction</div>
