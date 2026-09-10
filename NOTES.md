@@ -3136,3 +3136,32 @@ started under; a fresh go-ahead is needed for this specific piece of
 work before it ships (the last one covered the now-superseded
 density-vs-time-chart-with-checkbox feature, already shipped separately
 as PR #19).
+
+**2026-09-10, continued: page width -- responsive instead of a fixed
+1700px, plus a real horizontal-scroll fix underneath it.**
+
+The fixed `max-width: 1700px` from the same day's earlier change could
+exceed an actual (unmaximized, or genuinely "HD"-class) browser window,
+forcing the whole page to scroll horizontally just to reach the right
+edge -- reported directly ("the left margin pushes it to a horizontal
+scroll"). Changed to `max-width: min(1700px, 95vw)`: a fraction of the
+viewport, capped so it doesn't keep growing past a comfortable reading
+width on a 4K display.
+
+That alone wasn't the whole fix, and testing (headless Chrome at five
+viewport widths, 1366px up through 3840px) caught why: `#charts` is a
+direct `.layout` grid item, and a grid item's default `min-width: auto`
+means it won't shrink below its content's own intrinsic width no matter
+what track size the grid assigns it -- so the fixed-pixel-width Vega
+charts inside were forcing the whole page wider regardless of the vw
+change. Confirmed directly: at 1366/1600/1920px-wide viewports the page
+still had `scrollWidth > clientWidth` after the vw change alone. Fix:
+`#charts { min-width: 0; }`, plus `overflow-x: auto` on `.chart-box`
+(shared with the sweep charts, so both benefit) as the actual container
+that scrolls locally once the grid item is allowed to shrink past its
+content. Re-tested the same five widths after this second change:
+zero page-level horizontal scroll at every one, confirmed the local
+chart-box scrollbar genuinely reaches hidden content (scrolled it
+programmatically and screenshotted the result), and 120/120 pytest
+still passing (a pure CSS change, but re-run anyway rather than
+assumed).
