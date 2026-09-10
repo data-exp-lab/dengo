@@ -3636,3 +3636,53 @@ solve time and converged answer both move the expected direction), the
 shock checkbox's full on/off/on-again cycle, zoom/re-zoom/clear
 unaffected, and the CSV download button still enabling correctly. Full
 `pytest` suite unaffected (120/120).
+
+**2026-09-10, continued: free-fall step size exposed too, plus a
+step-cap safety net.**
+
+Asked directly ("what about freefall increment -- is that worth
+exposing?"): yes, judged genuinely worthwhile, and not just as a
+performance knob. `safetyFactor` (the fraction of the local free-fall
+time each outer step advances) was already a named default parameter
+on `runFreefall()`, never overridden by any caller -- exposing it
+needed no solver change, same as the other two sliders added earlier
+today. New "step size (× t_ff)" slider, log-scale from 10^-2.5 to
+10^-1 (roughly 0.3x to 10x the previous fixed default of 0.01).
+
+Confirmed directly this has a *real* accuracy effect, not just a
+speed one: coarsening by 10x cut the step count from 1231 to 154 and
+the solve time from ~217ms to ~62ms, but also visibly shifted the
+answer (final T 3628.6 K -> 2864.0 K) -- each step applies its
+adiabatic compression as one instantaneous jump *before* letting
+chemistry integrate over that interval, so a bigger step is a cruder
+operator-splitting approximation, not just a blockier plot. Finer by
+~3x (1231 -> 3820 steps) moved the answer the other way, converging
+back toward the same value (3628.6 -> 3642.1 K) -- consistent with
+approaching a continuum limit as steps shrink, not just noise.
+
+**A genuinely new failure mode came with it**: a small enough step
+size, combined with a wide enough target-density range, can now hit
+`runFreefall()`'s `maxSteps` cap before actually reaching the
+requested target -- previously untestable in practice (nothing let a
+user push the step count that high), and previously silent (the run
+would just stop, with nothing in the UI saying so). Checked directly
+that the chosen slider range's full combination with every other
+slider's own full range (including the widest target-n and the
+lowest starting density) stays comfortably under the existing 10000-
+step cap -- confirmed at 8686 steps at the most extreme combination
+the exposed sliders can reach together, so this can't actually happen
+through ordinary use of the new slider. Added a visible warning chip
+in the run summary anyway (a new `reachedTarget` field on
+`runFreefall()`'s own return value, checked in `updateRunSummary()`),
+confirmed to work by deliberately forcing a slider value outside its
+declared range in a test (not reachable through the UI itself) --
+worth having regardless, since some future change to this page could
+plausibly make the combination reachable again.
+
+Verified: real Emscripten rebuild, headless-Chrome regression across
+cool/free-fall modes, both themes, a network with H2 species and one
+without, step size at coarser/finer/default (confirmed step count and
+the real accuracy shift described above), the step-cap warning
+(confirmed both that it stays silent across the full legitimate slider
+range, and that it correctly appears when the cap is actually hit).
+Full `pytest` suite unaffected (120/120).

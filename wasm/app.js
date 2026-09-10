@@ -472,6 +472,14 @@ function runFreefall(nH, T, fractions, logNTarget, logNShock, machShock, collaps
   return {
     x: nHist, t: tHist, dt: dtHist, T: THist, ion: ionHist, h2: h2Hist, s: sHist, xKey: "density",
     shockTriggered: shockApplied, nShock,
+    // Not just decorative -- a finer step size (a smaller safetyFactor,
+    // see the new "step size" slider) takes proportionally more steps
+    // to cross the same density range, so it's now genuinely possible
+    // to hit `maxSteps` before reaching `nTarget` with an ordinary
+    // slider drag, not just a pathological setting. Surfaced in
+    // updateRunSummary() rather than silently truncating the run with
+    // no visible sign anything was cut short.
+    reachedTarget: nCurrent >= nTarget,
   };
 }
 
@@ -1096,7 +1104,10 @@ function redraw() {
     const logCollapse = parseFloat(document.getElementById("collapse-rate").value);
     const collapseFactor = Math.pow(10, logCollapse);
     document.getElementById("collapse-rate-val").textContent = logCollapse.toFixed(1);
-    result = runFreefall(nH, T, fractions, logNTarget, logNShock, machShock, collapseFactor, tolerance);
+    const logFfStep = parseFloat(document.getElementById("ff-step").value);
+    const ffStep = Math.pow(10, logFfStep);
+    document.getElementById("ff-step-val").textContent = logFfStep.toFixed(1);
+    result = runFreefall(nH, T, fractions, logNTarget, logNShock, machShock, collapseFactor, tolerance, ffStep);
   } else {
     const logDtf = parseFloat(document.getElementById("dtf").value);
     document.getElementById("dtf-val").textContent = logDtf.toFixed(1);
@@ -1206,6 +1217,14 @@ function updateRunSummary(result, rows, elapsed) {
   chips.push(summaryStat("final ionized", finalIon !== undefined ? finalIon.toExponential(2) : "?"));
   if (finalH2 !== null && finalH2 !== undefined) chips.push(summaryStat("final H₂/H_tot", finalH2.toExponential(2)));
   if (result.shockTriggered) chips.push(summaryStat("shock crossed at", `${result.nShock.toExponential(2)} cm⁻³`));
+  // `reachedTarget` is only ever `false` (not just falsy/undefined --
+  // cool mode's result has no such field at all) when free-fall's outer
+  // loop hit its step cap before reaching the requested target density
+  // -- genuinely possible now that step size is a user-exposed slider,
+  // not just a pathological setting. Surfaced here, not silently.
+  if (result.reachedTarget === false) {
+    chips.push(`<span class="stat stat-warn">stopped before reaching target n (step cap) -- try a coarser step size</span>`);
+  }
   el.innerHTML = chips.join("");
 }
 
@@ -1553,7 +1572,7 @@ function initPage(config) {
   document.getElementById("ic-preset").addEventListener("change", (e) => applyPreset(e.target.value));
   document.getElementById("run-sweep").addEventListener("click", runSweep);
   document.getElementById("sweep-param").addEventListener("change", updateSweepParamUI);
-  for (const id of ["nH", "T", "dtf", "ntarget", "nshock", "mach", "collapse-rate", "tolerance"]) {
+  for (const id of ["nH", "T", "dtf", "ntarget", "nshock", "mach", "collapse-rate", "tolerance", "ff-step"]) {
     document.getElementById(id).addEventListener("input", scheduleRedraw);
   }
   const shockEnabledEl = document.getElementById("shock-enabled");
