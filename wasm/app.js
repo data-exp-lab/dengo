@@ -501,18 +501,20 @@ function updateZoomTimespan(value, rows) {
 
 // -- One unified spec for the whole current-run view --------------------
 // Everything below builds ONE composed Vega-Lite spec (Temperature/
-// density panels, the ionization/H2 chart, the species chart), all
-// sharing one crosshair and each zoom pair's own brush -- replacing what
-// used to be several independently-`vegaEmbed()`-ed charts kept in sync
-// by hand-rolled JS (view.addSignalListener() + view.data().runAsync()
-// puppeting one view from another's events). That worked, but Vega-Lite
-// already has a real, documented feature for exactly this ("Multi-View
-// Displays": `resolve: {selection: {name: "global"}}` shares one
-// selection param across every sibling view in a composition) -- once
-// everything is *one* spec, there's no second view left to bridge by
-// hand, and the whole class of "which of two independently-resolving
-// vegaEmbed() promises won a race" bugs (see NOTES.md) stops being
-// possible, not just handled.
+// density panels, the ionization/H2 chart, the species chart), sharing
+// one zoom-brush (a shared *crosshair* used to live here too, across
+// every panel -- removed for now, a real measured performance
+// regression, see NOTES.md and the note above metricPanel() below) --
+// replacing what used to be several independently-`vegaEmbed()`-ed
+// charts kept in sync by hand-rolled JS (view.addSignalListener() +
+// view.data().runAsync() puppeting one view from another's events).
+// That worked, but Vega-Lite already has a real, documented feature for
+// exactly this ("Multi-View Displays": `resolve: {selection: {name:
+// "global"}}` shares one selection param across every sibling view in a
+// composition) -- once everything is *one* spec, there's no second view
+// left to bridge by hand, and the whole class of "which of two
+// independently-resolving vegaEmbed() promises won a race" bugs (see
+// NOTES.md) stops being possible, not just handled.
 
 const PANEL_WIDTH = 620, OVERVIEW_HEIGHT = 150, DETAIL_HEIGHT = 170;
 // One panel (the temperature-vs-x chart, see runViewSpec() below)
@@ -524,110 +526,57 @@ const PANEL_WIDTH = 620, OVERVIEW_HEIGHT = 150, DETAIL_HEIGHT = 170;
 // one that rescales to it (it has to stay at the full range to show
 // the selection box), so it's the one metric here that still needs an
 // actual second, zoomed instance to see rescaled at all.
-
-// Light gray, deliberately -- not a color that competes with the shock
-// event's own red dashed rule (the two used to read as similar enough
-// to be mistaken for each other; the shock line's own color is
-// untouched, only this one moved).
-function crosshairColor() {
-  return isDarkMode() ? "#9aa0a6" : "#8a8a8a";
-}
-
-// The shared crosshair: a `rule` mark filtered by the one "hover"
-// selection every panel below either declares (the first one built) or
-// merely references (via the top-level `resolve` -- see runViewSpec()).
-// Filtering by `i` (each row's own step index), not by whatever field
-// this panel's x-axis happens to encode, is what lets a density-axis
-// panel and a time-axis panel share the exact same selection at all --
-// every panel's data already carries `i`, so this works regardless of
-// what's actually plotted, and it's immune to the one real edge case
-// that ruled out using `x`/`t` directly: runFreefall's shock-refinement
-// can give two adjacent rows the *same* elapsed time (the instantaneous
-// post-jump point), which would make `t` ambiguous as a join key -- `i`
-// never is.
-// `xDomainFromBrush`, when given, must be threaded through to *every*
-// layer in a panel that has it, not just the one visible line -- found
-// directly (an isolated repro first, then confirmed in this file's own
-// build) while chasing a real "zooming doesn't work" report: Vega-Lite's
-// default *shared* scale across a layered view's own sibling layers
-// means that if only the main line layer gets an explicit
-// `domain: {param: ..., field: ...}` and this file's crosshair/hover-
-// capture layers don't, the merged domain silently becomes the *union*
-// of the narrow brushed range and the other layers' own full-data
-// range -- i.e. the full range wins and the panel never visibly
-// rescales at all, even though the brush param itself fires correctly.
-// So every layer-building helper below takes the same
-// `xDomainFromBrush` a panel was given and applies the identical
-// `domain` to its own x scale, so the shared-scale merge has nothing to
-// disagree about.
-function domainScale(xDomainFromBrush, xField) {
-  return xDomainFromBrush ? { domain: { param: xDomainFromBrush, field: xField } } : {};
-}
-
-function crosshairLayer(data, xField, xDomainFromBrush) {
-  return {
-    data: { values: data },
-    transform: [{ filter: { param: "hover", empty: false } }],
-    mark: { type: "rule", strokeDash: [4, 3], opacity: 0.85, color: crosshairColor() },
-    encoding: { x: { field: xField, type: "quantitative", scale: domainScale(xDomainFromBrush, xField) } },
-  };
-}
-
-// nearest-by-x-pixel-distance only (`encodings: ["x"]`) so this behaves
-// like a vertical crosshair, not a 2D nearest-neighbor search. Every
-// panel uses this same separate invisible layer for `hover`, even the
-// ones that already show their own visible point markers (ionPanel(),
-// speciesPanel(), metricPanel()'s `showPoints`) -- confirmed directly
-// (not assumed) that attaching `hover` straight to a `line`-with-`point`
-// composite mark instead doesn't work: Vega-Lite warns "nearest
-// transform is not supported for line marks" for that mark exactly like
-// it does for a bare line, silently breaking the selection there (and
-// therefore, once `hover` is globally resolved, the crosshair on every
-// *other* panel too) rather than erroring loudly. `nearest` genuinely
-// does need its own dedicated `point`-marked layer, full stop.
 //
-// It gets its own `tooltip` encoding, matching whatever the visible
-// mark below it would have shown -- found directly (a real regression,
-// not a hypothetical): being invisible doesn't stop this layer from
-// being the topmost mark under the cursor, so *it* is what actually
-// receives every pointer event, silently starving the visible mark's
-// own tooltip encoding of ever seeing one.
-function hoverCaptureLayer(data, xField, yField, xDomainFromBrush, tooltip) {
-  return {
-    data: { values: data },
-    mark: { type: "point", opacity: 0 },
-    encoding: {
-      x: { field: xField, type: "quantitative", scale: domainScale(xDomainFromBrush, xField) },
-      y: { field: yField, type: "quantitative" },
-      tooltip,
-    },
-    params: [{
-      name: "hover",
-      select: { type: "point", on: "pointermove", nearest: true, encodings: ["x"], fields: ["i"], clear: "pointerout" },
-    }],
-  };
+// The shared crosshair this composition used to have -- a globally-
+// resolved "hover" point selection, every panel either declaring its
+// own invisible nearest-point capture layer or consuming it via a
+// filtered rule mark -- is gone (see NOTES.md): confirmed directly, a
+// real, large, measured latency regression (~1.6s per mouse move vs.
+// ~20ms on a blank page), traced to Vega's own dataflow scheduler not
+// cleanly isolating "hover" pulses from the *other* (brush-driven)
+// scale-domain recomputation happening in the same resolved
+// composition, not something fixable by restructuring this file's own
+// spec-building differently. A future, deliberately simpler mechanism
+// (a rule that just tracks the pointer's raw x pixel position, no
+// nearest-point lookup or cross-view resolution at all) is worth
+// trying instead, but that's a different-enough approach that nothing
+// here was worth keeping around unused for it.
+// `zoomDomain`, when given, is a plain `[lo, hi]` array -- and applied
+// by *filtering the data* to that range (see `zoomFilteredData()` below),
+// not by overriding the x-scale's own `domain`. Both were tried; the
+// scale-domain version is not just slow but confirmed directly to be
+// outright broken: giving a `log`-typed x-scale an explicit literal
+// `domain` -- with nothing else different about the spec at all, even a
+// single fresh-embedded panel outside this file's own composition --
+// makes Vega render it at close to *4x* its declared `width` (confirmed
+// in an isolated repro: a plain 300px-wide single-panel spec rendered at
+// 1357px purely from adding `scale.domain`, `nice: true` or not, same
+// panel/data otherwise byte-identical). Root cause not fully chased down
+// (the compiled Vega JSON's declared `width` was unaffected; whatever
+// inflates it happens at Vega's own runtime layout step), but filtering
+// the underlying data instead of touching the scale's domain sidesteps
+// it entirely -- confirmed directly, back to the correct width -- and
+// happens to also be simpler.
+//
+// Landing on a *filter*, not a live param binding, also fixes a real,
+// separate, measured latency regression: binding a panel's x-domain
+// live to another panel's brush *param* (the very first thing tried)
+// cost ~700-900ms of extra Vega dataflow work *per signal update*, and
+// a drag fires many of those, not just one -- one drag gesture took
+// several seconds. Zooming is "commit once the drag settles" now: the
+// brush param still lives only on the one anchor panel (for the drag
+// rectangle itself, and to read its final value from), but every
+// follower panel's data is refiltered and the chart rebuilt only after
+// a short pause once dragging actually stops (see `embedChart()`/
+// `redraw()`) -- confirmed directly this is dramatically faster than
+// live updates during the drag itself.
+function zoomFilteredData(data, xField, zoomDomain) {
+  if (!zoomDomain) return data;
+  const [lo, hi] = zoomDomain;
+  return data.filter((d) => d[xField] >= lo && d[xField] <= hi);
 }
 
-// One "metric vs x" panel, where x is whichever quantity this mode's
-// panels all share (density in free-fall mode, time in cool mode --
-// `xKind`, axis scale/formatting only). `brushName`, when given,
-// attaches this panel's own zoom-brush (scoped to just this one layer --
-// see the note on that in NOTES.md, a selection declared at a layered
-// view's outer level gets incorrectly projected onto every layer in it,
-// including `extra` layers like the shock-event rule that have no x
-// field at all); `xDomainFromBrush`, when given, binds this panel's
-// x-domain to *another* panel's brush by name, so it rescales as that
-// brush is dragged without ever holding one itself. `showPoints`, when
-// true, draws the line with visible point markers (only ever asked for
-// on the zoomed temperature panel) -- purely visual; `hover` still goes
-// on its own separate invisible capture layer regardless, same as every
-// other panel. Confirmed directly (not assumed) that attaching `hover`
-// straight to a `line`-with-`point` mark instead doesn't work: Vega-Lite
-// warns "nearest transform is not supported for line marks" for this
-// composite mark exactly like it does for a bare line, silently
-// breaking that selection (and, once it's globally resolved, every
-// other panel's crosshair along with it) rather than erroring loudly.
-function metricPanel({ data, xField, yField, xKind, yTitle, tooltip, extra, brushName, xDomainFromBrush, withHoverParam, showPoints, pointSize, title }) {
+function metricPanel({ data, xField, yField, xKind, yTitle, tooltip, extra, brushName, initialBrush, zoomDomain, showPoints, pointSize, title }) {
   const xAxis = {
     // No external KaTeX-rendered label div for this one shared axis
     // title the way single-chart panels used to have -- with several
@@ -646,79 +595,99 @@ function metricPanel({ data, xField, yField, xKind, yTitle, tooltip, extra, brus
   // initial condition itself is plotted -- symlog (linear near zero,
   // log further out) shows that point instead of silently dropping it
   // the way a pure log scale would.
-  const xScale = {
-    type: xKind === "time" ? "symlog" : "log",
-    ...(xDomainFromBrush ? { domain: { param: xDomainFromBrush, field: xField } } : {}),
-  };
+  const xScale = { type: xKind === "time" ? "symlog" : "log" };
+  // Even the panels with no *visible* points (everything except the
+  // zoomed one) still get real, invisible point geometry here -- not
+  // just a bare `"line"` mark -- so their tooltip has something to
+  // actually hit-test against. A bare line's tooltip only fires when
+  // the cursor lands pixel-perfectly on its (1px) rendered stroke;
+  // confirmed directly as a real regression once the old "nearest"
+  // hover-capture layer (which used to double as a much more forgiving
+  // tooltip target) was removed for the crosshair's own sake (see
+  // NOTES.md) -- these invisible points restore *some* of that
+  // forgiveness back, without needing any selection/param machinery.
   const mainLayer = {
-    data: { values: data },
-    mark: showPoints ? { type: "line", point: { filled: true, size: pointSize || 50, opacity: 0.9 } } : "line",
+    data: { values: zoomFilteredData(data, xField, zoomDomain) },
+    mark: { type: "line", point: { filled: true, size: pointSize || (showPoints ? 50 : 200), opacity: showPoints ? 0.9 : 0 } },
     encoding: {
       x: { field: xField, type: "quantitative", scale: xScale, axis: xAxis },
       y: { field: yField, type: "quantitative", scale: { type: "log" }, axis: { title: yTitle, titleFontSize: 10 } },
       tooltip,
     },
-    ...(brushName ? { params: [{ name: brushName, select: { type: "interval", encodings: ["x"] } }] } : {}),
+    ...(brushName ? {
+      params: [{
+        name: brushName,
+        select: { type: "interval", encodings: ["x"] },
+        // Re-populates the drag rectangle to match the already-committed
+        // zoom across a rebuild (redraw() resets zoomDomain to null for
+        // a fresh run, but a rebuild triggered by the brush listener
+        // itself should still show the box where the user left it).
+        ...(initialBrush ? { value: { x: initialBrush } } : {}),
+      }],
+    } : {}),
   };
   return {
     title: title ? { text: title, fontSize: 12, fontWeight: "bold", anchor: "start", offset: 6 } : undefined,
     width: PANEL_WIDTH, height: showPoints ? DETAIL_HEIGHT : OVERVIEW_HEIGHT,
-    layer: [
-      ...(extra || []), mainLayer,
-      ...(withHoverParam ? [hoverCaptureLayer(data, xField, yField, xDomainFromBrush, tooltip)] : []),
-      crosshairLayer(data, xField, xDomainFromBrush),
-    ],
+    layer: [...(extra || []), mainLayer],
   };
 }
 
-// Free-fall mode's density-vs-time panel -- deliberately x=density,
-// y=time (the reverse of how this looked before) specifically so its
-// x-axis is the exact same field/scale as the temperature-vs-density
-// panel below it, letting that panel's brush rescale this one too (see
-// runViewSpec()). Drops the very first row (the initial condition
-// itself, at t=0) rather than plotting it -- found directly, not
-// hypothetical: free-fall time is heavily front-loaded (almost all of
-// it elapses while density is still low and barely changing; the
-// actual collapse through the remaining many decades of density is
-// comparatively instantaneous), so a scale that has to include an
-// exact t=0 point is forced to spend a lot of its range on a mostly
-// flat, uninformative rise and squeezes the rest into a sliver. Once
-// the t=0 point is gone, y (elapsed time) never needs to include zero
-// either, so it can just be `log` like everything else here instead of
-// `symlog` -- more of the chart's vertical space goes to the range
-// that's actually interesting.
-function densityTimePanel(rows, xDomainFromBrush) {
-  const plotRows = rows.filter((r) => r.t > 0);
-  const xScale = {
-    type: "log",
-    ...(xDomainFromBrush ? { domain: { param: xDomainFromBrush, field: "x" } } : {}),
-  };
+// Free-fall mode's density-vs-time panel -- x=density, y=*lookback*
+// time (time remaining until this run's last step), not elapsed time.
+// Plain elapsed time was flagged directly as "not that useful": free-
+// fall time is heavily front-loaded (almost all of it elapses while
+// density is still low and barely changing; the collapse through the
+// remaining many decades of density is comparatively instantaneous),
+// so elapsed-time-vs-density rises steeply over just the first couple
+// of density decades and then goes flat for the rest of the run --
+// which, for this project, means exactly the regime it cares most
+// about (the H2-formation-heating/shock physics, all happening at high
+// density) falls in the boring flat part. Counting backward from the
+// end instead flips which part is flat: lookback time is large and
+// slowly-varying at *low* density (almost the entire run is still
+// ahead) and shrinks rapidly toward zero at *high* density (as the
+// solver approaches its last step) -- moving the detail to line up
+// with the high-density regime that's actually interesting, exactly
+// the "lookback time" idea suggested directly, and confirmed by
+// screenshot to read as a real improvement, not just a relabeling.
+// Drops the very last row (lookback = 0 there, by definition) rather
+// than plotting it, the same reasoning the old elapsed-time version
+// dropped its t=0 row for: once that one zero is gone, this can stay
+// plain `log` instead of `symlog`.
+function densityTimePanel(rows, zoomDomain) {
+  const tEnd = rows[rows.length - 1].t;
+  const plotRows = zoomFilteredData(
+    rows.map((r) => ({ ...r, lookback: tEnd - r.t, lookbackHuman: formatTimeAuto(tEnd - r.t) })).filter((r) => r.lookback > 0),
+    "x", zoomDomain,
+  );
+  const xScale = { type: "log" };
   const tooltip = [
     { field: "i", title: "step", type: "quantitative" },
     { field: "x", title: "n (cm⁻³)", type: "quantitative", format: ".3~g" },
-    { field: "tHuman", title: "t", type: "nominal" },
-    { field: "t", title: "t (s)", type: "quantitative", format: ".3~g" },
+    { field: "lookbackHuman", title: "time to end", type: "nominal" },
+    { field: "lookback", title: "time to end (s)", type: "quantitative", format: ".3~g" },
+    { field: "tHuman", title: "elapsed t", type: "nominal" },
   ];
   const mainLayer = {
     data: { values: plotRows },
-    mark: "line",
+    // Invisible point geometry, not a bare line -- same reasoning as
+    // metricPanel()'s own mainLayer: gives the tooltip something real
+    // to hit-test against instead of a 1px stroke.
+    mark: { type: "line", point: { filled: true, size: 200, opacity: 0 } },
     encoding: {
       x: { field: "x", type: "quantitative", scale: xScale, axis: { title: "n (cm⁻³)", titleFontSize: 10, labelOverlap: "greedy" } },
       y: {
-        field: "t", type: "quantitative", scale: { type: "log" },
-        axis: { title: "t (s)", titleFontSize: 10, labelAngle: 0, labelExpr: TIME_LABEL_EXPR },
+        field: "lookback", type: "quantitative", scale: { type: "log" },
+        axis: { title: "time to end (s)", titleFontSize: 10, labelAngle: 0, labelExpr: TIME_LABEL_EXPR },
       },
       tooltip,
     },
   };
   return {
-    title: { text: "density vs. time", fontSize: 12, fontWeight: "bold", anchor: "start", offset: 6 },
+    title: { text: "density vs. time-to-end", fontSize: 12, fontWeight: "bold", anchor: "start", offset: 6 },
     width: PANEL_WIDTH, height: OVERVIEW_HEIGHT,
-    layer: [
-      mainLayer,
-      hoverCaptureLayer(plotRows, "x", "t", xDomainFromBrush, tooltip),
-      crosshairLayer(plotRows, "x", xDomainFromBrush),
-    ],
+    layer: [mainLayer],
   };
 }
 
@@ -731,7 +700,7 @@ function densityTimePanel(rows, xDomainFromBrush) {
 // (Vega-Lite's own "bind: legend" selection, an officially documented
 // recipe -- not a bespoke mechanism) instead of a fixed on/off toggle,
 // since there are only ever one or two series here anyway.
-function ionPanel(xKind, rows, width, xDomainFromBrush) {
+function ionPanel(xKind, rows, width, zoomDomain) {
   const n = rows.length;
   const pointSize = Math.max(4, Math.min(30, 2000 / Math.max(n, 1)));
   const palette = isDarkMode() ? ION_H2_COLORS.dark : ION_H2_COLORS.light;
@@ -750,15 +719,12 @@ function ionPanel(xKind, rows, width, xDomainFromBrush) {
     title: { text: "Ionized / H₂ fraction", fontSize: 12, fontWeight: "bold", anchor: "start", offset: 6 },
     width, height: DETAIL_HEIGHT,
     layer: [{
-      data: { values: rows },
+      data: { values: zoomFilteredData(rows, "x", zoomDomain) },
       mark: { type: "line", point: { filled: true, size: pointSize, opacity: 0.9 } },
       encoding: {
         x: {
           field: "x", type: "quantitative",
-          scale: {
-            type: xKind === "time" ? "symlog" : "log",
-            ...(xDomainFromBrush ? { domain: { param: xDomainFromBrush, field: "x" } } : {}),
-          },
+          scale: { type: xKind === "time" ? "symlog" : "log" },
           axis: {
             title: xKind === "time" ? "t (s)" : "n (cm⁻³)", titleFontSize: 10, labelOverlap: "greedy",
             labelAngle: xKind === "time" ? -40 : 0,
@@ -771,7 +737,7 @@ function ionPanel(xKind, rows, width, xDomainFromBrush) {
         tooltip: ionTooltip,
       },
       params: [{ name: "ionToggle", select: { type: "point", fields: ["quantity"] }, bind: "legend" }],
-    }, hoverCaptureLayer(rows, "x", "value", xDomainFromBrush, ionTooltip), crosshairLayer(rows, "x", xDomainFromBrush)],
+    }],
   };
 }
 
@@ -785,7 +751,7 @@ function ionPanel(xKind, rows, width, xDomainFromBrush) {
 // (not a density/mass-fraction toggle) -- one fewer control, and mass
 // fraction is the more physically comparable quantity across species
 // spanning very different absolute number densities anyway.
-function speciesPanel(xKind, rows, width, xDomainFromBrush) {
+function speciesPanel(xKind, rows, width, zoomDomain) {
   const n = rows.length;
   const pointSize = Math.max(4, Math.min(30, 2000 / Math.max(n, 1)));
   const domain = plotableSpecies().filter((name) => speciesMassAmu(name) !== undefined);
@@ -801,15 +767,12 @@ function speciesPanel(xKind, rows, width, xDomainFromBrush) {
     title: { text: "Species mass fraction (click a legend entry to isolate it)", fontSize: 12, fontWeight: "bold", anchor: "start", offset: 6 },
     width, height: DETAIL_HEIGHT + 20,
     layer: [{
-      data: { values: rows },
+      data: { values: zoomFilteredData(rows, "x", zoomDomain) },
       mark: { type: "line", point: { filled: true, size: pointSize, opacity: 0.9 } },
       encoding: {
         x: {
           field: "x", type: "quantitative",
-          scale: {
-            type: xKind === "time" ? "symlog" : "log",
-            ...(xDomainFromBrush ? { domain: { param: xDomainFromBrush, field: "x" } } : {}),
-          },
+          scale: { type: xKind === "time" ? "symlog" : "log" },
           axis: {
             title: xKind === "time" ? "t (s)" : "n (cm⁻³)", titleFontSize: 10, labelOverlap: "greedy",
             labelAngle: xKind === "time" ? -40 : 0,
@@ -830,42 +793,31 @@ function speciesPanel(xKind, rows, width, xDomainFromBrush) {
         tooltip: speciesTooltip,
       },
       params: [{ name: "speciesToggle", select: { type: "point", fields: ["species"] }, bind: "legend" }],
-    }, hoverCaptureLayer(rows, "x", "value", xDomainFromBrush, speciesTooltip), crosshairLayer(rows, "x", xDomainFromBrush)],
+    }],
   };
 }
 
 // The whole current-run view: a single vertical stack -- density vs.
 // time (free-fall only), temperature/thermal-energy vs. x, *zoomed*
 // temperature vs. x, ionization/H2 fraction, species mass fraction --
-// all sharing one crosshair and one zoom-brush. `resolve.selection.
-// hover: "global"` is what makes every panel's own "hover" param apply
-// across every sibling panel in this whole composition -- confirmed
-// directly in an isolated repro before relying on it here (see
-// NOTES.md).
+// sharing one zoom (no shared crosshair any more -- see NOTES.md).
 //
 // Zooming: exactly one panel (temperature-vs-x, `tempOverview` below)
 // declares the actual brush; every *other* panel -- including the
-// dedicated zoomed copy of temperature itself, `tempZoomed` -- binds
-// its own x-domain to that one selection by name (`xDomainFromBrush`),
-// so dragging a range there rescales every other panel sharing that
-// axis in place. The brush-holding panel itself is deliberately
-// excluded from rescaling (it stays at the full range, showing the
-// selection box, the standard Vega-Lite "overview" role) -- which is
-// exactly why temperature alone still needs a real second, zoomed
-// instance: it's the one metric whose own overview can't double as its
-// own zoomed view.
+// dedicated zoomed copy of temperature itself, `tempZoomed` -- gets the
+// same `zoomDomain` baked in as a literal `[lo, hi]` array (see
+// metricPanel()'s own note on why this isn't a live param binding any
+// more). The brush-holding panel itself is deliberately excluded from
+// rescaling (it stays at the full range, showing the selection box,
+// the standard Vega-Lite "overview" role) -- which is exactly why
+// temperature alone still needs a real second, zoomed instance: it's
+// the one metric whose own overview can't double as its own zoomed
+// view.
 //
 // The composition is a single flat top-level `vconcat` -- every panel a
-// direct item, never wrapped in an intermediate row spec -- both because
-// that's the vertical single-chart-per-row layout asked for, and because
-// a real Vega bug (not this file's own logic; reproduced in isolation
-// with plain placeholder data, unrelated to anything in this app) throws
-// runtime TypeErrors on hover as soon as an `interval` (brush) selection
-// and a globally-resolved `point` (hover) selection coexist anywhere
-// beneath *two or more* levels of concat nesting. A flat `vconcat` is
-// only one level, so this is safe -- confirmed directly, not assumed
-// (see NOTES.md).
-function runViewSpec({ mode, rows, tempField, tempExtra, ionRows, speciesRows }) {
+// direct item, never wrapped in an intermediate row spec -- simply the
+// vertical single-chart-per-row layout asked for.
+function runViewSpec({ mode, rows, tempField, tempExtra, ionRows, speciesRows, zoomDomain }) {
   const tempTitle = (FIELD_TITLE[tempField] || tempField).replace(/\s*\(.*\)/, "");
   const xKindOfMode = mode === "freefall" ? "density" : "time";
   const tempTooltip = [
@@ -877,20 +829,24 @@ function runViewSpec({ mode, rows, tempField, tempExtra, ionRows, speciesRows })
   ];
 
   // The one panel that actually holds the brush -- see the note above.
+  // `initialBrush` re-populates its drag rectangle to match an
+  // already-committed `zoomDomain` across a rebuild (see embedChart()) --
+  // without it, every zoom commit would visibly reset the box to empty
+  // even though the other panels stayed zoomed.
   const tempOverview = metricPanel({
     data: rows, xField: "x", yField: tempField, xKind: xKindOfMode, yTitle: FIELD_TITLE[tempField] || tempField,
     tooltip: tempTooltip, extra: tempExtra,
-    brushName: "brush", withHoverParam: true,
+    brushName: "brush", initialBrush: zoomDomain,
     title: `${tempTitle} vs. ${xKindOfMode}`,
   });
   // The one *zoomed* panel this composition has -- directly below the
-  // temperature-vs-x panel above, bound to that one's brush. Circles/
-  // points on this one specifically (not on any other panel here) --
-  // an explicit, standing preference from earlier in this project.
+  // temperature-vs-x panel above. Circles/points on this one
+  // specifically (not on any other panel here) -- an explicit, standing
+  // preference from earlier in this project.
   const tempZoomed = metricPanel({
     data: rows, xField: "x", yField: tempField, xKind: xKindOfMode, yTitle: FIELD_TITLE[tempField] || tempField,
     tooltip: tempTooltip, extra: tempExtra,
-    xDomainFromBrush: "brush", withHoverParam: true, showPoints: true, pointSize: 50,
+    zoomDomain, showPoints: true, pointSize: 50,
     title: "zoomed",
   });
 
@@ -899,10 +855,10 @@ function runViewSpec({ mode, rows, tempField, tempExtra, ionRows, speciesRows })
   // held constant in cool mode, so this would just be a flat, useless
   // line there (matches the previous design's same free-fall-only
   // gating for this chart).
-  if (mode === "freefall") items.push(densityTimePanel(rows, "brush"));
+  if (mode === "freefall") items.push(densityTimePanel(rows, zoomDomain));
   items.push(tempOverview, tempZoomed);
-  if (ionRows.length) items.push(ionPanel(xKindOfMode, ionRows, PANEL_WIDTH, "brush"));
-  if (speciesRows.length) items.push(speciesPanel(xKindOfMode, speciesRows, PANEL_WIDTH, "brush"));
+  if (ionRows.length) items.push(ionPanel(xKindOfMode, ionRows, PANEL_WIDTH, zoomDomain));
+  if (speciesRows.length) items.push(speciesPanel(xKindOfMode, speciesRows, PANEL_WIDTH, zoomDomain));
 
   return {
     $schema: "https://vega.github.io/schema/vega-lite/v5.json",
@@ -913,7 +869,7 @@ function runViewSpec({ mode, rows, tempField, tempExtra, ionRows, speciesRows })
     // -- "quantity" vs "species" -- so Vega-Lite wouldn't merge their
     // legends by default regardless), made explicit because it was
     // asked for directly: the two must never share one legend.
-    resolve: { selection: { hover: "global" }, legend: { color: "independent" }, scale: { color: "independent" } },
+    resolve: { legend: { color: "independent" }, scale: { color: "independent" } },
     vconcat: items,
   };
 }
@@ -993,6 +949,54 @@ function scheduleRedraw() {
 // it's still current before doing anything, discarding a stale,
 // superseded resolution instead of acting on it.
 let redrawGeneration = 0;
+
+// The inputs runViewSpec() needs to rebuild the chart *without*
+// re-running the solver -- set once per redraw() (a real new run), then
+// reused every time embedChart() rebuilds just for a zoom commit (see
+// the note on `zoomDomain` in metricPanel()). `zoomDomain` is `null`
+// (full range) or a committed `[lo, hi]` array; `zoomCommitTimer`
+// debounces the brush's own live signal (which fires continuously while
+// dragging) down to a single rebuild once dragging actually pauses.
+let lastSpecInputs = null;
+let zoomDomain = null;
+let zoomCommitTimer = null;
+
+// (Re-)embeds `#chart-run` from `lastSpecInputs`/`zoomDomain` -- called
+// once per real redraw() (a fresh solve) and again, independently, every
+// time a brush drag settles on a new range. `generation`, when given,
+// is the calling redraw()'s own guard token; a bare call (from the
+// brush listener itself) mints a fresh one, since that's a legitimate
+// new "most recent" request in its own right, not a stale leftover.
+function embedChart(generation) {
+  const myGeneration = generation === undefined ? ++redrawGeneration : generation;
+  const spec = runViewSpec({ ...lastSpecInputs, zoomDomain });
+  vegaEmbed("#chart-run", spec, { actions: false, renderer: "svg" }).then((res) => {
+    if (myGeneration !== redrawGeneration) return; // a newer redraw()/embedChart() already superseded this one
+    runView = res.view;
+    res.view.addSignalListener("brush", (name, value) => {
+      updateZoomTimespan(value, lastSpecInputs.rows);
+      // Debounced, not live: binding every follower panel's domain
+      // straight to this signal (so they rescale continuously while
+      // dragging) was tried first and is a real, measured performance
+      // problem of its own -- see the note on `zoomDomain` in
+      // metricPanel() -- so this only *reads* the live value here, and
+      // commits a rebuilt chart with it baked in as a plain array once
+      // dragging actually pauses for a moment, not on every intermediate
+      // drag position.
+      if (zoomCommitTimer) clearTimeout(zoomCommitTimer);
+      zoomCommitTimer = setTimeout(() => {
+        const xRange = value && value.x;
+        const next = (xRange && xRange.length === 2)
+          ? [Math.min(xRange[0], xRange[1]), Math.max(xRange[0], xRange[1])]
+          : null;
+        if (JSON.stringify(next) === JSON.stringify(zoomDomain)) return; // nothing actually changed
+        zoomDomain = next;
+        embedChart();
+      }, 250);
+    });
+    updateZoomTimespan(zoomDomain ? { x: zoomDomain } : null, lastSpecInputs.rows);
+  });
+}
 
 function currentFractions() {
   const fractions = {};
@@ -1088,27 +1092,53 @@ function redraw() {
     }
   }
 
-  const spec = runViewSpec({ mode: currentMode, rows, tempField, tempExtra, ionRows, speciesRows });
-  vegaEmbed("#chart-run", spec, { actions: false, renderer: "svg" }).then((res) => {
-    if (myGeneration !== redrawGeneration) return; // a newer redraw() already superseded this one
-    runView = res.view;
-    res.view.addSignalListener("brush", (name, value) => updateZoomTimespan(value, rows));
-    updateZoomTimespan(null, rows); // nothing selected yet on a fresh embed
-  });
+  // A fresh run always starts unzoomed -- cached here, not passed as an
+  // argument, so the brush-commit path below (embedChart(), fired later
+  // from a signal listener, long after this particular redraw() call
+  // has returned) can rebuild the exact same chart with a new zoom
+  // without re-running the solver.
+  lastSpecInputs = { mode: currentMode, rows, tempField, tempExtra, ionRows, speciesRows };
+  zoomDomain = null;
+  embedChart(myGeneration);
 
+  updateRunSummary(result, rows, elapsed);
+
+  lastResult = result;
+  document.getElementById("download-csv").disabled = false;
+}
+
+function summaryStat(label, value, extra) {
+  return `<span class="stat"><span class="label">${label}</span><strong>${value}</strong>`
+    + (extra ? ` <span class="stat-extra">${extra}</span>` : "") + `</span>`;
+}
+
+// A prominent, always-visible run-metadata readout up near the top of
+// the page -- replaces what used to be one small muted line at the
+// bottom of the sidebar (easy to miss, and easy to lose track of once
+// the species-fraction sliders pushed it further down): how many steps
+// the adaptive stepper actually took, wall-clock solve time, and the
+// same final-state numbers the old line had (final T, ionization, H2
+// fraction, shock crossing), each labeled instead of packed into one
+// run-on sentence.
+function updateRunSummary(result, rows, elapsed) {
+  const el = document.getElementById("run-summary");
+  if (!el) return;
   const finalT = result.T[result.T.length - 1];
   const finalIon = result.ion[result.ion.length - 1];
   const finalH2 = result.h2[result.h2.length - 1];
   const finalTime = result.t[result.t.length - 1];
-  let statusText = `${rows.length} steps, ${elapsed.toFixed(1)} ms -- final T=${finalT ? finalT.toFixed(1) : "?"} K, `
-    + `ionized=${finalIon ? finalIon.toExponential(2) : "?"}`;
-  if (finalH2 !== null && finalH2 !== undefined) statusText += `, H2/H_tot=${finalH2.toExponential(2)}`;
-  if (finalTime !== undefined) statusText += `, elapsed t=${formatTimeAuto(finalTime)} (${finalTime.toExponential(2)} s)`;
-  if (result.shockTriggered) statusText += `, shock crossed at n=${result.nShock.toExponential(2)} cm⁻³`;
-  document.getElementById("status").textContent = statusText;
-
-  lastResult = result;
-  document.getElementById("download-csv").disabled = false;
+  const chips = [
+    summaryStat("steps", rows.length),
+    summaryStat("solve time", `${elapsed.toFixed(1)} ms`),
+  ];
+  if (finalTime !== undefined) {
+    chips.push(summaryStat("elapsed sim. time", formatTimeAuto(finalTime), `(${finalTime.toExponential(2)} s)`));
+  }
+  chips.push(summaryStat("final T", finalT !== undefined ? `${finalT.toFixed(1)} K` : "?"));
+  chips.push(summaryStat("final ionized", finalIon !== undefined ? finalIon.toExponential(2) : "?"));
+  if (finalH2 !== null && finalH2 !== undefined) chips.push(summaryStat("final H₂/H_tot", finalH2.toExponential(2)));
+  if (result.shockTriggered) chips.push(summaryStat("shock crossed at", `${result.nShock.toExponential(2)} cm⁻³`));
+  el.innerHTML = chips.join("");
 }
 
 function csvCell(v) {

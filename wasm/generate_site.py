@@ -54,6 +54,8 @@ PAGE_TEMPLATE = """<!doctype html>
   Drag a slider and the chemistry re-solves and redraws immediately.
 </p>
 
+<div id="run-summary" class="run-summary">loading solver&hellip;</div>
+
 <div class="layout">
   <div class="panel">
     <div class="row">
@@ -132,19 +134,17 @@ PAGE_TEMPLATE = """<!doctype html>
       <div id="chart-run"></div>
       <p class="preset-note">One combined view of the current run (a
         single Vega-Lite spec), stacked vertically: in free-fall mode,
-        density vs. time, then temperature vs. density, a zoomed copy of
-        that, then ionization/H₂ fraction, then species mass fraction --
-        cool mode drops the density-vs-time panel (density is held
-        constant there, so it'd just be a flat line). Drag a rectangle
-        on the temperature-vs-density (or, in cool mode,
+        density vs. time-to-end, then temperature vs. density, a zoomed
+        copy of that, then ionization/H₂ fraction, then species mass
+        fraction -- cool mode drops the density-vs-time panel (density
+        is held constant there, so it'd just be a flat line). Drag a
+        rectangle on the temperature-vs-density (or, in cool mode,
         temperature-vs-time) panel to zoom every other panel -- including
         its own zoomed copy directly below it -- to the same range at
         once; that one panel itself stays at the full range, showing the
         selection box -- click it (without dragging) to clear the zoom.
         The selected range's real elapsed time is read out just above.
-        Every panel shares one crosshair: hover anywhere on any of them
-        to see the same step marked everywhere at once. The shaded band
-        on the temperature panels marks 1500-2500 K, the
+        The shaded band on the temperature panels marks 1500-2500 K, the
         H2-formation-heating-driven fragmentation regime this project
         targets -- orientation only, not a solver threshold. Click a
         legend entry (ionization/H₂, species) to isolate just that
