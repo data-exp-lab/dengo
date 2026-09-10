@@ -3269,3 +3269,138 @@ isolating one species via its legend dims every other species'
 *own* color at reduced opacity (not a flat gray) and leaves the
 ionization chart's own legend/lines completely unaffected. Full
 `pytest` suite unaffected (120/120), rerun after this change.
+
+**2026-09-10, continued: density-vs-time data fix, a zoomed temperature
+panel back, real tooltip/crosshair fixes, and a lag investigation.**
+
+Several follow-up requests on the vertical-stack redesign, all from
+direct feedback after using it:
+
+**Density-vs-time chart was hard to read.** Free-fall time is heavily
+front-loaded (almost all elapsed time passes while density is still low
+and barely changing; the actual collapse through the remaining many
+decades of density is comparatively instantaneous), so a y-axis (time)
+that has to include an exact t=0 point wastes most of its vertical
+range on a near-flat early rise and squeezes everything else into a
+sliver. Fixed exactly as suggested: this one panel's data now starts
+from the first real *result* row, not the initial condition (`rows.
+filter((r) => r.t > 0)`) -- once t=0 is gone, y never needs to include
+zero either, so it's plain `log` now instead of `symlog`. Confirmed by
+screenshot: the y-axis now spans "3.17 kyr" to "2.22 Myr" using the
+full log range, instead of collapsing to a flat line near the top.
+
+**A zoomed temperature-vs-density panel is back, directly below the
+overview** (third panel now: density-vs-time, temperature-vs-density,
+*zoomed* temperature-vs-density, ionization/H2, species). The brush-
+holding panel can't also show its own rescaled view (it has to stay at
+the full range to show the selection box), so temperature is the one
+metric that still needs a real second, zoomed instance -- unlike
+density-vs-time/ionization/species, which just rescale their one
+existing panel in place. Circles/points only on this one panel, per a
+standing preference from earlier in this project.
+
+**Real bug hit and fixed while wiring "hover" onto more panels.** Tried
+attaching `hover` directly to ionPanel's/speciesPanel's/the new zoomed
+panel's already-visible `line`-with-`point` mark, instead of a separate
+invisible capture layer, on the theory that a mark with real point
+geometry wouldn't need one. Confirmed directly this doesn't work:
+Vega-Lite warns "nearest transform is not supported for line marks" for
+that composite mark exactly like it does for a bare line, silently
+breaking the selection there -- and because `hover` is globally
+resolved, it broke the crosshair on *every* panel, not just the ones
+with the bad wiring (confirmed: caught by inspecting the DOM directly
+for the crosshair's own dashed rule elements after hovering, since nothing
+appeared anywhere, then bisected which panels' wiring was actually at
+fault by checking console warnings). Reverted to the established
+pattern -- `nearest` always gets its own dedicated invisible `point`
+capture layer, even on panels that also show real points.
+
+**Tooltips had stopped working, including on temperature-vs-density.**
+Root cause: the invisible hover-capture layer, being the topmost mark
+under the cursor, is what actually receives every pointer event --
+being invisible doesn't stop it from doing that -- so it was silently
+starving the visible line's own `tooltip` encoding of ever seeing one.
+Fixed by giving `hoverCaptureLayer()` its own matching `tooltip`
+encoding, so *it* serves the tooltip instead. Confirmed directly:
+hovering a real data point now shows the expected tooltip content on
+every panel, including temperature-vs-density.
+
+**Crosshair now genuinely active and synchronized on every panel**
+(previously only two of them could initiate it). All five panels
+declare their own `hover` capture layer; `resolve.selection.hover:
+"global"` still merges them into one shared value, same mechanism as
+before, just applied more broadly. Confirmed directly via a DOM check
+for the crosshair's own dashed line elements (not just screenshots,
+which are too subtle to fully trust for a thin dashed line) --
+hovering any one panel produces a matching dashed line at the same x
+position in all five. (One test-methodology trap along the way, worth
+recording: Playwright's multi-step interpolated `mouse.move()` can
+pass through the narrow gaps *between* panels and end up dispatching a
+final position that reads as "pointer left the capture layer," so a
+naive before/after screenshot comparison read as "nothing happens" when
+the real, single-jump mouse position worked correctly the whole time --
+switching the test to a plain single-position move resolved the false
+alarm.)
+
+**Crosshair color changed to light gray** (was yellow/orange before;
+flagged as reading too similarly to the shock event's own red dashed
+line in practice) -- the shock line's own color is untouched.
+
+**Lag investigation -- a real, measured regression, only partially
+fixed.** Confirmed directly (not just "it feels slow"): a single
+`mouse.move()` on this chart took ~1.6-1.7 seconds end-to-end, versus
+~20ms on a blank page -- a real, large regression, not a subjective
+impression. Traced (via a series of isolated repros matching this
+app's actual panel/data-size shape) to the combination of `hover` being
+globally resolved across many views *and* several of those views having
+an x-scale `domain` bound to the *other* ("brush") selection: merely
+having such a domain-from-param binding present anywhere in the
+composition cost roughly 700-900ms extra per hover tick in the repro,
+regardless of how many layers repeated it (removing it from 2 of 3
+layers per panel, or all but one, made no measurable difference) --
+this points to Vega's own dataflow scheduler not cleanly isolating
+"hover changed" pulses from nodes that depend on the unrelated "brush"
+selection, rather than anything fixable by restructuring the JSON spec
+differently. Switching the renderer from `"svg"` to `"canvas"` was
+tested and made no difference either (ruling out DOM/paint cost as the
+bottleneck). One real, verified win was found -- feeding the
+ionization/species hover-capture layers the smaller per-step dataset
+instead of their own long-format one cut the isolated repro's lag by
+about 20% -- but implementing it would mean that layer's own tooltip
+encoding could no longer show the actual quantity/species value (that
+data isn't in the smaller dataset), which is a worse regression than
+the lag it would fix, so it was not applied. Documented here rather
+than shipped silently: this is a real, only-partially-addressed
+limitation, not something resolved -- consistent with the standing
+"this may not be possible to address" allowance.
+
+**Species legend "annoying to turn everything on/off"**: no code
+change needed here -- confirmed directly that Vega-Lite's `bind:
+"legend"` point selection already supports shift-click to select
+several entries at once (a documented, built-in part of the mechanism,
+not something added), which is exactly the "easy way" asked for.
+Updated the explanatory caption to actually say so, since nothing in
+the UI itself hinted at it before.
+
+**Page width shrunk back down**: the vertical single-chart-per-row
+layout doesn't need the two-column grid's ~1700px width any more, and
+at that width the explanatory paragraph below the chart -- constrained
+only by the page's own width, not the chart's -- wrapped at a line
+length far wider than the now-single-column chart sitting above it, an
+imbalance flagged directly ("the text is much larger than the
+charts"). `max-width` dropped from `min(1700px, 95vw)` to `min(1100px,
+95vw)` -- sized to the single ~620px-wide chart column plus the
+sidebar, not the old two-column figure. Confirmed by screenshot: text
+and chart now read as proportionate, and confirmed via the same
+five-viewport-width sweep as the previous responsive-width fix (1366px
+through 4K) that this still causes zero page-level horizontal scroll
+at every one of them.
+
+Verified: real Emscripten rebuild, headless-Chrome regression across
+cool/free-fall modes, both themes, a network with H2 species and one
+without, brush-zoom (confirmed the new zoomed panel and every other
+follower panel rescale together, the anchor panel stays full-range),
+tooltip content on every panel, crosshair sync via direct DOM
+inspection, shift-click multi-select on the species legend, and zero
+page-level horizontal scroll at five viewport widths. Full `pytest`
+suite unaffected (120/120).

@@ -15,19 +15,20 @@
 body {
   margin: 0; background: var(--bg); color: var(--fg);
   font: 14px/1.4 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
-  /* A fraction of the viewport, not a fixed value -- wide enough for
-     free-fall's two-column chart grid (each column ~620px, side by
-     side) plus the sidebar on an ordinary desktop window, but a flat
-     1700px could exceed the actual browser width (an unmaximized
-     window, a smaller "HD" display, OS chrome eating into it) and
-     force the whole page to scroll horizontally just to reach the
-     right edge. Capped at 1700px so it doesn't keep growing on a 4K
-     display well past a comfortable reading width. `.chart-box` below
-     also gets its own `overflow-x: auto` as a second line of defense,
-     for the (still possible on a narrow window) case where the charts'
-     own fixed pixel widths don't fit even this -- so that scrolls
-     locally instead of taking the whole page with it. */
-  padding: 24px; max-width: min(1700px, 95vw); margin-inline: auto;
+  /* The chart column is a single vertical stack of ~620px-wide panels
+     now (see app.js), not the two-column grid this was originally
+     widened for -- a much wider page just left the explanatory text
+     below the chart wrapping at a line length far wider than the chart
+     itself sits above it, an visually unbalanced mismatch, flagged
+     directly ("the text is much larger than the charts"). Sized back
+     down close to the single-column chart's own real width (sidebar +
+     gap + one ~660px-with-padding chart-box), not the old two-column
+     figure. Still a fraction of the viewport, not a fixed value, so it
+     doesn't exceed the actual browser width on a smaller display;
+     `.chart-box` below also gets its own `overflow-x: auto` as a second
+     line of defense for the (still possible on a narrow window) case
+     where the chart's own fixed pixel width doesn't fit even this. */
+  padding: 24px; max-width: min(1100px, 95vw); margin-inline: auto;
 }
 h1 { font-size: 1.3em; margin: 0 0 4px; }
 p.sub { color: var(--muted); margin: 0 0 20px; }
