@@ -15,12 +15,19 @@
 body {
   margin: 0; background: var(--bg); color: var(--fg);
   font: 14px/1.4 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
-  /* Wide enough for free-fall's two-column chart grid (each column
-     ~620px, side by side) without the sidebar's own width having to
-     shrink to make room -- most desktop monitors have the room, and
-     the .layout/.panel media query below still collapses to one
-     column on anything narrower. */
-  padding: 24px; max-width: 1700px; margin-inline: auto;
+  /* A fraction of the viewport, not a fixed value -- wide enough for
+     free-fall's two-column chart grid (each column ~620px, side by
+     side) plus the sidebar on an ordinary desktop window, but a flat
+     1700px could exceed the actual browser width (an unmaximized
+     window, a smaller "HD" display, OS chrome eating into it) and
+     force the whole page to scroll horizontally just to reach the
+     right edge. Capped at 1700px so it doesn't keep growing on a 4K
+     display well past a comfortable reading width. `.chart-box` below
+     also gets its own `overflow-x: auto` as a second line of defense,
+     for the (still possible on a narrow window) case where the charts'
+     own fixed pixel widths don't fit even this -- so that scrolls
+     locally instead of taking the whole page with it. */
+  padding: 24px; max-width: min(1700px, 95vw); margin-inline: auto;
 }
 h1 { font-size: 1.3em; margin: 0 0 4px; }
 p.sub { color: var(--muted); margin: 0 0 20px; }
@@ -66,7 +73,17 @@ input[type=range] { width: 100%; }
   background: var(--bg); color: var(--fg); cursor: pointer; white-space: nowrap;
 }
 #download-csv:disabled { opacity: 0.5; cursor: default; }
-#charts { display: flex; flex-direction: column; gap: 8px; }
+#charts {
+  display: flex; flex-direction: column; gap: 8px;
+  /* A grid item's default min-width is `auto` (i.e. its content's
+     intrinsic width), which overrides the "1fr" track it's in and
+     forces the whole page wider rather than ever actually handing
+     overflow down to `.chart-box`'s own `overflow-x: auto` below --
+     the classic CSS Grid "won't shrink past content" gotcha. Without
+     this, the local scrollbar `.chart-box` is meant to provide never
+     engages; the page scrolls horizontally instead. */
+  min-width: 0;
+}
 /* Species-fraction sliders are the single biggest contributor to panel
    height (6-9 rows on top of everything else) -- collapsible so the
    panel can be kept short when you're not tweaking them. Open by
@@ -77,7 +94,15 @@ input[type=range] { width: 100%; }
 }
 .species-details > summary::marker { color: var(--muted); }
 .species-details[open] > summary { margin-bottom: 12px; }
-.chart-box { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 8px; }
+.chart-box {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 8px;
+  /* The Vega-Lite chart inside is built with fixed pixel panel widths
+     (see PANEL_WIDTH in app.js), so it doesn't shrink with the window
+     the way everything else on the page does -- scroll it locally
+     rather than force the whole body to scroll horizontally on a
+     narrower window. */
+  overflow-x: auto;
+}
 .chart-title { font-size: 0.85em; font-weight: 600; color: var(--fg); margin: 2px 4px 4px; }
 .chart-row { display: flex; align-items: stretch; }
 .axis-y {
