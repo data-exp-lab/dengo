@@ -46,6 +46,14 @@ EXPORTED_FUNCTIONS = [
 # builds their equivalent at runtime from the same data-* convention
 # sweep_param_row() below uses, so both kinds of row read identically
 # to the rest of sweep.js's facet/option-slider/run/CSV logic.
+#
+# Upper bound on how many points a single swept dimension's "steps"
+# slider can request -- guards the facet-row-count x facet-col-count
+# combinatorial blowup a typo'd/careless setting could otherwise cause.
+# Mirrored as sweep.js's own MAX_SWEEP_POINTS constant (JS has no way to
+# import a Python literal at page-generation time) -- keep both in sync.
+MAX_SWEEP_POINTS = 25
+
 PARAM_SPECS = [
     {"id": "T", "label": "T", "unit": "K", "min": 1, "max": 4.7, "step": 0.05,
      "default": 3, "modes": ("cool", "freefall"), "log": True},
@@ -71,15 +79,19 @@ PARAM_SPECS = [
 def sweep_param_row(spec):
     """One parameter's row on the sweep page: a checkbox toggling
     between the ordinary single-value slider (the default -- this
-    dimension is just held fixed) and a min/max/step range triple --
-    three more range sliders, not typed numbers, same as every other
-    control on this site (min/max each spanning the parameter's own
-    full slider range; step from that same slider's own granularity up
-    to the full span). Every row -- this generated kind and the dynamic
-    per-species kind sweep.js builds at runtime -- is fully self-
-    describing via data-* attributes on the wrapping .sweep-row div, so
-    none of sweep.js's facet-picker/option-slider/run/CSV logic needs to
-    special-case "is this T or a species fraction"."""
+    dimension is just held fixed) and a swept range: a dual-handle
+    noUiSlider (https://refreshless.com/nouislider/) picking min/max at
+    once -- spanning the parameter's own full slider range -- plus a
+    separate single-handle range slider for how many points to sample
+    (evenly spaced between min and max, in the slider's own native
+    units) rather than a step size. The min/max slider is just an empty
+    <div>; sweep.js's initMinMaxSlider() attaches the actual noUiSlider
+    instance to it once at wireRowToggle() time. Every row -- this
+    generated kind and the dynamic per-species kind sweep.js builds at
+    runtime -- is fully self-describing via data-* attributes on the
+    wrapping .sweep-row div, so none of sweep.js's facet-picker/option-
+    slider/run/CSV logic needs to special-case "is this T or a species
+    fraction"."""
     unit_html = " (%s)" % spec["unit"] if spec["unit"] else ""
     return """
     <div class="row sweep-row" id="row-{id}" data-id="{id}" data-modes="{modes}"
@@ -94,16 +106,12 @@ def sweep_param_row(spec):
       </div>
       <div class="sweep-range" id="{id}-range-wrap" hidden>
         <div class="sweep-range-field">
-          <label>min <span class="val" id="{id}-min-val"></span></label>
-          <input type="range" id="{id}-min" min="{min}" max="{max}" step="{step}" value="{min}">
+          <label>range <span class="val" id="{id}-min-val"></span> &ndash; <span class="val" id="{id}-max-val"></span></label>
+          <div class="minmax-slider" id="{id}-minmax"></div>
         </div>
         <div class="sweep-range-field">
-          <label>max <span class="val" id="{id}-max-val"></span></label>
-          <input type="range" id="{id}-max" min="{min}" max="{max}" step="{step}" value="{max}">
-        </div>
-        <div class="sweep-range-field">
-          <label>step <span class="val" id="{id}-swstep-val"></span></label>
-          <input type="range" id="{id}-swstep" min="{step}" max="{span}" step="{step}" value="{step}">
+          <label>steps <span class="val" id="{id}-count-val"></span></label>
+          <input type="range" id="{id}-count" min="2" max="{max_points}" step="1" value="6">
         </div>
         <span class="sweep-range-preview" id="{id}-preview"></span>
       </div>
@@ -111,7 +119,7 @@ def sweep_param_row(spec):
         id=spec["id"], modes=",".join(spec["modes"]), log="1" if spec["log"] else "0",
         unit=spec["unit"], label=spec["label"], unit_html=unit_html,
         min=spec["min"], max=spec["max"], step=spec["step"], default=spec["default"],
-        span=spec["max"] - spec["min"],
+        max_points=MAX_SWEEP_POINTS,
     )
 
 PAGE_TEMPLATE = """<!doctype html>
@@ -358,6 +366,7 @@ SWEEP_PAGE_TEMPLATE = """<!doctype html>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>%F0%9F%A7%AA</text></svg>">
 <link rel="stylesheet" href="../style.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/nouislider@15.8.1/dist/nouislider.min.css">
 </head>
 <body>
 <div class="nav"><a href="../">&larr; all networks</a> <a href="index.html">&larr; {title} widget</a></div>
@@ -365,12 +374,12 @@ SWEEP_PAGE_TEMPLATE = """<!doctype html>
 <p class="sub">
   Every parameter below is normally a single fixed value (same sliders as
   the <a href="index.html">main widget</a>) -- check "sweep" on any of
-  them to turn it into a min/max/step range instead. Pick two swept
-  parameters to facet the charts on (rows &times; columns of small
-  multiples); any others you've checked get pinned to one value at a
-  time via their own slider underneath, rather than shown all at once.
-  Not live -- a sweep is many full runs, not one, so it only runs when
-  asked.
+  them to turn it into a min/max range plus a number of points to sample
+  across it instead. Pick two swept parameters to facet the charts on
+  (rows &times; columns of small multiples); any others you've checked
+  get pinned to one value at a time via their own slider underneath,
+  rather than shown all at once. Not live -- a sweep is many full runs,
+  not one, so it only runs when asked.
 </p>
 
 <div class="layout">
@@ -420,6 +429,7 @@ SWEEP_PAGE_TEMPLATE = """<!doctype html>
 <script src="https://cdn.jsdelivr.net/npm/vega@5"></script>
 <script src="https://cdn.jsdelivr.net/npm/vega-lite@5"></script>
 <script src="https://cdn.jsdelivr.net/npm/vega-embed@6"></script>
+<script src="https://cdn.jsdelivr.net/npm/nouislider@15.8.1/dist/nouislider.min.js"></script>
 <script src="dengo_wasm.js"></script>
 <script src="../app.js"></script>
 <script src="../sweep.js"></script>

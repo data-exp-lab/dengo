@@ -63,23 +63,52 @@ function checkedRows() {
   return allSweepRows().filter((r) => r.dataset.modes.includes(currentMode) && isChecked(r));
 }
 
-// arange-style sampling in the *slider's own native units* (log10(phys)
-// for every log-scale parameter, plain physical units for mach) --
-// reuses each dimension's own already-established min/max/step
-// convention (PARAM_SPECS in generate_site.py) rather than asking users
-// to reason in decades vs. linear units per-parameter. Capped well
-// short of a runaway combinatorial blowup from a typo'd tiny step.
-const MAX_SWEEP_POINTS = 25;
+// -- Min/max: a dual-handle noUiSlider per row --------------------------
+// https://refreshless.com/nouislider/ -- one slider picks both min and
+// max at once (a real range, not two independently-dragged sliders
+// that can pass each other silently). Keyed by row id since each row's
+// underlying <div> only becomes a slider once initMinMaxSlider() runs.
+const minMaxSliders = {};
+
+function initMinMaxSlider(rowEl) {
+  const spec = rowSpec(rowEl);
+  const el = document.getElementById(spec.id + "-minmax");
+  if (!el || el.noUiSlider) return; // already initialized
+  noUiSlider.create(el, {
+    start: [spec.min, spec.max],
+    connect: true,
+    range: { min: spec.min, max: spec.max },
+    step: spec.step,
+  });
+  minMaxSliders[spec.id] = el.noUiSlider;
+  el.noUiSlider.on("update", () => {
+    updateRangeFieldVals(rowEl);
+    updateRangePreview(rowEl);
+    refreshOptionSliders();
+  });
+}
+
+function minMaxValues(rowEl) {
+  const inst = minMaxSliders[rowEl.dataset.id];
+  const [lo, hi] = inst.get().map(Number);
+  return { lo, hi };
+}
+
+// linspace: `count` points evenly spaced between min and max (in the
+// slider's own native units -- log10(phys) for every log-scale
+// parameter, plain physical units for mach), rather than a step *size*
+// -- reuses each dimension's own already-established min/max
+// convention (PARAM_SPECS in generate_site.py). `count` itself is
+// capped by its own slider's max attribute (MAX_SWEEP_POINTS), which
+// bounds the facet-row-count x facet-col-count combinatorial blowup a
+// careless setting could otherwise cause; parseInt's own fallback here
+// is just a last-resort guard against a not-yet-initialized slider.
+const MAX_SWEEP_POINTS = 25; // keep in sync with generate_site.py's own MAX_SWEEP_POINTS
 function sweepValuesFor(rowEl) {
-  const id = rowEl.dataset.id;
-  const lo = parseFloat(document.getElementById(id + "-min").value);
-  const hi = parseFloat(document.getElementById(id + "-max").value);
-  const step = Math.abs(parseFloat(document.getElementById(id + "-swstep").value)) || 1;
-  const span = Math.abs(hi - lo);
-  const n = Math.min(MAX_SWEEP_POINTS, Math.max(1, Math.floor(span / step + 1e-9) + 1));
-  const sign = hi >= lo ? 1 : -1;
+  const { lo, hi } = minMaxValues(rowEl);
+  const count = Math.max(2, Math.min(MAX_SWEEP_POINTS, parseInt(document.getElementById(rowEl.dataset.id + "-count").value, 10) || 2));
   const values = [];
-  for (let k = 0; k < n; k++) values.push(lo + sign * k * step);
+  for (let k = 0; k < count; k++) values.push(lo + (hi - lo) * k / (count - 1));
   return values;
 }
 
@@ -90,9 +119,7 @@ function updateRangePreview(rowEl) {
   const values = sweepValuesFor(rowEl);
   const lo = formatPhysical(spec, values[0]);
   const hi = formatPhysical(spec, values[values.length - 1]);
-  previewEl.textContent = values.length > 1
-    ? `→ ${lo} – ${hi}, ${values.length} points`
-    : `→ ${lo} (min/max/step give only one point)`;
+  previewEl.textContent = `→ ${lo} – ${hi}, ${values.length} points`;
 }
 
 function updateFixedValDisplay(rowEl) {
@@ -103,27 +130,24 @@ function updateFixedValDisplay(rowEl) {
   valEl.textContent = formatPhysical(spec, parseFloat(input.value));
 }
 
-// The min/max/step range trio are themselves range sliders (see
-// sweep_param_row() in generate_site.py) -- min/max read as physical
-// values, same convention as the fixed slider's own readout; step is
-// shown in the parameter's native slider units (a log-scale
-// parameter's "step" is a multiplicative factor, not one physical
-// quantity, so there's no single physical unit to convert it to).
+// The min/max noUiSlider's own "update" handler (see initMinMaxSlider())
+// keeps min/max readouts current; this just covers the "steps" (point
+// count) slider, a plain integer with no physical-unit conversion.
 function updateRangeFieldVals(rowEl) {
   const spec = rowSpec(rowEl);
-  for (const suffix of ["min", "max"]) {
-    const el = document.getElementById(`${spec.id}-${suffix}`);
-    const valEl = document.getElementById(`${spec.id}-${suffix}-val`);
-    if (el && valEl) valEl.textContent = formatPhysical(spec, parseFloat(el.value));
-  }
-  const stepEl = document.getElementById(spec.id + "-swstep");
-  const stepValEl = document.getElementById(spec.id + "-swstep-val");
-  if (stepEl && stepValEl) stepValEl.textContent = parseFloat(stepEl.value).toPrecision(3);
+  const { lo, hi } = minMaxValues(rowEl);
+  const minValEl = document.getElementById(spec.id + "-min-val");
+  const maxValEl = document.getElementById(spec.id + "-max-val");
+  if (minValEl) minValEl.textContent = formatPhysical(spec, lo);
+  if (maxValEl) maxValEl.textContent = formatPhysical(spec, hi);
+  const countEl = document.getElementById(spec.id + "-count");
+  const countValEl = document.getElementById(spec.id + "-count-val");
+  if (countEl && countValEl) countValEl.textContent = countEl.value;
 }
 
 // One shared wiring path for every row, static or dynamic: the
 // checkbox flips which of .sweep-fixed/.sweep-range is visible, and
-// both the single slider and the range trio keep their own live
+// both the single slider and the range controls keep their own live
 // readouts current. Checking/unchecking or editing a range also
 // refreshes the facet dropdowns and option-slider set, since both
 // depend on exactly which rows are currently checked.
@@ -152,13 +176,14 @@ function wireRowToggle(rowEl) {
       enforceGroupConservation(id.slice("sp-".length)); // enforceGroupConservation() takes the bare species name (e.g. "H_2"), not the "sp-"-prefixed slider id
     }
   });
-  for (const suffix of ["-min", "-max", "-swstep"]) {
-    document.getElementById(id + suffix).addEventListener("input", () => {
-      updateRangeFieldVals(rowEl);
-      updateRangePreview(rowEl);
-      refreshOptionSliders();
-    });
-  }
+
+  initMinMaxSlider(rowEl);
+  document.getElementById(id + "-count").addEventListener("input", () => {
+    updateRangeFieldVals(rowEl);
+    updateRangePreview(rowEl);
+    refreshOptionSliders();
+  });
+
   updateFixedValDisplay(rowEl);
   updateRangeFieldVals(rowEl);
   updateRangePreview(rowEl);
@@ -197,16 +222,12 @@ function buildSweepSpeciesRows(config) {
       </div>
       <div class="sweep-range" id="sp-${name}-range-wrap" hidden>
         <div class="sweep-range-field">
-          <label>min <span class="val" id="sp-${name}-min-val"></span></label>
-          <input type="range" id="sp-${name}-min" min="-14" max="0" step="0.1" value="-14">
+          <label>range <span class="val" id="sp-${name}-min-val"></span> &ndash; <span class="val" id="sp-${name}-max-val"></span></label>
+          <div class="minmax-slider" id="sp-${name}-minmax"></div>
         </div>
         <div class="sweep-range-field">
-          <label>max <span class="val" id="sp-${name}-max-val"></span></label>
-          <input type="range" id="sp-${name}-max" min="-14" max="0" step="0.1" value="0">
-        </div>
-        <div class="sweep-range-field">
-          <label>step <span class="val" id="sp-${name}-swstep-val"></span></label>
-          <input type="range" id="sp-${name}-swstep" min="0.1" max="14" step="0.1" value="0.5">
+          <label>steps <span class="val" id="sp-${name}-count-val"></span></label>
+          <input type="range" id="sp-${name}-count" min="2" max="${MAX_SWEEP_POINTS}" step="1" value="6">
         </div>
         <span class="sweep-range-preview" id="sp-${name}-preview"></span>
       </div>
