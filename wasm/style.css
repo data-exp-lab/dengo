@@ -206,6 +206,15 @@ input:disabled { opacity: 0.5; }
 .param-slider.noUi-target { background: var(--border); border: none; box-shadow: none; height: 4px; border-radius: 2px; }
 .param-slider .noUi-connect { background: var(--accent); }
 .param-slider .noUi-handle {
+  /* Keep noUiSlider's own `right`-based centering (its internal
+     transform math is computed relative to .noUi-origin's right-
+     anchored positioning -- switching this to `left` renders the
+     handle nowhere near the actual value, off the edge of the track
+     entirely). This rule has the same specificity as noUiSlider's own
+     .noUi-horizontal .noUi-handle default -- it only wins because
+     nouislider.min.css's <link> is placed before style.css's in
+     SWEEP_PAGE_TEMPLATE, not because of anything selector-specific
+     here, so don't reorder those two <link> tags. */
   width: 14px; height: 14px; right: -7px; top: -5px; border-radius: 50%;
   background: var(--accent); border: none; box-shadow: none; cursor: pointer;
 }
