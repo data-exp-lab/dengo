@@ -73,7 +73,7 @@ a { color: var(--accent); }
    label's flex/space-between (built for a label-and-numeric-readout
    pair, like every slider above it), this one just wants the box and
    its text sitting next to each other. */
-.row-inline { margin-bottom: 12px; }
+.row-inline { display: flex; align-items: center; gap: 6px; margin-bottom: 12px; }
 .checkbox-label { display: flex; align-items: center; gap: 6px; font-size: 0.9em; cursor: pointer; }
 input[type=range] { width: 100%; }
 #ic-preset {
@@ -81,6 +81,19 @@ input[type=range] { width: 100%; }
   background: var(--bg); color: var(--fg); font-size: 0.9em;
 }
 .preset-note { font-size: 0.78em; color: var(--muted); margin: 6px 0 0; }
+/* Gates a slider's long explanatory paragraph behind a small "?" --
+   real, keyboard-focusable buttons (not a hover-only CSS tooltip), so
+   the note stays reachable without a mouse; app.js's one delegated
+   listener toggles `hidden` on the <p id="note-..."> it points at via
+   aria-controls and flips aria-expanded to match. */
+.label-text { display: inline-flex; align-items: center; gap: 5px; }
+.info-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 15px; height: 15px; padding: 0; border-radius: 50%;
+  border: 1px solid var(--border); background: var(--bg); color: var(--muted);
+  font-size: 0.72em; line-height: 1; cursor: pointer;
+}
+.info-btn:hover, .info-btn[aria-expanded="true"] { color: var(--accent); border-color: var(--accent); }
 .modebar { display: flex; gap: 6px; margin-bottom: 16px; }
 .modebar button {
   flex: 1; padding: 8px; border-radius: 6px; border: 1px solid var(--border);
@@ -89,11 +102,18 @@ input[type=range] { width: 100%; }
 .modebar button.active { background: var(--accent); color: white; border-color: var(--accent); }
 .status-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 10px; }
 #status { font-size: 0.85em; color: var(--muted); min-height: 1.2em; }
-#download-csv {
+.status-actions { display: flex; gap: 8px; }
+#download-csv, #export-editor {
   font-size: 0.78em; padding: 4px 10px; border-radius: 6px; border: 1px solid var(--border);
   background: var(--bg); color: var(--fg); cursor: pointer; white-space: nowrap;
 }
-#download-csv:disabled { opacity: 0.5; cursor: default; }
+#download-csv:disabled, #export-editor:disabled { opacity: 0.5; cursor: default; }
+/* vega-embed still builds its own "Open in Vega Editor" action into
+   #chart-run's DOM (see embedChart() in app.js) -- #export-editor above
+   just clicks that link programmatically instead of reimplementing it,
+   so vega-embed's own floating "..." menu would otherwise show up
+   redundantly right on top of the chart. */
+#chart-run details { display: none; }
 #charts {
   display: flex; flex-direction: column; gap: 8px;
   /* A grid item's default min-width is `auto` (i.e. its content's
@@ -107,8 +127,9 @@ input[type=range] { width: 100%; }
 }
 /* Species-fraction sliders are the single biggest contributor to panel
    height (6-9 rows on top of everything else) -- collapsible so the
-   panel can be kept short when you're not tweaking them. Open by
-   default: nothing changes for anyone who never notices the toggle. */
+   panel can be kept short when you're not tweaking them. Collapsed by
+   default: the per-species starting fractions are a "reach in and
+   tweak it" control, not something most visits need to see. */
 .species-details { margin-bottom: 16px; }
 .species-details > summary {
   cursor: pointer; font-size: 0.9em; color: var(--fg); margin-bottom: 8px;

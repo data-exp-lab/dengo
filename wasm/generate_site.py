@@ -71,93 +71,111 @@ PAGE_TEMPLATE = """<!doctype html>
     </div>
 
     <div class="modebar">
-      <button id="mode-cool" class="active">Cool at constant density</button>
-      <button id="mode-freefall">Free-fall collapse</button>
+      <button id="mode-cool">Cool at constant density</button>
+      <button id="mode-freefall" class="active">Free-fall collapse</button>
     </div>
 
-    <div class="row">
-      <label>n<sub>H</sub> (cm<sup>-3</sup>) <span class="val" id="nH-val"></span></label>
-      <input type="range" id="nH" min="-4" max="17" step="0.1" value="4">
-    </div>
     <div class="row">
       <label>T (K) <span class="val" id="T-val"></span></label>
       <input type="range" id="T" min="1" max="4.7" step="0.05" value="3">
     </div>
-    <details class="species-details" open>
-      <summary>Initial species fractions</summary>
-      <div id="species-sliders"></div>
-    </details>
-    <div class="row" id="dtf-row">
+    <div class="row">
+      <label>initial n: 10<sup>x</sup> cm<sup>-3</sup> <span class="val" id="nH-val"></span></label>
+      <input type="range" id="nH" min="-4" max="17" step="0.1" value="4">
+    </div>
+    <div class="row" id="dtf-row" style="display:none">
       <label>total time: 10<sup>x</sup> s <span class="val" id="dtf-val"></span></label>
       <input type="range" id="dtf" min="6" max="17" step="0.1" value="13">
     </div>
-    <div class="row" id="ntarget-row" style="display:none">
-      <label>target n: 10<sup>x</sup> cm<sup>-3</sup> <span class="val" id="ntarget-val"></span></label>
+    <div class="row" id="ntarget-row">
+      <label><span class="label-text">target n: 10<sup>x</sup> cm<sup>-3</sup>
+        <button type="button" class="info-btn" aria-expanded="false" aria-controls="note-ntarget" title="More info">?</button></span>
+        <span class="val" id="ntarget-val"></span></label>
       <input type="range" id="ntarget" min="2" max="20" step="0.1" value="15">
-      <p class="preset-note">Beyond ~10¹⁶ cm⁻³ this single-zone free-fall
-        model (no hydrostatic core support, no shock/radiative-transfer
-        physics) is no longer a realistic dynamical model of an actual
-        protostar -- the range goes further anyway so you can watch the
-        chemistry network's own H2 collisional-dissociation reactions
-        (H2 + H &rarr; 3H, H2 + H2 &rarr; 2H + H2) play out.</p>
-
-      <label>collapse rate: 10<sup>x</sup> &times; free-fall <span class="val" id="collapse-rate-val"></span></label>
+      <p class="preset-note" id="note-ntarget" hidden>Beyond ~10¹⁶ cm⁻³ this
+        single-zone free-fall model (no hydrostatic core support, no
+        shock/radiative-transfer physics) is no longer a realistic
+        dynamical model of an actual protostar -- the range goes further
+        anyway so you can watch the chemistry network's own H2
+        collisional-dissociation reactions (H2 + H &rarr; 3H, H2 + H2
+        &rarr; 2H + H2) play out.</p>
+    </div>
+    <div class="row" id="collapse-rate-row">
+      <label><span class="label-text">collapse rate: 10<sup>x</sup> &times; free-fall
+        <button type="button" class="info-btn" aria-expanded="false" aria-controls="note-collapse-rate" title="More info">?</button></span>
+        <span class="val" id="collapse-rate-val"></span></label>
       <input type="range" id="collapse-rate" min="-2" max="2" step="0.1" value="0">
-      <p class="preset-note">Multiplies the ordinary free-fall compression
-        rate (and rescales the adaptive step size to match, so this changes
-        how much real time the chemistry gets per decade of density, not
-        just how many steps the run takes) -- below 1&times; is a
-        (schematic) stand-in for extra support slowing the contraction
-        below the free-fall rate (rotation, magnetic fields, pressure);
-        above 1&times; for whatever might make it collapse faster
-        (additional infall, turbulence). 10<sup>0</sup> = 1&times; is
-        ordinary, unmodified free-fall.</p>
-
-      <label>step size: 10<sup>x</sup> &times; t<sub>ff</sub> <span class="val" id="ff-step-val"></span></label>
+      <p class="preset-note" id="note-collapse-rate" hidden>Multiplies the
+        ordinary free-fall compression rate (and rescales the adaptive
+        step size to match, so this changes how much real time the
+        chemistry gets per decade of density, not just how many steps the
+        run takes) -- below 1&times; is a (schematic) stand-in for extra
+        support slowing the contraction below the free-fall rate
+        (rotation, magnetic fields, pressure); above 1&times; for whatever
+        might make it collapse faster (additional infall, turbulence).
+        10<sup>0</sup> = 1&times; is ordinary, unmodified free-fall.</p>
+    </div>
+    <div class="row" id="ff-step-row">
+      <label><span class="label-text">step size: 10<sup>x</sup> &times; t<sub>ff</sub>
+        <button type="button" class="info-btn" aria-expanded="false" aria-controls="note-ff-step" title="More info">?</button></span>
+        <span class="val" id="ff-step-val"></span></label>
       <input type="range" id="ff-step" min="-2.5" max="-1" step="0.1" value="-2">
-      <p class="preset-note">How large a fraction of the local free-fall
-        time each step advances -- smaller is finer-grained (more,
-        smaller steps; slower but more resolved, especially the
-        compress-then-react approximation each step itself makes) and
-        larger is coarser (fewer, bigger steps; faster but blockier).
-        10<sup>-2</sup> is this page's original, unexposed default.</p>
-
+      <p class="preset-note" id="note-ff-step" hidden>How large a fraction
+        of the local free-fall time each step advances -- smaller is
+        finer-grained (more, smaller steps; slower but more resolved,
+        especially the compress-then-react approximation each step itself
+        makes) and larger is coarser (fewer, bigger steps; faster but
+        blockier). 10<sup>-2</sup> is this page's original, unexposed
+        default.</p>
+    </div>
+    <div class="row">
+      <label><span class="label-text">solver tolerance: 10<sup>x</sup>
+        <button type="button" class="info-btn" aria-expanded="false" aria-controls="note-tolerance" title="More info">?</button></span>
+        <span class="val" id="tolerance-val"></span></label>
+      <input type="range" id="tolerance" min="-8" max="-3" step="0.5" value="-5">
+      <p class="preset-note" id="note-tolerance" hidden>Convergence
+        tolerance passed straight through to the compiled solver's own
+        per-step Newton iteration (nothing about the solver itself
+        changes) -- tighter (more negative) is more accurate but slower
+        and more prone to a step failing to converge at all; looser
+        trades accuracy for speed and robustness. 10<sup>-5</sup> is this
+        page's original, unexposed default.</p>
+    </div>
+    <details class="species-details">
+      <summary>Initial species fractions</summary>
+      <div id="species-sliders"></div>
+    </details>
+    <div class="row" id="shock-row">
       <div class="row-inline">
         <label class="checkbox-label"><input type="checkbox" id="shock-enabled" checked> Enable shock</label>
+        <button type="button" class="info-btn" aria-expanded="false" aria-controls="note-shock" title="More info">?</button>
       </div>
       <label>shock density: 10<sup>x</sup> cm<sup>-3</sup> <span class="val" id="nshock-val"></span></label>
       <input type="range" id="nshock" min="10" max="20" step="0.1" value="14">
       <label>shock Mach number <span class="val" id="mach-val"></span></label>
       <input type="range" id="mach" min="1" max="100" step="0.5" value="5">
-      <p class="preset-note">Optional accretion-shock heating event, applied
-        once, the first time density crosses the shock density above --
-        a Rankine-Hugoniot jump (using the gas's own composition-weighted
-        &gamma; at that moment and the Mach number here) applied to both
-        density and thermal energy in a single step, on top of ordinary
-        free-fall compression. Uncheck "Enable shock" above to disable it
-        outright without losing your density/Mach settings (setting Mach
-        to 1 does the same thing -- the zero-strength limit, no jump at
-        all -- but resets to 1 instead of just toggling off). This
-        doesn't model a real accretion shock's radius/mass-dependent
-        infall speed -- Mach number is a free dial here, not derived --
-        so treat it as "how strong a shock would it take", not a
-        prediction of where or how strong a real one occurs.</p>
-    </div>
-
-    <div class="row">
-      <label>solver tolerance: 10<sup>x</sup> <span class="val" id="tolerance-val"></span></label>
-      <input type="range" id="tolerance" min="-8" max="-3" step="0.5" value="-5">
-      <p class="preset-note">Convergence tolerance passed straight through
-        to the compiled solver's own per-step Newton iteration (nothing
-        about the solver itself changes) -- tighter (more negative) is
-        more accurate but slower and more prone to a step failing to
-        converge at all; looser trades accuracy for speed and robustness.
-        10<sup>-5</sup> is this page's original, unexposed default.</p>
+      <p class="preset-note" id="note-shock" hidden>Optional accretion-shock
+        heating event, applied once, the first time density crosses the
+        shock density above -- a Rankine-Hugoniot jump (using the gas's
+        own composition-weighted &gamma; at that moment and the Mach
+        number here) applied to both density and thermal energy in a
+        single step, on top of ordinary free-fall compression. Uncheck
+        "Enable shock" above to disable it outright without losing your
+        density/Mach settings (setting Mach to 1 does the same thing --
+        the zero-strength limit, no jump at all -- but resets to 1
+        instead of just toggling off). This doesn't model a real
+        accretion shock's radius/mass-dependent infall speed -- Mach
+        number is a free dial here, not derived -- so treat it as "how
+        strong a shock would it take", not a prediction of where or how
+        strong a real one occurs.</p>
     </div>
 
     <div class="status-row">
       <div id="status">loading solver&hellip;</div>
-      <button type="button" id="download-csv" disabled title="every step of the run currently on screen (not a sweep's several overlaid runs)">Download CSV</button>
+      <div class="status-actions">
+        <button type="button" id="download-csv" disabled title="every step of the run currently on screen (not a sweep's several overlaid runs)">Download CSV</button>
+        <button type="button" id="export-editor" disabled title="Open the current chart in the online Vega-Lite editor">Open in Vega editor</button>
+      </div>
     </div>
   </div>
 
