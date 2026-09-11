@@ -74,7 +74,7 @@ a { color: var(--accent); }
    pair, like every slider above it), this one just wants the box and
    its text sitting next to each other. */
 .row-inline { display: flex; align-items: center; gap: 6px; margin-bottom: 12px; }
-.checkbox-label { display: flex; align-items: center; gap: 6px; font-size: 0.9em; cursor: pointer; }
+.checkbox-label { display: flex; align-items: center; justify-content: space-between; gap: 6px; font-size: 0.9em; cursor: pointer; }
 input[type=range] { width: 100%; }
 #ic-preset {
   width: 100%; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border);
@@ -178,43 +178,61 @@ input[type=range] { width: 100%; }
 .species-toggle input[type=checkbox] { margin: 0; }
 .chart-placeholder { color: var(--muted); font-size: 0.85em; padding: 16px 8px; margin: 0; }
 input:disabled { opacity: 0.5; }
-/* sweep.html: each parameter's row toggles between the ordinary single
-   slider (.sweep-fixed) and a swept range (.sweep-range) via its own
-   checkbox -- see sweep_param_row() in generate_site.py and
-   wireRowToggle() in sweep.js, which is the only thing that flips which
-   of the two is [hidden]. */
-.sweep-row .checkbox-label { font-size: 0.85em; color: var(--muted); margin-bottom: 4px; }
+/* sweep.html: each parameter's row has one persistent slider that's
+   destroyed/recreated with 1 or 2 handles when its checkbox toggles
+   (see rebuildSlider() in sweep.js) -- nothing here needs to show/hide
+   between two different control blocks, so nothing shifts position
+   when "sweep" is checked. */
+.sweep-row .checkbox-label { font-size: 0.85em; color: var(--muted); }
 .sweep-row .checkbox-label b { color: var(--fg); font-weight: 600; }
-/* The range itself is a dual-handle noUiSlider (min/max at once, see
-   initMinMaxSlider() in sweep.js); the point-count field is a plain
-   range slider. Both get the same stacked label+readout+slider layout
-   as .row above. */
-.sweep-range { display: flex; flex-direction: column; gap: 10px; }
-.sweep-range-field label {
-  display: flex; justify-content: space-between; font-size: 0.8em; color: var(--muted); margin-bottom: 6px;
+.sweep-row .checkbox-label .val { font-size: 1.1em; } /* readout is the same font-size everywhere else -- this label's own text is smaller than usual, so scale it back up to match */
+/* The point-count ("steps") field stays in the layout at all times,
+   just disabled until "sweep" is checked -- same pattern as "Enable
+   shock" and its density/Mach sliders on the main page -- so it never
+   appears/disappears either. */
+.sweep-count-field { margin-top: 6px; }
+.sweep-count-field label {
+  display: flex; justify-content: space-between; font-size: 0.8em; color: var(--muted); margin-bottom: 4px;
 }
-.sweep-range-field label span.val { font-variant-numeric: tabular-nums; color: var(--accent); font-weight: 600; }
-.sweep-range-field input[type=range] { width: 100%; }
-.sweep-range-preview { font-size: 0.78em; color: var(--muted); }
-/* noUiSlider theming -- reuses this page's own CSS variables (already
-   light/dark-aware, see :root above) rather than its default palette,
-   so the dual-handle min/max slider reads as part of this site instead
-   of a visibly bolted-on third-party widget. */
-.minmax-slider { margin: 4px 8px 10px; }
-.minmax-slider.noUi-target { background: var(--border); border: none; box-shadow: none; height: 6px; }
-.minmax-slider .noUi-connect { background: var(--accent); }
-.minmax-slider .noUi-handle {
-  width: 16px; height: 16px; right: -8px; top: -5px; border-radius: 50%;
-  background: var(--accent); border: 2px solid var(--bg); box-shadow: none; cursor: pointer;
+.sweep-count-field label span.val { font-variant-numeric: tabular-nums; color: var(--accent); font-weight: 600; }
+.sweep-range-preview { display: block; min-height: 1.1em; font-size: 0.78em; color: var(--muted); margin-top: 4px; }
+/* noUiSlider theming -- sized and colored to match this page's own
+   plain <input type=range> sliders (see the plain accent-colored
+   native thumb elsewhere on this page) rather than noUiSlider's own
+   bulkier default look, so swapping 1 handle for 2 reads as "the same
+   slider, more of it" and not as a visibly different, bolted-on
+   third-party widget. */
+.param-slider { margin: 8px 2px 4px; }
+.param-slider.noUi-target { background: var(--border); border: none; box-shadow: none; height: 4px; border-radius: 2px; }
+.param-slider .noUi-connect { background: var(--accent); }
+.param-slider .noUi-handle {
+  width: 14px; height: 14px; right: -7px; top: -5px; border-radius: 50%;
+  background: var(--accent); border: none; box-shadow: none; cursor: pointer;
 }
-.minmax-slider .noUi-handle::before, .minmax-slider .noUi-handle::after { content: none; }
-.minmax-slider .noUi-handle:focus { outline: 2px solid var(--accent); outline-offset: 2px; }
+.param-slider .noUi-handle::before, .param-slider .noUi-handle::after { content: none; }
+.param-slider .noUi-handle:focus { outline: 2px solid var(--accent); outline-offset: 2px; }
 #facet-row, #facet-col {
   padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border);
   background: var(--bg); color: var(--fg); font-size: 0.9em; margin-right: 12px;
 }
 #option-sliders { margin-top: 4px; }
 #option-sliders .preset-note { margin-bottom: 12px; }
+/* Facet pickers + Run/Download live at the top of the sweep page's
+   panel (see SWEEP_PAGE_TEMPLATE) -- the controls you come back to
+   over and over as ranges/facets change, not something worth
+   scrolling past 9+ parameter rows to reach every time. */
+.panel-divider { border: none; border-top: 1px solid var(--border); margin: 18px 0; }
+.sweep-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+.sweep-actions #sweep-status { font-size: 0.85em; color: var(--muted); }
+.btn-primary, .btn-secondary {
+  padding: 7px 16px; border-radius: 6px; font-size: 0.85em; cursor: pointer; white-space: nowrap;
+  transition: filter 0.1s ease, background-color 0.1s ease;
+}
+.btn-primary { background: var(--accent); color: white; border: 1px solid var(--accent); }
+.btn-primary:hover:not(:disabled) { filter: brightness(1.12); }
+.btn-secondary { background: var(--bg); color: var(--fg); border: 1px solid var(--border); }
+.btn-secondary:hover:not(:disabled) { background: var(--panel); border-color: var(--accent); }
+.btn-primary:disabled, .btn-secondary:disabled { opacity: 0.5; cursor: default; }
 .nav { margin-bottom: 20px; }
 .nav a { margin-right: 12px; }
 ul.network-list { list-style: none; padding: 0; }

@@ -77,44 +77,45 @@ PARAM_SPECS = [
 
 
 def sweep_param_row(spec):
-    """One parameter's row on the sweep page: a checkbox toggling
-    between the ordinary single-value slider (the default -- this
-    dimension is just held fixed) and a swept range: a dual-handle
-    noUiSlider (https://refreshless.com/nouislider/) picking min/max at
-    once -- spanning the parameter's own full slider range -- plus a
-    separate single-handle range slider for how many points to sample
-    (evenly spaced between min and max, in the slider's own native
-    units) rather than a step size. The min/max slider is just an empty
-    <div>; sweep.js's initMinMaxSlider() attaches the actual noUiSlider
-    instance to it once at wireRowToggle() time. Every row -- this
-    generated kind and the dynamic per-species kind sweep.js builds at
-    runtime -- is fully self-describing via data-* attributes on the
-    wrapping .sweep-row div, so none of sweep.js's facet-picker/option-
-    slider/run/CSV logic needs to special-case "is this T or a species
+    """One parameter's row on the sweep page: a checkbox that reconfigures
+    a single persistent noUiSlider (https://refreshless.com/nouislider/)
+    in place -- one handle (an ordinary fixed value) when unchecked, two
+    (min/max at once) when checked -- rather than swapping between two
+    different control blocks, so checking/unchecking never shifts
+    anything else on the page. The slider div itself is empty in the
+    generated HTML; sweep.js's rebuildSlider() (destroy + recreate, same
+    div) attaches/reattaches the actual noUiSlider instance, backed by
+    the hidden <input> for its actual value(s) -- that hidden input is
+    what currentFractions()/setIcs()/the sweep-run loop still read via
+    plain document.getElementById(id).value, same as the main widget
+    page, so none of that shared code needed to change. The "steps"
+    slider (how many points to sample between min and max) stays in the
+    layout at all times too, just disabled until checked -- same
+    already-established pattern as the shock density/Mach sliders next
+    to "Enable shock" on the main page. Every row -- this generated kind
+    and the dynamic per-species kind sweep.js builds at runtime -- is
+    fully self-describing via data-* attributes on the wrapping
+    .sweep-row div, so none of sweep.js's facet-picker/option-slider/
+    run/CSV logic needs to special-case "is this T or a species
     fraction"."""
     unit_html = " (%s)" % spec["unit"] if spec["unit"] else ""
     return """
     <div class="row sweep-row" id="row-{id}" data-id="{id}" data-modes="{modes}"
          data-log="{log}" data-unit="{unit}" data-label="{label}">
       <label class="checkbox-label">
-        <input type="checkbox" id="{id}-sweep" class="sweep-toggle" data-id="{id}">
-        sweep <b>{label}{unit_html}</b>
-      </label>
-      <div class="sweep-fixed" id="{id}-fixed-wrap">
-        <input type="range" id="{id}" min="{min}" max="{max}" step="{step}" value="{default}">
+        <span class="label-text">
+          <input type="checkbox" id="{id}-sweep" class="sweep-toggle" data-id="{id}">
+          sweep <b>{label}{unit_html}</b>
+        </span>
         <span class="val" id="{id}-val"></span>
+      </label>
+      <input type="range" id="{id}" min="{min}" max="{max}" step="{step}" value="{default}" hidden>
+      <div class="param-slider" id="{id}-slider"></div>
+      <div class="sweep-count-field">
+        <label>steps <span class="val" id="{id}-count-val"></span></label>
+        <input type="range" id="{id}-count" min="2" max="{max_points}" step="1" value="6" disabled>
       </div>
-      <div class="sweep-range" id="{id}-range-wrap" hidden>
-        <div class="sweep-range-field">
-          <label>range <span class="val" id="{id}-min-val"></span> &ndash; <span class="val" id="{id}-max-val"></span></label>
-          <div class="minmax-slider" id="{id}-minmax"></div>
-        </div>
-        <div class="sweep-range-field">
-          <label>steps <span class="val" id="{id}-count-val"></span></label>
-          <input type="range" id="{id}-count" min="2" max="{max_points}" step="1" value="6">
-        </div>
-        <span class="sweep-range-preview" id="{id}-preview"></span>
-      </div>
+      <span class="sweep-range-preview" id="{id}-preview"></span>
     </div>""".format(
         id=spec["id"], modes=",".join(spec["modes"]), log="1" if spec["log"] else "0",
         unit=spec["unit"], label=spec["label"], unit_html=unit_html,
@@ -388,15 +389,12 @@ SWEEP_PAGE_TEMPLATE = """<!doctype html>
       <button id="mode-cool">Cool at constant density</button>
       <button id="mode-freefall" class="active">Free-fall collapse</button>
     </div>
-    {param_rows}
-    <details class="species-details">
-      <summary>Initial species fractions</summary>
-      <div id="species-sliders"></div>
-    </details>
-    <div class="row-inline">
-      <label class="checkbox-label"><input type="checkbox" id="shock-enabled" checked> Enable shock</label>
-    </div>
 
+    <!-- Facet/run/CSV controls live up here, above the parameter rows
+         themselves -- they're what you actually come back to over and
+         over once the parameters are set, so they shouldn't need
+         scrolling past 9+ rows plus species/shock to reach every time
+         a range or facet choice changes. -->
     <div class="row">
       <label>facet rows</label>
       <select id="facet-row"></select>
@@ -404,13 +402,20 @@ SWEEP_PAGE_TEMPLATE = """<!doctype html>
       <select id="facet-col"></select>
     </div>
     <div id="option-sliders"></div>
+    <div class="sweep-actions">
+      <button type="button" id="run-sweep" class="btn-primary" disabled>Run sweep</button>
+      <button type="button" id="download-sweep-csv" class="btn-secondary" disabled title="every step of every run in the current sweep, tidy/long format">Download CSV</button>
+      <span id="sweep-status">check parameters to sweep, then run</span>
+    </div>
+    <hr class="panel-divider">
 
-    <div class="status-row">
-      <div id="sweep-status">check parameters to sweep, then run</div>
-      <div class="status-actions">
-        <button type="button" id="run-sweep" disabled>Run sweep</button>
-        <button type="button" id="download-sweep-csv" disabled title="every step of every run in the current sweep, tidy/long format">Download CSV</button>
-      </div>
+    {param_rows}
+    <details class="species-details">
+      <summary>Initial species fractions</summary>
+      <div id="species-sliders"></div>
+    </details>
+    <div class="row-inline">
+      <label class="checkbox-label"><input type="checkbox" id="shock-enabled" checked> Enable shock</label>
     </div>
   </div>
 

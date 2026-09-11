@@ -10,10 +10,12 @@
 //
 // Every sweep-able parameter (the same sliders as the single-run page,
 // plus per-species fractions) is a ".sweep-row": a checkbox that
-// toggles it between a single fixed value and a min/max/step range.
-// Pick exactly two currently-checked rows as the facet row/column;
-// anything else checked gets pinned to one value at a time via its own
-// "option slider" instead of appearing in the grid. See NOTES.md.
+// reconfigures its one persistent slider between a single fixed value
+// and a min/max range (plus a point count), in place -- see
+// rebuildSlider() below. Pick exactly two currently-checked rows as the
+// facet row/column; anything else checked gets pinned to one value at a
+// time via its own "option slider" instead of appearing in the grid.
+// See NOTES.md.
 
 let sweepConfig = null;
 
@@ -63,35 +65,80 @@ function checkedRows() {
   return allSweepRows().filter((r) => r.dataset.modes.includes(currentMode) && isChecked(r));
 }
 
-// -- Min/max: a dual-handle noUiSlider per row --------------------------
-// https://refreshless.com/nouislider/ -- one slider picks both min and
-// max at once (a real range, not two independently-dragged sliders
-// that can pass each other silently). Keyed by row id since each row's
-// underlying <div> only becomes a slider once initMinMaxSlider() runs.
-const minMaxSliders = {};
+// -- One persistent slider per row, 1 or 2 handles -----------------------
+// https://refreshless.com/nouislider/ -- rather than swapping between
+// an ordinary single slider and a separate dual-handle range control
+// (which visibly shifted everything below it when toggled), each row
+// gets exactly one noUiSlider div that's destroyed and recreated *in
+// place* on every checkbox toggle: one handle (an ordinary fixed value)
+// when unchecked, two (min & max at once) when checked. Nothing else on
+// the page moves. The hidden native <input id="{id}"> stays the actual
+// value source everything else reads (currentFractions()/setIcs()/the
+// per-combo overrides in runMultiSweepBody() all still just do
+// document.getElementById(id).value, completely unaware a noUiSlider is
+// even involved) -- rebuildSlider() keeps it in sync with the visible
+// slider's single-handle position; sweepValuesFor() reads the
+// slider directly (via .get()) when it's in its two-handle state.
+const MAX_SWEEP_POINTS = 25; // keep in sync with generate_site.py's own MAX_SWEEP_POINTS
 
-function initMinMaxSlider(rowEl) {
+// Set while this file is itself repositioning a slider programmatically
+// (see syncSliderFromInput()) so that the resulting "update" event
+// doesn't re-trigger conservation/redraw logic meant only for genuine
+// user drags -- otherwise syncing sibling species sliders after a
+// nuclei-conservation rescale could cascade into re-running it.
+let suppressSliderEvents = false;
+
+function rebuildSlider(rowEl) {
   const spec = rowSpec(rowEl);
-  const el = document.getElementById(spec.id + "-minmax");
-  if (!el || el.noUiSlider) return; // already initialized
+  const el = document.getElementById(spec.id + "-slider");
+  const hiddenInput = document.getElementById(spec.id);
+  const checked = isChecked(rowEl);
+  if (el.noUiSlider) el.noUiSlider.destroy();
   noUiSlider.create(el, {
-    start: [spec.min, spec.max],
-    connect: true,
+    start: checked ? [spec.min, spec.max] : [parseFloat(hiddenInput.value)],
+    connect: checked ? true : "lower",
     range: { min: spec.min, max: spec.max },
     step: spec.step,
   });
-  minMaxSliders[spec.id] = el.noUiSlider;
-  el.noUiSlider.on("update", () => {
-    updateRangeFieldVals(rowEl);
+  el.noUiSlider.on("update", (values) => {
+    if (suppressSliderEvents) return;
+    if (!checked) hiddenInput.value = values[0];
+    updateValDisplay(rowEl);
     updateRangePreview(rowEl);
-    refreshOptionSliders();
+    if (checked) {
+      refreshOptionSliders();
+    } else if (spec.id.startsWith("sp-") && typeof enforceGroupConservation === "function") {
+      // enforceGroupConservation() (shared with app.js) rescales sibling
+      // species' hidden inputs directly -- their own sliders need an
+      // explicit nudge to reflect that, since setting an <input>'s
+      // .value alone doesn't move a noUiSlider that's visually standing
+      // in for it.
+      enforceGroupConservation(spec.id.slice("sp-".length));
+      for (const other of allSweepRows()) {
+        if (other !== rowEl && other.dataset.id.startsWith("sp-")) syncSliderFromInput(other);
+      }
+    }
   });
+  updateValDisplay(rowEl);
+  updateRangePreview(rowEl);
 }
 
-function minMaxValues(rowEl) {
-  const inst = minMaxSliders[rowEl.dataset.id];
-  const [lo, hi] = inst.get().map(Number);
-  return { lo, hi };
+// Reflects a *programmatic* change to the hidden input (nuclei
+// conservation adjusting a sibling species, not a direct drag) back
+// onto that row's own slider -- only meaningful while unchecked/
+// single-handle; a checked row's hidden input isn't being treated as
+// "the value" right now (see rebuildSlider()).
+function syncSliderFromInput(rowEl) {
+  if (isChecked(rowEl)) return;
+  const spec = rowSpec(rowEl);
+  const el = document.getElementById(spec.id + "-slider");
+  if (!el || !el.noUiSlider) return;
+  const target = parseFloat(document.getElementById(spec.id).value);
+  const current = Number(el.noUiSlider.get());
+  if (Math.abs(current - target) < 1e-9) return;
+  suppressSliderEvents = true;
+  el.noUiSlider.set(target);
+  suppressSliderEvents = false;
 }
 
 // linspace: `count` points evenly spaced between min and max (in the
@@ -101,11 +148,11 @@ function minMaxValues(rowEl) {
 // convention (PARAM_SPECS in generate_site.py). `count` itself is
 // capped by its own slider's max attribute (MAX_SWEEP_POINTS), which
 // bounds the facet-row-count x facet-col-count combinatorial blowup a
-// careless setting could otherwise cause; parseInt's own fallback here
-// is just a last-resort guard against a not-yet-initialized slider.
-const MAX_SWEEP_POINTS = 25; // keep in sync with generate_site.py's own MAX_SWEEP_POINTS
+// careless setting could otherwise cause. Only meaningful (and only
+// ever called) while `rowEl` is checked/two-handled.
 function sweepValuesFor(rowEl) {
-  const { lo, hi } = minMaxValues(rowEl);
+  const el = document.getElementById(rowEl.dataset.id + "-slider");
+  const [lo, hi] = el.noUiSlider.get().map(Number);
   const count = Math.max(2, Math.min(MAX_SWEEP_POINTS, parseInt(document.getElementById(rowEl.dataset.id + "-count").value, 10) || 2));
   const values = [];
   for (let k = 0; k < count; k++) values.push(lo + (hi - lo) * k / (count - 1));
@@ -115,6 +162,7 @@ function sweepValuesFor(rowEl) {
 function updateRangePreview(rowEl) {
   const previewEl = document.getElementById(rowEl.dataset.id + "-preview");
   if (!previewEl) return;
+  if (!isChecked(rowEl)) { previewEl.textContent = ""; return; }
   const spec = rowSpec(rowEl);
   const values = sweepValuesFor(rowEl);
   const lo = formatPhysical(spec, values[0]);
@@ -122,71 +170,54 @@ function updateRangePreview(rowEl) {
   previewEl.textContent = `→ ${lo} – ${hi}, ${values.length} points`;
 }
 
-function updateFixedValDisplay(rowEl) {
+// The row's single readout span shows one physical value when
+// unchecked, "lo – hi" when checked -- just changing text, so (unlike
+// the old separate min/max/preview blocks) this never shifts layout.
+function updateValDisplay(rowEl) {
   const spec = rowSpec(rowEl);
   const valEl = document.getElementById(spec.id + "-val");
-  if (!valEl) return;
-  const input = document.getElementById(spec.id);
-  valEl.textContent = formatPhysical(spec, parseFloat(input.value));
+  const el = document.getElementById(spec.id + "-slider");
+  if (!valEl || !el.noUiSlider) return;
+  if (isChecked(rowEl)) {
+    const [lo, hi] = el.noUiSlider.get().map(Number);
+    valEl.textContent = `${formatPhysical(spec, lo)} – ${formatPhysical(spec, hi)}`;
+  } else {
+    valEl.textContent = formatPhysical(spec, Number(el.noUiSlider.get()));
+  }
 }
 
-// The min/max noUiSlider's own "update" handler (see initMinMaxSlider())
-// keeps min/max readouts current; this just covers the "steps" (point
-// count) slider, a plain integer with no physical-unit conversion.
-function updateRangeFieldVals(rowEl) {
-  const spec = rowSpec(rowEl);
-  const { lo, hi } = minMaxValues(rowEl);
-  const minValEl = document.getElementById(spec.id + "-min-val");
-  const maxValEl = document.getElementById(spec.id + "-max-val");
-  if (minValEl) minValEl.textContent = formatPhysical(spec, lo);
-  if (maxValEl) maxValEl.textContent = formatPhysical(spec, hi);
-  const countEl = document.getElementById(spec.id + "-count");
-  const countValEl = document.getElementById(spec.id + "-count-val");
+function updateCountVal(rowEl) {
+  const countEl = document.getElementById(rowEl.dataset.id + "-count");
+  const countValEl = document.getElementById(rowEl.dataset.id + "-count-val");
   if (countEl && countValEl) countValEl.textContent = countEl.value;
 }
 
 // One shared wiring path for every row, static or dynamic: the
-// checkbox flips which of .sweep-fixed/.sweep-range is visible, and
-// both the single slider and the range controls keep their own live
-// readouts current. Checking/unchecking or editing a range also
-// refreshes the facet dropdowns and option-slider set, since both
-// depend on exactly which rows are currently checked.
+// checkbox rebuilds the row's slider in place (1 handle <-> 2) and
+// enables/disables its "steps" field (never removed from the layout,
+// just dimmed -- same pattern as "Enable shock" and its density/Mach
+// sliders on the main page) rather than anything appearing/
+// disappearing, so toggling "sweep" never moves anything else on the
+// page. Checking/unchecking also refreshes the facet dropdowns, since
+// that pool is drawn from exactly which rows are currently checked.
 function wireRowToggle(rowEl) {
   const id = rowEl.dataset.id;
   const checkbox = document.getElementById(id + "-sweep");
-  const fixedWrap = document.getElementById(id + "-fixed-wrap");
-  const rangeWrap = document.getElementById(id + "-range-wrap");
-  const input = document.getElementById(id);
+  const countInput = document.getElementById(id + "-count");
 
-  const onToggle = () => {
-    fixedWrap.hidden = checkbox.checked;
-    rangeWrap.hidden = !checkbox.checked;
-    updateRangePreview(rowEl);
+  checkbox.addEventListener("change", () => {
+    countInput.disabled = !checkbox.checked;
+    rebuildSlider(rowEl);
     refreshFacetOptions();
-  };
-  checkbox.addEventListener("change", onToggle);
-
-  input.addEventListener("input", () => {
-    updateFixedValDisplay(rowEl);
-    // Species sliders share the same nuclei-conservation-on-drag
-    // mechanism as the main page (see app.js) -- only meaningful while
-    // this row is in its ordinary fixed-value state; a checked/swept
-    // row's value is being driven by the sweep loop itself, not a drag.
-    if (id.startsWith("sp-") && !checkbox.checked && typeof enforceGroupConservation === "function") {
-      enforceGroupConservation(id.slice("sp-".length)); // enforceGroupConservation() takes the bare species name (e.g. "H_2"), not the "sp-"-prefixed slider id
-    }
   });
-
-  initMinMaxSlider(rowEl);
-  document.getElementById(id + "-count").addEventListener("input", () => {
-    updateRangeFieldVals(rowEl);
+  countInput.addEventListener("input", () => {
+    updateCountVal(rowEl);
     updateRangePreview(rowEl);
     refreshOptionSliders();
   });
 
-  updateFixedValDisplay(rowEl);
-  updateRangeFieldVals(rowEl);
-  updateRangePreview(rowEl);
+  rebuildSlider(rowEl);
+  updateCountVal(rowEl);
 }
 
 // -- Species rows (dynamic, built once speciesNames is known) ----------
@@ -213,24 +244,19 @@ function buildSweepSpeciesRows(config) {
     row.dataset.label = name + " fraction";
     row.innerHTML = `
       <label class="checkbox-label">
-        <input type="checkbox" id="sp-${name}-sweep" class="sweep-toggle" data-id="sp-${name}">
-        sweep <b>${name} fraction</b>
-      </label>
-      <div class="sweep-fixed" id="sp-${name}-fixed-wrap">
-        <input type="range" id="sp-${name}" min="-14" max="0" step="0.1" value="${logFrac}">
+        <span class="label-text">
+          <input type="checkbox" id="sp-${name}-sweep" class="sweep-toggle" data-id="sp-${name}">
+          sweep <b>${name} fraction</b>
+        </span>
         <span class="val" id="sp-${name}-val"></span>
+      </label>
+      <input type="range" id="sp-${name}" min="-14" max="0" step="0.1" value="${logFrac}" hidden>
+      <div class="param-slider" id="sp-${name}-slider"></div>
+      <div class="sweep-count-field">
+        <label>steps <span class="val" id="sp-${name}-count-val"></span></label>
+        <input type="range" id="sp-${name}-count" min="2" max="${MAX_SWEEP_POINTS}" step="1" value="6" disabled>
       </div>
-      <div class="sweep-range" id="sp-${name}-range-wrap" hidden>
-        <div class="sweep-range-field">
-          <label>range <span class="val" id="sp-${name}-min-val"></span> &ndash; <span class="val" id="sp-${name}-max-val"></span></label>
-          <div class="minmax-slider" id="sp-${name}-minmax"></div>
-        </div>
-        <div class="sweep-range-field">
-          <label>steps <span class="val" id="sp-${name}-count-val"></span></label>
-          <input type="range" id="sp-${name}-count" min="2" max="${MAX_SWEEP_POINTS}" step="1" value="6">
-        </div>
-        <span class="sweep-range-preview" id="sp-${name}-preview"></span>
-      </div>
+      <span class="sweep-range-preview" id="sp-${name}-preview"></span>
     `;
     container.appendChild(row);
     wireRowToggle(row);
@@ -487,13 +513,21 @@ function runMultiSweepBody(rowSpecVal, rowValues, colSpecVal, colValues, pinned,
 }
 
 // -- Faceted chart spec ----------------------------------------------------
+// Only actually facets when *two* dimensions are swept (a real grid of
+// small multiples -- each cell has exactly one line, which is the
+// point). With just one swept dimension, a one-column facet grid would
+// be a column of single-line cells for no reason -- overlayChartSpec()
+// below overplots every run on one shared chart instead, colored by
+// its own value, same as the single-parameter sweep did before this
+// page grew a second facet axis (still the better visualization for
+// exactly one varying dimension).
 function facetChartSpec(kind, xKey, rows, rowSpecVal, colSpecVal, rowDomain, colDomain) {
-  const facet = colSpecVal
-    ? {
-      row: { field: "facetRowLabel", type: "ordinal", sort: rowDomain, header: { title: rowSpecVal.label, labelFontSize: 10 } },
-      column: { field: "facetColLabel", type: "ordinal", sort: colDomain, header: { title: colSpecVal.label, labelFontSize: 10 } },
-    }
-    : { row: { field: "facetRowLabel", type: "ordinal", sort: rowDomain, header: { title: rowSpecVal.label, labelFontSize: 10 } } };
+  if (!colSpecVal) return overlayChartSpec(kind, xKey, rows, rowSpecVal, rowDomain);
+
+  const facet = {
+    row: { field: "facetRowLabel", type: "ordinal", sort: rowDomain, header: { title: rowSpecVal.label, labelFontSize: 10 } },
+    column: { field: "facetColLabel", type: "ordinal", sort: colDomain, header: { title: colSpecVal.label, labelFontSize: 10 } },
+  };
 
   const xEncoding = {
     field: "x", type: "quantitative",
@@ -546,6 +580,75 @@ function facetChartSpec(kind, xKey, rows, rowSpecVal, colSpecVal, rowDomain, col
     data: { values: rows },
     facet,
     spec: { width: 150, height: 120, ...layerSpec },
+  };
+}
+
+// One shared chart, every run overplotted on it -- color (viridis,
+// ordinal, low-to-high) tells runs apart, same as the pre-facet
+// single-parameter sweep. For the combined ion/H2 chart, "which run"
+// already claims the color channel, so quantity (ion vs H2) is told
+// apart by line dash instead -- both categorical dimensions still read
+// at a glance without needing a second color scale.
+function overlayChartSpec(kind, xKey, rows, rowSpecVal, rowDomain) {
+  const xEncoding = {
+    field: "x", type: "quantitative",
+    scale: { type: xKey === "time" ? "symlog" : "log" },
+    axis: {
+      title: null, labelOverlap: "greedy",
+      labelAngle: xKey === "time" ? -40 : 0,
+      labelExpr: xKey === "time" ? TIME_LABEL_EXPR : undefined,
+    },
+  };
+  const colorEncoding = {
+    field: "facetRowLabel", type: "ordinal",
+    scale: { domain: rowDomain, scheme: "viridis" },
+    // orient/direction match the ion/H2 combined chart's own legend
+    // below -- a right-side legend (Vega-Lite's default) needs extra
+    // horizontal room this chart's fixed width doesn't reserve, which
+    // silently clipped it off the edge of the chart-box entirely.
+    legend: { title: rowSpecVal.label, symbolLimit: rowDomain.length, orient: "bottom", direction: "horizontal" },
+  };
+
+  if (kind === "T") {
+    return {
+      $schema: "https://vega.github.io/schema/vega-lite/v5.json",
+      width: 600, height: 240, background: null,
+      config: vlConfig(),
+      data: { values: rows },
+      mark: { type: "line", point: { filled: true, size: 12, opacity: 0.9 } },
+      encoding: {
+        x: xEncoding,
+        y: { field: "T", type: "quantitative", scale: { type: "log" }, axis: { title: "T (K)" } },
+        color: colorEncoding,
+        tooltip: [
+          { field: "facetRowLabel", title: "run", type: "nominal" },
+          { field: "x", title: xKey === "time" ? "t (s)" : "n (cm⁻³)", type: "quantitative", format: ".3~g" },
+          { field: "tHuman", title: "t", type: "nominal" },
+          { field: "T", title: "T (K)", type: "quantitative", format: ".4~g" },
+        ],
+      },
+    };
+  }
+
+  const present = [...new Set(rows.map((r) => r.quantity))];
+  return {
+    $schema: "https://vega.github.io/schema/vega-lite/v5.json",
+    width: 600, height: 240, background: null,
+    config: vlConfig(),
+    data: { values: rows },
+    mark: { type: "line", point: { filled: true, size: 8, opacity: 0.9 } },
+    encoding: {
+      x: xEncoding,
+      y: { field: "value", type: "quantitative", scale: { type: "log" }, axis: { title: "fraction" } },
+      color: colorEncoding,
+      strokeDash: { field: "quantity", type: "nominal", scale: { domain: present }, legend: { title: null, orient: "bottom" } },
+      tooltip: [
+        { field: "facetRowLabel", title: "run", type: "nominal" },
+        { field: "quantity", title: "quantity", type: "nominal" },
+        { field: "x", title: xKey === "time" ? "t (s)" : "n (cm⁻³)", type: "quantitative", format: ".3~g" },
+        { field: "value", title: "fraction", type: "quantitative", format: ".4~g" },
+      ],
+    },
   };
 }
 
