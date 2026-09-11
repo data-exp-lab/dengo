@@ -177,31 +177,27 @@ input[type=range] { width: 100%; }
 .species-toggle label:has(input:not(:checked)) { color: var(--muted); opacity: 0.6; }
 .species-toggle input[type=checkbox] { margin: 0; }
 .chart-placeholder { color: var(--muted); font-size: 0.85em; padding: 16px 8px; margin: 0; }
-/* Opt-in, additive, and deliberately not live (a sweep is several full
-   runs, not one) -- collapsed by default so it never competes with or
-   slows down the default single-run experience above. */
-.sweep-section { margin-top: 24px; }
-.sweep-section > summary { cursor: pointer; font-size: 0.95em; font-weight: 600; color: var(--fg); margin-bottom: 8px; }
-.sweep-section > summary::marker { color: var(--muted); }
-.sweep-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.sweep-controls label { font-size: 0.9em; }
-#sweep-param {
-  padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border);
-  background: var(--bg); color: var(--fg); font-size: 0.9em;
-}
-#sweep-start, #sweep-stop, #sweep-count {
-  padding: 5px 6px; border-radius: 6px; border: 1px solid var(--border);
-  background: var(--bg); color: var(--fg); font-size: 0.85em; width: 90px;
-}
-#sweep-count { width: 55px; }
 input:disabled { opacity: 0.5; }
-#run-sweep {
-  padding: 6px 14px; border-radius: 6px; border: 1px solid var(--border);
-  background: var(--accent); color: white; cursor: pointer; font-size: 0.85em;
+/* sweep.html: each parameter's row toggles between the ordinary single
+   slider (.sweep-fixed) and a min/max/step range (.sweep-range) via its
+   own checkbox -- see sweep_param_row() in generate_site.py and
+   wireRowToggle() in sweep.js, which is the only thing that flips which
+   of the two is [hidden]. */
+.sweep-row .checkbox-label { font-size: 0.85em; color: var(--muted); margin-bottom: 4px; }
+.sweep-row .checkbox-label b { color: var(--fg); font-weight: 600; }
+.sweep-range { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.sweep-range label { font-size: 0.8em; color: var(--muted); display: flex; align-items: center; gap: 4px; }
+.sweep-range input[type=number] {
+  width: 80px; padding: 4px 6px; border-radius: 6px; border: 1px solid var(--border);
+  background: var(--bg); color: var(--fg); font-size: 0.85em;
 }
-#run-sweep:disabled { opacity: 0.5; cursor: default; }
-#sweep-status { margin: 0; }
-#sweep-charts { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+.sweep-range-preview { font-size: 0.78em; color: var(--muted); }
+#facet-row, #facet-col {
+  padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border);
+  background: var(--bg); color: var(--fg); font-size: 0.9em; margin-right: 12px;
+}
+#option-sliders { margin-top: 4px; }
+#option-sliders .preset-note { margin-bottom: 12px; }
 .nav { margin-bottom: 20px; }
 .nav a { margin-right: 12px; }
 ul.network-list { list-style: none; padding: 0; }

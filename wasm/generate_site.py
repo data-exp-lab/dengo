@@ -34,6 +34,73 @@ EXPORTED_FUNCTIONS = [
     "_dengo_wasm_species_names", "_malloc", "_free",
 ]
 
+# Single source of truth for every non-species slider on *both* the main
+# widget page (index.html, hand-written per-row below -- unchanged) and
+# the parameter-sweep page (sweep.html, generated below): id/label/unit/
+# min/max/step/default all come from here, so the sweep page's sliders
+# can never drift out of sync with the single-run page's own. "log":
+# True means the control's raw value (and therefore its min/max/step/
+# default here) is log10(physical) -- true of every one of these except
+# shock Mach, which is already linear. Species-fraction rows aren't
+# here (they're dynamic per network) -- sweep.js's buildSweepSpeciesRows()
+# builds their equivalent at runtime from the same data-* convention
+# sweep_param_row() below uses, so both kinds of row read identically
+# to the rest of sweep.js's facet/option-slider/run/CSV logic.
+PARAM_SPECS = [
+    {"id": "T", "label": "T", "unit": "K", "min": 1, "max": 4.7, "step": 0.05,
+     "default": 3, "modes": ("cool", "freefall"), "log": True},
+    {"id": "nH", "label": "initial n", "unit": "cm⁻³", "min": -4, "max": 17, "step": 0.1,
+     "default": 4, "modes": ("cool", "freefall"), "log": True},
+    {"id": "dtf", "label": "total time", "unit": "s", "min": 6, "max": 17, "step": 0.1,
+     "default": 13, "modes": ("cool",), "log": True},
+    {"id": "ntarget", "label": "target n", "unit": "cm⁻³", "min": 2, "max": 20, "step": 0.1,
+     "default": 15, "modes": ("freefall",), "log": True},
+    {"id": "collapse-rate", "label": "collapse rate", "unit": "× free-fall", "min": -2, "max": 2, "step": 0.1,
+     "default": 0, "modes": ("freefall",), "log": True},
+    {"id": "ff-step", "label": "step size", "unit": "× t_ff", "min": -2.5, "max": -1, "step": 0.1,
+     "default": -2, "modes": ("freefall",), "log": True},
+    {"id": "tolerance", "label": "solver tolerance", "unit": "", "min": -8, "max": -3, "step": 0.5,
+     "default": -5, "modes": ("cool", "freefall"), "log": True},
+    {"id": "nshock", "label": "shock density", "unit": "cm⁻³", "min": 10, "max": 20, "step": 0.1,
+     "default": 14, "modes": ("freefall",), "log": True},
+    {"id": "mach", "label": "shock Mach number", "unit": "", "min": 1, "max": 100, "step": 0.5,
+     "default": 5, "modes": ("freefall",), "log": False},
+]
+
+
+def sweep_param_row(spec):
+    """One parameter's row on the sweep page: a checkbox toggling
+    between the ordinary single-value slider (the default -- this
+    dimension is just held fixed) and a min/max/step range triple (this
+    dimension is swept). Every row -- this generated kind and the
+    dynamic per-species kind sweep.js builds at runtime -- is fully
+    self-describing via data-* attributes on the wrapping .sweep-row
+    div, so none of sweep.js's facet-picker/option-slider/run/CSV logic
+    needs to special-case "is this T or a species fraction"."""
+    unit_html = " (%s)" % spec["unit"] if spec["unit"] else ""
+    return """
+    <div class="row sweep-row" id="row-{id}" data-id="{id}" data-modes="{modes}"
+         data-log="{log}" data-unit="{unit}" data-label="{label}">
+      <label class="checkbox-label">
+        <input type="checkbox" id="{id}-sweep" class="sweep-toggle" data-id="{id}">
+        sweep <b>{label}{unit_html}</b>
+      </label>
+      <div class="sweep-fixed" id="{id}-fixed-wrap">
+        <input type="range" id="{id}" min="{min}" max="{max}" step="{step}" value="{default}">
+        <span class="val" id="{id}-val"></span>
+      </div>
+      <div class="sweep-range" id="{id}-range-wrap" hidden>
+        <label>min <input type="number" id="{id}-min" value="{min}" step="any"></label>
+        <label>max <input type="number" id="{id}-max" value="{max}" step="any"></label>
+        <label>step <input type="number" id="{id}-swstep" value="{step}" step="any"></label>
+        <span class="sweep-range-preview" id="{id}-preview"></span>
+      </div>
+    </div>""".format(
+        id=spec["id"], modes=",".join(spec["modes"]), log="1" if spec["log"] else "0",
+        unit=spec["unit"], label=spec["label"], unit_html=unit_html,
+        min=spec["min"], max=spec["max"], step=spec["step"], default=spec["default"],
+    )
+
 PAGE_TEMPLATE = """<!doctype html>
 <html lang="en">
 <head>
@@ -45,7 +112,7 @@ PAGE_TEMPLATE = """<!doctype html>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
 </head>
 <body>
-<div class="nav"><a href="../">&larr; all networks</a> <a href="rates.html">reaction rates &rarr;</a></div>
+<div class="nav"><a href="../">&larr; all networks</a> <a href="sweep.html">parameter sweep &rarr;</a> <a href="rates.html">reaction rates &rarr;</a></div>
 <h1 id="page-title">{title}</h1>
 <p class="sub">
   Compiled to WebAssembly from dengo's generated solver (no Python, no server) --
@@ -209,48 +276,6 @@ PAGE_TEMPLATE = """<!doctype html>
   </div>
 </div>
 
-<details class="sweep-section">
-  <summary>Parameter sweep -- compare several starting conditions at once</summary>
-  <p class="preset-note">Holds every other slider at its current setting,
-    runs the current mode (cool/free-fall) once per value in the range
-    below, and overlays all of them -- e.g. several starting
-    temperatures, to see whether/when the gas "forgets" where it
-    started. Not live -- a sweep is several full runs, not one, so it
-    only runs when asked. Picking a parameter disables its regular
-    slider (it's driven by the range below for the sweep instead) and
-    re-enables it once you switch to sweeping something else.</p>
-  <div class="row sweep-controls">
-    <label>sweep over</label>
-    <select id="sweep-param"></select>
-    <label>from</label>
-    <input type="number" id="sweep-start" step="any">
-    <label>to</label>
-    <input type="number" id="sweep-stop" step="any">
-    <label>count</label>
-    <input type="number" id="sweep-count" min="2" max="12" step="1" value="6">
-    <button type="button" id="run-sweep" disabled>Run sweep</button>
-    <span id="sweep-status" class="preset-note"></span>
-  </div>
-  <div id="sweep-charts">
-    <div class="chart-box">
-      <div class="chart-title">Temperature (sweep)</div>
-      <div class="chart-row">
-        <div class="axis-y" id="ylabel-sweep-T"></div>
-        <div id="chart-sweep-T"></div>
-      </div>
-      <div class="axis-x" id="xlabel-sweep-T"></div>
-    </div>
-    <div class="chart-box">
-      <div class="chart-title">H<sub>2</sub> fraction (sweep)</div>
-      <div class="chart-row">
-        <div class="axis-y" id="ylabel-sweep-h2"></div>
-        <div id="chart-sweep-h2"></div>
-      </div>
-      <div class="axis-x" id="xlabel-sweep-h2"></div>
-    </div>
-  </div>
-</details>
-
 <script src="https://cdn.jsdelivr.net/npm/vega@5"></script>
 <script src="https://cdn.jsdelivr.net/npm/vega-lite@5"></script>
 <script src="https://cdn.jsdelivr.net/npm/vega-embed@6"></script>
@@ -306,6 +331,87 @@ RATES_PAGE_TEMPLATE = """<!doctype html>
 <script src="../rates.js"></script>
 <script>
 initRatesPage({config_json});
+</script>
+</body>
+</html>
+"""
+
+SWEEP_PAGE_TEMPLATE = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title} parameter sweep -- dengo in the browser</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>%F0%9F%A7%AA</text></svg>">
+<link rel="stylesheet" href="../style.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+</head>
+<body>
+<div class="nav"><a href="../">&larr; all networks</a> <a href="index.html">&larr; {title} widget</a></div>
+<h1 id="page-title">{title}: parameter sweep</h1>
+<p class="sub">
+  Every parameter below is normally a single fixed value (same sliders as
+  the <a href="index.html">main widget</a>) -- check "sweep" on any of
+  them to turn it into a min/max/step range instead. Pick two swept
+  parameters to facet the charts on (rows &times; columns of small
+  multiples); any others you've checked get pinned to one value at a
+  time via their own slider underneath, rather than shown all at once.
+  Not live -- a sweep is many full runs, not one, so it only runs when
+  asked.
+</p>
+
+<div class="layout">
+  <div class="panel">
+    <div class="modebar">
+      <button id="mode-cool">Cool at constant density</button>
+      <button id="mode-freefall" class="active">Free-fall collapse</button>
+    </div>
+    {param_rows}
+    <details class="species-details">
+      <summary>Initial species fractions</summary>
+      <div id="species-sliders"></div>
+    </details>
+    <div class="row-inline">
+      <label class="checkbox-label"><input type="checkbox" id="shock-enabled" checked> Enable shock</label>
+    </div>
+
+    <div class="row">
+      <label>facet rows</label>
+      <select id="facet-row"></select>
+      <label>facet columns</label>
+      <select id="facet-col"></select>
+    </div>
+    <div id="option-sliders"></div>
+
+    <div class="status-row">
+      <div id="sweep-status">check parameters to sweep, then run</div>
+      <div class="status-actions">
+        <button type="button" id="run-sweep" disabled>Run sweep</button>
+        <button type="button" id="download-sweep-csv" disabled title="every step of every run in the current sweep, tidy/long format">Download CSV</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="charts">
+    <div class="chart-box">
+      <div class="chart-title">Temperature</div>
+      <div id="chart-facet-T"></div>
+    </div>
+    <div class="chart-box">
+      <div class="chart-title">Ionized / H&#8322; fraction</div>
+      <div id="chart-facet-ionh2"></div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/vega@5"></script>
+<script src="https://cdn.jsdelivr.net/npm/vega-lite@5"></script>
+<script src="https://cdn.jsdelivr.net/npm/vega-embed@6"></script>
+<script src="dengo_wasm.js"></script>
+<script src="../app.js"></script>
+<script src="../sweep.js"></script>
+<script>
+initSweepPage({config_json});
 </script>
 </body>
 </html>
@@ -369,6 +475,19 @@ def build_rates_page(network, cfg, net_dir, repo):
         ))
 
 
+def build_sweep_page(cfg, net_dir, repo, config):
+    """The multi-dimensional sweep page needs no compiled-solver setup
+    of its own beyond what build_one() already produced in net_dir
+    (dengo_wasm.js/.wasm) -- it's the same config dict as index.html's,
+    just handed to a different page/init function (sweep.js's own
+    initSweepPage(), not app.js's initPage())."""
+    param_rows = "".join(sweep_param_row(spec) for spec in PARAM_SPECS)
+    with open(os.path.join(net_dir, "sweep.html"), "w") as f:
+        f.write(SWEEP_PAGE_TEMPLATE.format(
+            title=cfg["title"], repo=repo, param_rows=param_rows, config_json=json.dumps(config),
+        ))
+
+
 def build_one(name, cfg, out_dir, repo):
     net_dir = os.path.join(out_dir, name)
     os.makedirs(net_dir, exist_ok=True)
@@ -401,6 +520,7 @@ def build_one(name, cfg, out_dir, repo):
         f.write(PAGE_TEMPLATE.format(
             title=cfg["title"], repo=repo, config_json=json.dumps(config),
         ))
+    build_sweep_page(cfg, net_dir, repo, config)
 
     # generated build byproducts not needed by the served page
     for fn in ("%s_solver.h" % name, "%s_solver.C" % name, "BE_chem_solve.C",
@@ -425,6 +545,7 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
 
     shutil.copy(os.path.join(HERE, "app.js"), out_dir)
+    shutil.copy(os.path.join(HERE, "sweep.js"), out_dir)
     shutil.copy(os.path.join(HERE, "rates.js"), out_dir)
     shutil.copy(os.path.join(HERE, "style.css"), out_dir)
     # dengo-solver.js/.d.ts: a reusable wrapper around any dengo-generated

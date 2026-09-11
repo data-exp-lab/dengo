@@ -944,57 +944,6 @@ function runViewSpec({ mode, rows, tempField, tempExtra, ionRows, speciesRows, z
   };
 }
 
-// One line per swept-parameter value (long-format `rows`, each already
-// carrying a human-readable `label` -- e.g. "T0=1.0e+03 K" -- as the
-// literal color/legend field). Ordinal, not nominal: an explicit
-// `domain` in ascending physical order plus a sequential color scheme
-// (viridis) reads as "low to high" at a glance, which a fixed set of
-// starting conditions warrants and species names (nominal, no natural
-// order) didn't. Point markers are small but not optional here (unlike
-// the single-run charts, where "where are the steps" is a bonus, not a
-// visibility requirement): a run whose adaptive stepper's very first
-// step already reaches the requested end time -- legitimate, e.g. a
-// starting temperature so far from equilibrium that coolingTime() is
-// negligible next to the whole run -- produces exactly one point, and a
-// line mark with nothing to connect draws *nothing at all*. Without a
-// point, that track would just silently vanish from the chart.
-function sweepChartSpec(field, xKey, rows, domainLabels) {
-  return {
-    $schema: "https://vega.github.io/schema/vega-lite/v5.json",
-    width: 600, height: 240, background: null,
-    config: vlConfig(),
-    data: { values: rows },
-    mark: { type: "line", point: { filled: true, size: 12, opacity: 0.9 } },
-    encoding: {
-      x: {
-        field: "x", type: "quantitative",
-        // Time (unlike density) can legitimately be exactly 0 now that
-        // the initial condition itself is plotted -- symlog (linear
-        // near zero, log further out) shows that point instead of
-        // silently dropping it the way a pure log scale would.
-        scale: { type: xKey === "time" ? "symlog" : "log" },
-        axis: {
-          title: null, labelOverlap: "greedy",
-          labelAngle: xKey === "time" ? -40 : 0,
-          labelExpr: xKey === "time" ? TIME_LABEL_EXPR : undefined,
-        },
-      },
-      y: { field: field, type: "quantitative", scale: { type: "log" }, axis: { title: null } },
-      color: {
-        field: "label", type: "ordinal",
-        scale: { domain: domainLabels, scheme: "viridis" },
-        legend: { title: null, symbolLimit: domainLabels.length },
-      },
-      tooltip: [
-        { field: "label", title: "run", type: "nominal" },
-        { field: "x", title: xKey === "time" ? "t (s)" : "n (cm⁻³)", type: "quantitative", format: ".3~g" },
-        { field: "tHuman", title: "t", type: "nominal" },
-        { field: field, title: field === "T" ? "T (K)" : "H2/H_tot", type: "quantitative", format: ".4~g" },
-      ],
-    },
-  };
-}
-
 let redrawQueued = false;
 function scheduleRedraw() {
   if (redrawQueued) return;
@@ -1414,177 +1363,6 @@ function applyPreset(key) {
   scheduleRedraw();
 }
 
-// Parameter sweep: hold every slider at its current setting except one,
-// run the current mode (cool/free-fall) once per sampled value of that
-// one, overlay all of them. `sliderId` is read/written directly (same
-// elements redraw() itself reads), so this generalizes to any slider
-// with no per-parameter special-casing beyond how to convert between
-// the slider's own raw units and physical ones (`toRaw`/`toPhysical`):
-// T/nH/H2-fraction/shock-density sliders already store log10(physical
-// value), so their raw<->physical conversion is log10/10^x; mach's
-// slider is linear-in-Mach already, so its conversion is the identity.
-// The *sampled* start/stop/count all live in physical units (an actual
-// Kelvin range, not a log10 one) -- typing "1000" to "10000" should mean
-// what it says regardless of which of these a slider happens to store
-// internally -- and `logSpace` controls whether count values are spread
-// evenly in physical space or in log-physical space between them.
-const SWEEP_PARAMS = {
-  T: { sliderId: "T", label: "T₀", unit: "K", logSpace: true, toPhysical: (v) => Math.pow(10, v), toRaw: (v) => Math.log10(v) },
-  nH: { sliderId: "nH", label: "n_H,0", unit: "cm⁻³", logSpace: true, toPhysical: (v) => Math.pow(10, v), toRaw: (v) => Math.log10(v) },
-  "sp-H2_1": { sliderId: "sp-H2_1", label: "H2 frac₀", unit: "", logSpace: true, toPhysical: (v) => Math.pow(10, v), toRaw: (v) => Math.log10(v) },
-  // Mach's *default* range (see updateSweepParamUI) is still log-spaced
-  // for the same reason as before (the no-effect -> partial ->
-  // saturated transition happens over the first factor of ~10) -- but
-  // now that start/stop are explicit and user-editable, that's just the
-  // default, not baked into the sampling itself; sample linearly across
-  // whatever range is actually entered, same as every other parameter.
-  mach: { sliderId: "mach", label: "shock Mach", unit: "", logSpace: false, toPhysical: (v) => v, toRaw: (v) => v },
-  nshock: { sliderId: "nshock", label: "shock n", unit: "cm⁻³", logSpace: true, toPhysical: (v) => Math.pow(10, v), toRaw: (v) => Math.log10(v) },
-};
-
-function sweepFormat(param, physical) {
-  const s = param.unit === "" ? physical.toPrecision(3) : physical.toExponential(2);
-  return `${param.label}=${s}${param.unit ? " " + param.unit : ""}`;
-}
-
-// Reads the visible from/to/count inputs (physical units) and returns
-// raw slider-unit values, ready to assign straight to `slider.value`.
-function sweepValues(paramKey) {
-  const param = SWEEP_PARAMS[paramKey];
-  const startPhys = parseFloat(document.getElementById("sweep-start").value);
-  const stopPhys = parseFloat(document.getElementById("sweep-stop").value);
-  const count = Math.max(2, Math.min(12, parseInt(document.getElementById("sweep-count").value, 10) || 6));
-  if (param.logSpace) {
-    const lo = Math.log10(startPhys), hi = Math.log10(stopPhys);
-    return Array.from({ length: count }, (_, i) => param.toRaw(Math.pow(10, lo + (hi - lo) * i / (count - 1))));
-  }
-  return Array.from({ length: count }, (_, i) => param.toRaw(startPhys + (stopPhys - startPhys) * i / (count - 1)));
-}
-
-function buildSweepParamOptions() {
-  const select = document.getElementById("sweep-param");
-  select.innerHTML = "";
-  const noneOpt = document.createElement("option");
-  noneOpt.value = "";
-  noneOpt.textContent = "No sweep";
-  select.appendChild(noneOpt);
-  for (const [key, param] of Object.entries(SWEEP_PARAMS)) {
-    if (!document.getElementById(param.sliderId)) continue; // e.g. no H2 species on this network
-    const opt = document.createElement("option");
-    opt.value = key;
-    opt.textContent = param.label + (param.unit ? ` (${param.unit})` : "");
-    select.appendChild(opt);
-  }
-}
-
-// Disables whichever slider is currently the sweep target (it's driven
-// by the from/to/count range instead while selected) and re-enables the
-// previous one, then refills from/to with that slider's own min/max in
-// physical units -- a reasonable, visible-and-editable default rather
-// than the old behavior of silently always using the full slider range
-// no matter what it was actually set to. "No sweep" (paramKey === "")
-// is the explicit off state: nothing disabled, range inputs cleared and
-// inert, run-sweep button off.
-let sweptSliderId = null;
-function updateSweepParamUI() {
-  const paramKey = document.getElementById("sweep-param").value;
-  if (sweptSliderId) {
-    const prev = document.getElementById(sweptSliderId);
-    if (prev) prev.disabled = false;
-    sweptSliderId = null;
-  }
-  const param = SWEEP_PARAMS[paramKey];
-  const runButton = document.getElementById("run-sweep");
-  const rangeInputs = [document.getElementById("sweep-start"), document.getElementById("sweep-stop"), document.getElementById("sweep-count")];
-  if (!param) {
-    for (const el of rangeInputs) { el.value = ""; el.disabled = true; }
-    runButton.disabled = true;
-    document.getElementById("sweep-status").textContent = "";
-    return;
-  }
-  for (const el of rangeInputs) el.disabled = false;
-  runButton.disabled = false;
-  sweptSliderId = param.sliderId;
-  const slider = document.getElementById(param.sliderId);
-  slider.disabled = true;
-  const minPhys = param.toPhysical(parseFloat(slider.min));
-  const maxPhys = param.toPhysical(parseFloat(slider.max));
-  document.getElementById("sweep-start").value = Number(minPhys.toPrecision(4));
-  document.getElementById("sweep-stop").value = Number(maxPhys.toPrecision(4));
-  document.getElementById("sweep-count").value = 6;
-}
-
-function runSweep() {
-  if (!document.getElementById("sweep-param").value) return; // "No sweep" -- button is disabled anyway, but guard directly too
-  const button = document.getElementById("run-sweep");
-  const statusEl = document.getElementById("sweep-status");
-  button.disabled = true;
-  statusEl.textContent = "running sweep…";
-  // Yield one frame so the browser actually paints the line above before
-  // the (synchronous, possibly multi-second) sweep loop blocks the main
-  // thread -- without this, "running..." would never be visible.
-  requestAnimationFrame(() => setTimeout(runSweepBody, 0));
-}
-
-function runSweepBody() {
-  const button = document.getElementById("run-sweep");
-  const statusEl = document.getElementById("sweep-status");
-  const paramKey = document.getElementById("sweep-param").value;
-  const param = SWEEP_PARAMS[paramKey];
-  const slider = document.getElementById(param.sliderId);
-  const savedValue = slider.value;
-  const values = sweepValues(paramKey);
-
-  const t0 = performance.now();
-  const tRows = [], h2Rows = [];
-  const domainLabels = [];
-  let xKey = "time";
-  for (const v of values) {
-    slider.value = v;
-    const nH = Math.pow(10, parseFloat(document.getElementById("nH").value));
-    const T = Math.pow(10, parseFloat(document.getElementById("T").value));
-    const fractions = currentFractions();
-    let result;
-    if (currentMode === "freefall") {
-      const logNTarget = parseFloat(document.getElementById("ntarget").value);
-      const logNShock = parseFloat(document.getElementById("nshock").value);
-      const machShock = parseFloat(document.getElementById("mach").value);
-      result = runFreefall(nH, T, fractions, logNTarget, logNShock, machShock);
-    } else {
-      const logDtf = parseFloat(document.getElementById("dtf").value);
-      result = runConstantDensity(nH, T, fractions, logDtf, undefined, undefined, undefined, true);
-    }
-    xKey = result.xKey;
-    const label = sweepFormat(param, param.toPhysical(v));
-    domainLabels.push(label);
-    for (let i = 0; i < result.x.length; i++) {
-      const base = { x: result.x[i], label, tHuman: formatTimeAuto(result.t[i]) };
-      tRows.push({ ...base, T: result.T[i] });
-      const h2v = result.h2[i];
-      if (h2v !== null && h2v !== undefined && h2v > 0) h2Rows.push({ ...base, h2: h2v });
-    }
-  }
-  slider.value = savedValue; // restore -- a sweep looks at other conditions, it doesn't change this one
-
-  vegaEmbed("#chart-sweep-T", sweepChartSpec("T", xKey, tRows, domainLabels), { actions: false, renderer: "svg" });
-  const chartH2El = document.getElementById("chart-sweep-h2");
-  if (h2Rows.length) {
-    chartH2El.innerHTML = "";
-    vegaEmbed(chartH2El, sweepChartSpec("h2", xKey, h2Rows, domainLabels), { actions: false, renderer: "svg" });
-  } else {
-    chartH2El.innerHTML = '<p class="chart-placeholder">This network has no H2 species.</p>';
-  }
-  renderLatex("ylabel-sweep-T", "T");
-  renderLatex("xlabel-sweep-T", xKey);
-  renderLatex("ylabel-sweep-h2", "h2frac");
-  renderLatex("xlabel-sweep-h2", xKey);
-
-  const elapsed = performance.now() - t0;
-  statusEl.textContent = `${values.length} runs, ${elapsed.toFixed(0)} ms`;
-  button.disabled = false;
-  redraw(); // the loop above left nH/T/etc.'s underlying wasm state at the last swept run's -- put the primary charts back to what the sliders actually show
-}
-
 // Species-fraction sliders are otherwise fully independent (see
 // currentFractions()/setIcs(), which just does nH * frac per species) --
 // nothing stops setting e.g. both an ionized-H and an H2 fraction so
@@ -1722,8 +1500,6 @@ function initPage(config) {
   document.getElementById("T-mode-T").addEventListener("click", () => setTemperatureDisplayMode("T"));
   document.getElementById("T-mode-ge").addEventListener("click", () => setTemperatureDisplayMode("ge"));
   document.getElementById("ic-preset").addEventListener("change", (e) => applyPreset(e.target.value));
-  document.getElementById("run-sweep").addEventListener("click", runSweep);
-  document.getElementById("sweep-param").addEventListener("change", updateSweepParamUI);
   for (const id of ["nH", "T", "dtf", "ntarget", "nshock", "mach", "collapse-rate", "tolerance", "ff-step"]) {
     document.getElementById(id).addEventListener("input", scheduleRedraw);
   }
@@ -1754,8 +1530,6 @@ function initPage(config) {
     speciesNames = namesFn().split(",");
     idx = Object.fromEntries(speciesNames.map((n, i) => [n, i]));
     buildSpeciesSliders(config);
-    buildSweepParamOptions();
-    updateSweepParamUI(); // sets up the "No sweep" default state (run-sweep button included) immediately, not just after the dropdown is touched
     document.getElementById("ic-preset").disabled = false;
     document.getElementById("status").textContent = "ready";
     redraw();
