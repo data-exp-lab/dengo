@@ -707,6 +707,38 @@ function downloadSweepCsv() {
 }
 
 // -- Page bootstrap -----------------------------------------------------
+// The original value= each row's hidden <input> was generated with --
+// still sitting in the DOM attribute untouched (only the live `.value`
+// *property* ever gets changed, by dragging or by the sweep-run loop's
+// per-combo overrides), so resetSweepPage() below can read it straight
+// back out rather than needing its own separate copy of every default.
+function rowDefaultRaw(rowEl) {
+  return parseFloat(document.getElementById(rowEl.dataset.id).getAttribute("value"));
+}
+
+// Unchecks every row, restores its original value, and clears the
+// facet/option-slider/chart/CSV state that implies -- a fresh start
+// without a page reload (which would also re-fetch/recompile the wasm
+// module for no reason).
+function resetSweepPage() {
+  for (const rowEl of allSweepRows()) {
+    const id = rowEl.dataset.id;
+    document.getElementById(id + "-sweep").checked = false;
+    document.getElementById(id).value = rowDefaultRaw(rowEl);
+    document.getElementById(id + "-count").value = 6;
+    document.getElementById(id + "-count").disabled = true;
+    rebuildSlider(rowEl);
+    updateCountVal(rowEl);
+  }
+  document.getElementById("shock-enabled").checked = true;
+  setSweepMode("freefall"); // also refreshes facet selects/option sliders now that nothing's checked
+  document.getElementById("chart-facet-T").innerHTML = "";
+  document.getElementById("chart-facet-ionh2").innerHTML = "";
+  lastSweepRuns = null;
+  document.getElementById("download-sweep-csv").disabled = true;
+  setSweepStatus("check parameters to sweep, then run");
+}
+
 function initSweepPage(config) {
   sweepConfig = config;
   document.getElementById("page-title").textContent = `${config.title}: parameter sweep`;
@@ -717,6 +749,7 @@ function initSweepPage(config) {
   document.getElementById("facet-col").addEventListener("change", () => { ensureDistinctFacets("col"); refreshOptionSliders(); updateRunSweepEnabled(); });
   document.getElementById("run-sweep").addEventListener("click", runMultiSweep);
   document.getElementById("download-sweep-csv").addEventListener("click", downloadSweepCsv);
+  document.getElementById("reset-sweep").addEventListener("click", resetSweepPage);
 
   for (const rowEl of allSweepRows()) wireRowToggle(rowEl);
 

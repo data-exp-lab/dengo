@@ -405,6 +405,7 @@ SWEEP_PAGE_TEMPLATE = """<!doctype html>
     <div class="sweep-actions">
       <button type="button" id="run-sweep" class="btn-primary" disabled>Run sweep</button>
       <button type="button" id="download-sweep-csv" class="btn-secondary" disabled title="every step of every run in the current sweep, tidy/long format">Download CSV</button>
+      <button type="button" id="reset-sweep" class="btn-secondary" title="Uncheck every parameter, restore its default value, and clear the charts">Reset</button>
       <span id="sweep-status">check parameters to sweep, then run</span>
     </div>
     <hr class="panel-divider">
