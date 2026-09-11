@@ -12,7 +12,7 @@ const YEAR = 3.1557e7; // Julian year, seconds -- matches primordial_cooling.py'
 
 let mod, idx, speciesNames;
 let init, step, statePtr, rhsPtr, temperature;
-let currentMode = "cool";
+let currentMode = "freefall"; // free-fall collapse is the primary case this widget targets -- see NOTES.md
 let temperatureDisplayMode = "T"; // "T" (K) or "ge" (specific internal energy, erg/g)
 let lastResult = null; // the current mode's most recent full run (redraw()'s own result), for CSV export
 let pageTitle = "dengo"; // network title, for the exported CSV's filename only
@@ -365,22 +365,33 @@ function runFreefall(nH, T, fractions, logNTarget, logNShock, machShock, collaps
   const nTarget = Math.pow(10, logNTarget);
   const nShock = Math.pow(10, logNShock);
   const rate = FF_RATE_CONST * collapseFactor;
-  let nCurrent = nH, t = 0;
-  let shocked = nCurrent >= nShock; // already past it at t=0 -- don't fire mid-run
-  let shockApplied = false; // only set once the post-shock step actually converges -- see below
+  let t = 0;
   const nHist = [], THist = [], ionHist = [], h2Hist = [], tHist = [], dtHist = [], sHist = [];
   // The initial condition itself is worth plotting, same reasoning as
   // runConstantDensity() -- and free-fall's x-axis is density, always
   // positive, so (unlike time) there's no log-scale concern in placing
-  // it as the very first point.
+  // it as the very first point. `nCurrent` here is defined exactly like
+  // every later point's (freefallStep() below): the literal sum of
+  // tracked species densities, *not* the dialed n_H,0. Those two aren't
+  // the same number -- n_H,0 only pins hydrogen's own share; He (and
+  // any other species) are independent per-species fractions with no
+  // requirement that everything add up to n_H,0 -- so seeding nCurrent
+  // from n_H,0 instead made the very first step look like a sudden
+  // density *drop* (a bookkeeping level-shift, not a real equilibration
+  // transient) before the "n increases monotonically" free-fall
+  // physics ever got a chance to run.
+  let nCurrent = 0;
   {
     // temperature()'s cache needs an explicit refresh here too -- see
     // the identical comment in runConstantDensity().
     rhsPtr();
     const s0 = getScalar();
+    for (const name of speciesNames) if (name !== "ge" && name !== "de") nCurrent += s0[name];
     nHist.push(nCurrent); THist.push(temperature()); ionHist.push(ionizedFraction(s0)); h2Hist.push(h2Fraction(s0));
     tHist.push(0); dtHist.push(0); sHist.push(s0);
   }
+  let shocked = nCurrent >= nShock; // already past it at t=0 -- don't fire mid-run
+  let shockApplied = false; // only set once the post-shock step actually converges -- see below
 
   // Ordinary free-fall compression (density + adiabatic temperature
   // change) for a step of duration `subDt`, then chemistry advanced by
@@ -1029,7 +1040,16 @@ let zoomCommitTimer = null;
 function embedChart(generation) {
   const myGeneration = generation === undefined ? ++redrawGeneration : generation;
   const spec = runViewSpec({ ...lastSpecInputs, zoomDomain });
-  vegaEmbed("#chart-run", spec, { actions: false, renderer: "svg" }).then((res) => {
+  // The editor action is enabled (and the other three left off) purely
+  // so vega-embed builds its own "Open in Vega Editor" link/postMessage
+  // handshake into the DOM -- the sidebar's "Open in Vega editor" button
+  // (see initPage()) just finds and clicks that link itself rather than
+  // reimplementing it; vega-embed's own floating action menu is hidden
+  // via CSS (style.css) so it doesn't show up twice.
+  vegaEmbed("#chart-run", spec, {
+    actions: { export: false, source: false, compiled: false, editor: true },
+    renderer: "svg",
+  }).then((res) => {
     if (myGeneration !== redrawGeneration) return; // a newer redraw()/embedChart() already superseded this one
     runView = res.view;
     res.view.addSignalListener("brush", (name, value) => {
@@ -1057,25 +1077,57 @@ function embedChart(generation) {
   });
 }
 
+// Electron density has no slider of its own -- a user shouldn't be
+// able to set it independently of the ionization state that actually
+// implies it -- so it's derived via charge neutrality from whatever
+// ionized species this network happens to track, each contributing
+// its own ionic charge (H2_2 is H2+; He_3 is He++, hence the 2).
+// Missing species (a network without H2 or without He) just don't
+// contribute, so this generalizes across all three fiducial networks
+// without needing to know which ones exist.
+const IONIC_CHARGE = { H_2: 1, H2_2: 1, He_2: 1, He_3: 2 };
+
 function currentFractions() {
   const fractions = {};
   for (const name of speciesNames) {
-    if (name === "ge") continue;
+    if (name === "ge" || name === "de") continue;
     const el = document.getElementById("sp-" + name);
     if (el) fractions[name] = Math.pow(10, parseFloat(el.value));
   }
+  // Previously fell through setIcs()'s own missing-species fallback
+  // straight to a hardcoded 0 -- confirmed directly as the real cause
+  // of a reported "density isn't monotonic just after t=0" artifact:
+  // every run started genuinely charge-*non*-neutral, and the first
+  // real step was mostly a very fast, physically-real charge-
+  // neutralization transient, not a free-fall/chemistry effect worth
+  // seeing at all.
+  let de = 0;
+  for (const [name, charge] of Object.entries(IONIC_CHARGE)) {
+    if (fractions[name] !== undefined) de += charge * fractions[name];
+  }
+  fractions.de = de;
   return fractions;
 }
 
 function redraw() {
   const myGeneration = ++redrawGeneration; // see the comment on redrawGeneration above
-  const nH = Math.pow(10, parseFloat(document.getElementById("nH").value));
+  const logNH = parseFloat(document.getElementById("nH").value);
+  const nH = Math.pow(10, logNH);
   const T = Math.pow(10, parseFloat(document.getElementById("T").value));
-  document.getElementById("nH-val").textContent = nH.toExponential(2);
+  // Same "10^x" framing as target n (and every other log-scale slider
+  // here -- tolerance, collapse rate, step size, shock density): the
+  // readout is the exponent the slider itself is dialing, not the
+  // physical value, so initial and target n read the same way instead
+  // of one showing "4.00e+04" and the other showing a bare "15.0".
+  document.getElementById("nH-val").textContent = logNH.toFixed(1);
   document.getElementById("T-val").textContent = T.toFixed(0);
   const fractions = currentFractions();
   for (const name in fractions) {
-    document.getElementById("sp-" + name + "-val").textContent = fractions[name].toExponential(1);
+    // "de" (electron density) is derived, not slider-controlled -- see
+    // currentFractions() -- so it has no "-val" display element to
+    // update, unlike every other key this loop sees.
+    const valEl = document.getElementById("sp-" + name + "-val");
+    if (valEl) valEl.textContent = fractions[name].toExponential(1);
   }
 
   const t0 = performance.now();
@@ -1184,6 +1236,7 @@ function redraw() {
 
   lastResult = result;
   document.getElementById("download-csv").disabled = false;
+  document.getElementById("export-editor").disabled = false;
 }
 
 function summaryStat(label, value, extra) {
@@ -1285,7 +1338,9 @@ function setMode(mode) {
   document.getElementById("mode-cool").classList.toggle("active", mode === "cool");
   document.getElementById("mode-freefall").classList.toggle("active", mode === "freefall");
   document.getElementById("dtf-row").style.display = mode === "cool" ? "" : "none";
-  document.getElementById("ntarget-row").style.display = mode === "freefall" ? "" : "none";
+  for (const id of ["ntarget-row", "collapse-rate-row", "ff-step-row", "shock-row"]) {
+    document.getElementById(id).style.display = mode === "freefall" ? "" : "none";
+  }
   scheduleRedraw();
 }
 
@@ -1530,7 +1585,91 @@ function runSweepBody() {
   redraw(); // the loop above left nH/T/etc.'s underlying wasm state at the last swept run's -- put the primary charts back to what the sliders actually show
 }
 
+// Species-fraction sliders are otherwise fully independent (see
+// currentFractions()/setIcs(), which just does nH * frac per species) --
+// nothing stops setting e.g. both an ionized-H and an H2 fraction so
+// high that, together, they'd claim more H nuclei than actually exist.
+// A genuine "these sliders must sum to a fixed budget" control needs
+// real N-dimensional UI, which is more than this is worth building (see
+// NOTES.md) -- this is the cheap approximation that's actually worth
+// having: species that share the same nucleus are grouped (H_1/H_2/
+// H_m0/H2_1/H2_2 all draw on the same H budget -- H2 counts double,
+// two H nuclei per molecule; He_1/He_2/He_3 on the same He budget), and
+// dragging one slider proportionally rescales the *other* sliders in
+// its group to hold the group's total nuclei fraction at whatever the
+// network's own default initial conditions implied -- never touching
+// the slider actually being dragged. Only if the others are already
+// all the way down at the floor and the dragged slider *alone* still
+// exceeds the group's budget does this clamp the dragged slider itself,
+// as a last resort.
+const ELEMENT_GROUPS = {
+  H: ["H_1", "H_2", "H_m0", "H2_1", "H2_2"],
+  He: ["He_1", "He_2", "He_3"],
+};
+const NUCLEI_WEIGHT = { H2_1: 2, H2_2: 2 }; // everything else is one nucleus per formula unit
+const SPECIES_FRAC_FLOOR = 1e-14, SPECIES_FRAC_CEIL = 1; // matches every species slider's min/max (see below)
+let groupTargets = {}; // element -> nuclei-weighted fraction total, fixed once at page load from config.default_ics
+
+function nucleiWeight(name) {
+  return NUCLEI_WEIGHT[name] || 1;
+}
+
+function computeGroupTargets(config) {
+  groupTargets = {};
+  for (const [el, names] of Object.entries(ELEMENT_GROUPS)) {
+    let total = 0;
+    for (const name of names) {
+      const frac = config.default_ics[name];
+      if (frac !== undefined) total += nucleiWeight(name) * frac;
+    }
+    groupTargets[el] = total;
+  }
+}
+
+function enforceGroupConservation(draggedName) {
+  const el = Object.keys(ELEMENT_GROUPS).find((k) => ELEMENT_GROUPS[k].includes(draggedName));
+  if (!el) return; // not a grouped species (shouldn't happen for a species slider)
+  const target = groupTargets[el];
+  if (!(target > 0)) return; // this network's own defaults never populated the group -- nothing to conserve against
+
+  const sliders = {};
+  for (const name of ELEMENT_GROUPS[el]) {
+    const s = document.getElementById("sp-" + name);
+    if (s) sliders[name] = s;
+  }
+  const draggedSlider = sliders[draggedName];
+  if (!draggedSlider) return;
+  const draggedWeighted = nucleiWeight(draggedName) * Math.pow(10, parseFloat(draggedSlider.value));
+
+  const others = Object.keys(sliders).filter((n) => n !== draggedName);
+  const othersFrac = {};
+  let othersWeightedSum = 0;
+  for (const name of others) {
+    othersFrac[name] = Math.pow(10, parseFloat(sliders[name].value));
+    othersWeightedSum += nucleiWeight(name) * othersFrac[name];
+  }
+
+  const budget = target - draggedWeighted; // what's left in the group's budget for everyone else
+  if (budget <= 0) {
+    // The dragged slider alone already claims the whole group's budget
+    // (or more) -- push everyone else to the floor, then, only as a
+    // last resort, clamp the dragged slider itself back down to fit.
+    for (const name of others) sliders[name].value = Math.log10(SPECIES_FRAC_FLOOR);
+    const maxDraggedFrac = target / nucleiWeight(draggedName);
+    if (maxDraggedFrac >= SPECIES_FRAC_FLOOR) draggedSlider.value = Math.log10(maxDraggedFrac);
+    return;
+  }
+  if (othersWeightedSum <= 0) return; // nothing to redistribute proportionally from
+
+  const scale = budget / othersWeightedSum;
+  for (const name of others) {
+    const newFrac = Math.min(SPECIES_FRAC_CEIL, Math.max(SPECIES_FRAC_FLOOR, othersFrac[name] * scale));
+    sliders[name].value = Math.log10(newFrac);
+  }
+}
+
 function buildSpeciesSliders(config) {
+  computeGroupTargets(config);
   const container = document.getElementById("species-sliders");
   for (const name of speciesNames) {
     if (name === "ge" || name === "de") continue; // ge has its own T slider; de is derived (charge neutrality)
@@ -1543,7 +1682,10 @@ function buildSpeciesSliders(config) {
       <input type="range" id="sp-${name}" min="-14" max="0" step="0.1" value="${logFrac}">
     `;
     container.appendChild(row);
-    row.querySelector("input").addEventListener("input", scheduleRedraw);
+    row.querySelector("input").addEventListener("input", () => {
+      enforceGroupConservation(name);
+      scheduleRedraw();
+    });
   }
 }
 
@@ -1565,6 +1707,16 @@ function initPage(config) {
   pageTitle = config.title;
 
   document.getElementById("download-csv").addEventListener("click", downloadResultsCsv);
+  // Reuses vega-embed's own "Open in Vega Editor" action (built into
+  // #chart-run's spec -- see embedChart()) rather than re-implementing
+  // its postMessage handshake with the online editor: that action is
+  // still a real link in the DOM (just hidden, see style.css), so
+  // clicking it programmatically does exactly what vega-embed's own
+  // hover menu would have done.
+  document.getElementById("export-editor").addEventListener("click", () => {
+    const link = document.querySelector("#chart-run .vega-actions a");
+    if (link) link.click();
+  });
   document.getElementById("mode-cool").addEventListener("click", () => setMode("cool"));
   document.getElementById("mode-freefall").addEventListener("click", () => setMode("freefall"));
   document.getElementById("T-mode-T").addEventListener("click", () => setTemperatureDisplayMode("T"));
@@ -1609,3 +1761,18 @@ function initPage(config) {
     redraw();
   });
 }
+
+// Long, genuinely-useful-but-not-always-needed explanatory paragraphs
+// (target n, collapse rate, step size, tolerance, shock) are gated
+// behind a small "?" button next to their slider's label rather than
+// always on screen -- one delegated listener here covers all of them
+// (present or future) instead of wiring each one up individually.
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest(".info-btn");
+  if (!btn) return;
+  const note = document.getElementById(btn.getAttribute("aria-controls"));
+  if (!note) return;
+  const wasExpanded = btn.getAttribute("aria-expanded") === "true";
+  btn.setAttribute("aria-expanded", String(!wasExpanded));
+  note.hidden = wasExpanded;
+});
