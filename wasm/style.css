@@ -185,12 +185,15 @@ input:disabled { opacity: 0.5; }
    of the two is [hidden]. */
 .sweep-row .checkbox-label { font-size: 0.85em; color: var(--muted); margin-bottom: 4px; }
 .sweep-row .checkbox-label b { color: var(--fg); font-weight: 600; }
-.sweep-range { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.sweep-range label { font-size: 0.8em; color: var(--muted); display: flex; align-items: center; gap: 4px; }
-.sweep-range input[type=number] {
-  width: 80px; padding: 4px 6px; border-radius: 6px; border: 1px solid var(--border);
-  background: var(--bg); color: var(--fg); font-size: 0.85em;
+/* min/max/step are themselves range sliders (not typed numbers), same
+   as every other control on this site -- each gets its own stacked
+   label+readout+slider row, same layout convention as .row above. */
+.sweep-range { display: flex; flex-direction: column; gap: 6px; }
+.sweep-range-field label {
+  display: flex; justify-content: space-between; font-size: 0.8em; color: var(--muted); margin-bottom: 2px;
 }
+.sweep-range-field label span.val { font-variant-numeric: tabular-nums; color: var(--accent); font-weight: 600; }
+.sweep-range-field input[type=range] { width: 100%; }
 .sweep-range-preview { font-size: 0.78em; color: var(--muted); }
 #facet-row, #facet-col {
   padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border);

@@ -71,12 +71,15 @@ PARAM_SPECS = [
 def sweep_param_row(spec):
     """One parameter's row on the sweep page: a checkbox toggling
     between the ordinary single-value slider (the default -- this
-    dimension is just held fixed) and a min/max/step range triple (this
-    dimension is swept). Every row -- this generated kind and the
-    dynamic per-species kind sweep.js builds at runtime -- is fully
-    self-describing via data-* attributes on the wrapping .sweep-row
-    div, so none of sweep.js's facet-picker/option-slider/run/CSV logic
-    needs to special-case "is this T or a species fraction"."""
+    dimension is just held fixed) and a min/max/step range triple --
+    three more range sliders, not typed numbers, same as every other
+    control on this site (min/max each spanning the parameter's own
+    full slider range; step from that same slider's own granularity up
+    to the full span). Every row -- this generated kind and the dynamic
+    per-species kind sweep.js builds at runtime -- is fully self-
+    describing via data-* attributes on the wrapping .sweep-row div, so
+    none of sweep.js's facet-picker/option-slider/run/CSV logic needs to
+    special-case "is this T or a species fraction"."""
     unit_html = " (%s)" % spec["unit"] if spec["unit"] else ""
     return """
     <div class="row sweep-row" id="row-{id}" data-id="{id}" data-modes="{modes}"
@@ -90,15 +93,25 @@ def sweep_param_row(spec):
         <span class="val" id="{id}-val"></span>
       </div>
       <div class="sweep-range" id="{id}-range-wrap" hidden>
-        <label>min <input type="number" id="{id}-min" value="{min}" step="any"></label>
-        <label>max <input type="number" id="{id}-max" value="{max}" step="any"></label>
-        <label>step <input type="number" id="{id}-swstep" value="{step}" step="any"></label>
+        <div class="sweep-range-field">
+          <label>min <span class="val" id="{id}-min-val"></span></label>
+          <input type="range" id="{id}-min" min="{min}" max="{max}" step="{step}" value="{min}">
+        </div>
+        <div class="sweep-range-field">
+          <label>max <span class="val" id="{id}-max-val"></span></label>
+          <input type="range" id="{id}-max" min="{min}" max="{max}" step="{step}" value="{max}">
+        </div>
+        <div class="sweep-range-field">
+          <label>step <span class="val" id="{id}-swstep-val"></span></label>
+          <input type="range" id="{id}-swstep" min="{step}" max="{span}" step="{step}" value="{step}">
+        </div>
         <span class="sweep-range-preview" id="{id}-preview"></span>
       </div>
     </div>""".format(
         id=spec["id"], modes=",".join(spec["modes"]), log="1" if spec["log"] else "0",
         unit=spec["unit"], label=spec["label"], unit_html=unit_html,
         min=spec["min"], max=spec["max"], step=spec["step"], default=spec["default"],
+        span=spec["max"] - spec["min"],
     )
 
 PAGE_TEMPLATE = """<!doctype html>

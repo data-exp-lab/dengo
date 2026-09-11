@@ -103,6 +103,24 @@ function updateFixedValDisplay(rowEl) {
   valEl.textContent = formatPhysical(spec, parseFloat(input.value));
 }
 
+// The min/max/step range trio are themselves range sliders (see
+// sweep_param_row() in generate_site.py) -- min/max read as physical
+// values, same convention as the fixed slider's own readout; step is
+// shown in the parameter's native slider units (a log-scale
+// parameter's "step" is a multiplicative factor, not one physical
+// quantity, so there's no single physical unit to convert it to).
+function updateRangeFieldVals(rowEl) {
+  const spec = rowSpec(rowEl);
+  for (const suffix of ["min", "max"]) {
+    const el = document.getElementById(`${spec.id}-${suffix}`);
+    const valEl = document.getElementById(`${spec.id}-${suffix}-val`);
+    if (el && valEl) valEl.textContent = formatPhysical(spec, parseFloat(el.value));
+  }
+  const stepEl = document.getElementById(spec.id + "-swstep");
+  const stepValEl = document.getElementById(spec.id + "-swstep-val");
+  if (stepEl && stepValEl) stepValEl.textContent = parseFloat(stepEl.value).toPrecision(3);
+}
+
 // One shared wiring path for every row, static or dynamic: the
 // checkbox flips which of .sweep-fixed/.sweep-range is visible, and
 // both the single slider and the range trio keep their own live
@@ -136,11 +154,13 @@ function wireRowToggle(rowEl) {
   });
   for (const suffix of ["-min", "-max", "-swstep"]) {
     document.getElementById(id + suffix).addEventListener("input", () => {
+      updateRangeFieldVals(rowEl);
       updateRangePreview(rowEl);
       refreshOptionSliders();
     });
   }
   updateFixedValDisplay(rowEl);
+  updateRangeFieldVals(rowEl);
   updateRangePreview(rowEl);
 }
 
@@ -176,9 +196,18 @@ function buildSweepSpeciesRows(config) {
         <span class="val" id="sp-${name}-val"></span>
       </div>
       <div class="sweep-range" id="sp-${name}-range-wrap" hidden>
-        <label>min <input type="number" id="sp-${name}-min" value="-14" step="any"></label>
-        <label>max <input type="number" id="sp-${name}-max" value="0" step="any"></label>
-        <label>step <input type="number" id="sp-${name}-swstep" value="0.5" step="any"></label>
+        <div class="sweep-range-field">
+          <label>min <span class="val" id="sp-${name}-min-val"></span></label>
+          <input type="range" id="sp-${name}-min" min="-14" max="0" step="0.1" value="-14">
+        </div>
+        <div class="sweep-range-field">
+          <label>max <span class="val" id="sp-${name}-max-val"></span></label>
+          <input type="range" id="sp-${name}-max" min="-14" max="0" step="0.1" value="0">
+        </div>
+        <div class="sweep-range-field">
+          <label>step <span class="val" id="sp-${name}-swstep-val"></span></label>
+          <input type="range" id="sp-${name}-swstep" min="0.1" max="14" step="0.1" value="0.5">
+        </div>
         <span class="sweep-range-preview" id="sp-${name}-preview"></span>
       </div>
     `;
