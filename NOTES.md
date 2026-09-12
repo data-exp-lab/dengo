@@ -3686,3 +3686,48 @@ the real accuracy shift described above), the step-cap warning
 (confirmed both that it stays silent across the full legitimate slider
 range, and that it correctly appears when the cap is actually hit).
 Full `pytest` suite unaffected (120/120).
+
+**2026-09-12, back on `main`: cool mode's time-axis panels default to
+linear, with a log toggle.**
+
+Asked directly: "I believe we generally (but not necessarily always)
+want the cooling time plots' time axes to either be linear by default
+or able to toggle log for the time." Every time-axis panel in
+`app.js` (`metricPanel()`'s temperature/thermal-energy overview and
+zoomed copies, `ionPanel()`, `speciesPanel()`) shared one
+`xKind === "time" ? "symlog" : "log"` expression for the x-scale --
+symlog was chosen back when t=0 was first made plottable, specifically
+so that point wouldn't be dropped the way a pure log axis would.
+`xKind`/`xKindOfMode` is `"time"` only in cool mode (free-fall's shared
+x-axis is density, never time) -- so this only ever affected cool mode.
+
+New module-level `timeScaleMode` ("linear" default, or "log"), a
+`setTimeScaleMode()` setter mirroring the existing
+`setTemperatureDisplayMode()` T/thermal-energy toggle, and a new
+mini-modebar button pair (`#time-scale-linear`/`#time-scale-log`,
+`generate_site.py`'s `PAGE_TEMPLATE`) right below the existing
+temperature/thermal-energy one. The three call sites' scale expression
+became `xKind === "time" ? (timeScaleMode === "log" ? "symlog" :
+"linear") : "log"` -- linear by default (trivially shows t=0, no need
+for symlog's special-casing at all), symlog (not a pure log) when
+toggled to "log", keeping the original t=0-visibility reasoning for
+whichever run actually wants a log time axis (e.g. one spanning many
+decades of time). Density-axis panels (free-fall's `xKind==="density"`
+charts, and `densityTimePanel()`'s already-plain-`log` lookback-time
+*y*-axis, which has its own standing comment on why it doesn't need
+symlog) are untouched -- the literal "not necessarily always" case.
+
+The toggle row (`#time-scale-row`) is hidden outright in free-fall mode
+(`setMode()`), rather than left inert, since it has no effect there.
+
+Verified directly (headless Chrome, a locally-served copy of a
+previously-built site with just `app.js`/`index.html`'s template
+patched in, no recompile needed -- this change touches no wasm/solver
+code): cool mode's four time-axis panels all render `"linear"` by
+default, all switch to `"symlog"` after clicking the log toggle
+(inspected the actual compiled Vega-Lite spec passed to `vegaEmbed()`,
+not just the button's own active state), and the toggle row is hidden
+in free-fall mode and reappears in cool mode. No console/page errors.
+Scope: `wasm/app.js` and `wasm/generate_site.py` on `main` only --
+unrelated to the still-open `wasm-generic-kinetics-prototype` branch/
+PR #30.

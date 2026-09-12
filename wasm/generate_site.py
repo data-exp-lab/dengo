@@ -274,6 +274,10 @@ PAGE_TEMPLATE = """<!doctype html>
         <button type="button" id="T-mode-T" class="active">temperature</button>
         <button type="button" id="T-mode-ge">thermal energy</button>
       </div>
+      <div class="mini-modebar" id="time-scale-row" style="display:none">
+        <button type="button" id="time-scale-linear" class="active">time: linear</button>
+        <button type="button" id="time-scale-log">time: log</button>
+      </div>
       <p class="preset-note" id="zoom-timespan"></p>
       <div id="chart-run"></div>
       <p class="preset-note">One combined view of the current run (a
