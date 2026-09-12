@@ -3686,3 +3686,279 @@ the real accuracy shift described above), the step-cap warning
 (confirmed both that it stays silent across the full legitimate slider
 range, and that it correctly appears when the cap is actually hit).
 Full `pytest` suite unaffected (120/120).
+
+**2026-09-11: "build your own network" prototype -- generic (data-
+driven, no-recompile) mass-action kinetics engine, on a branch, not
+merged.**
+
+Prompted by a discussion of which parts of dengo's pipeline (network
+definition -> codegen -> Emscripten compile -> browser widget) could
+run inside e.g. a JupyterLite/Pyodide environment. Short version of
+that discussion: definition/rates/codegen (sympy + Jinja2, pure Python)
+already would, unmodified; the compile-to-wasm step is the genuine
+bottleneck (no mature, shippable "C++ compiler in the browser"), but
+there's more hope than expected there too -- a real, working
+Numba-in-JupyterLite pipeline already does the moral equivalent
+(llvmlite emits a wasm object, LLD links it in-process, Emscripten
+loads it as a side module, all client-side, no server round-trip).
+Redirected mid-discussion, twice, to a narrower and more useful target
+than "define arbitrary networks via live Python": (1) pick species/
+reactions from a preexisting, already-vetted catalog via checkboxes,
+not by writing Python; (2) build the engine assuming a richer catalog
+(CHIANTI ion-by-ion, UMIST) arrives later as a separate project --
+don't block on it, don't design it away.
+
+That reframing turned out to simplify the actual engineering a lot.
+Ordinary mass-action kinetics -- `rate(T) * product of reactant
+densities`, `d[X]/dt = net_stoichiometric_change * that same term` --
+is *generic math*, identical for every reaction regardless of which
+network it's in (see `Reaction.lhs_equation()`/`net_change()` in
+reaction_classes.py, which this mirrors). It doesn't need sympy or
+per-reaction code generation at all; it needs one hand-written
+assembler plus a data table (species, stoichiometry, a rate(T) table)
+of whatever reactions exist. So instead of "compile a solver for
+whatever's checked", the split is: a network-agnostic Newton solver
+(`wasm/generic_solver/dengo_generic.cpp`, vendoring `BE_chem_solve.C`
+unmodified, generalized from the production wasm build's compile-time
+`NSPECIES` to a runtime `nchem`) compiled *once*, ever, regardless of
+what gets checked -- and a generic RHS/Jacobian assembler
+(`wasm/generic_kinetics.js`) driven entirely by a reaction database
+JSON (`wasm/generate_reaction_db.py`, reusing `build_primordial()`'s
+already-registered species/reactions/rate functions directly, no new
+chemistry authored) and whatever subset of it a user has checked
+(`wasm/generic_ui.js`, `generic/index.html`). No em++ invocation
+happens for any selection, ever, after the one-time build.
+
+The JS callback boundary is Emscripten's `addFunction()`: the generic
+`dengo_generic_step()` takes the exact same `rhs_f`/`jac_f` C function-
+pointer types `BE_chem_solve.C` always took (it never knew or cared how
+`calculate_rhs_<name>` was implemented) -- so a JS closure registered
+via `addFunction()`, doing the mass-action sum directly against wasm
+linear memory, is just as valid a function pointer to it as compiled C
+was. A reaction is only selectable once every species it touches is
+checked (mirrors `ChemicalNetwork.add_reaction(auto_add=False)`'s own
+validation, not a new rule invented here).
+
+Two real bugs on the way to a working version, both straightforward
+once found: (1) `BE_chem_solve.C`'s own definition isn't `extern "C"`
+(plain, name-mangled C++, same as the production build already links
+against it), so declaring it `extern "C"` in the new generic wrapper
+was a linker-symbol mismatch, not a real language boundary -- fixed by
+matching its actual (mangled) linkage instead. (2) `Module.addFunction`
+signature strings are `(1 return) + (every parameter)` letters, one
+per 32-bit slot -- `rhs_f`/`jac_f` take 5 parameters
+(`double*, double*, int, int, void*`, all i32-sized on wasm32) plus an
+`int` return, i.e. 6 slots (`"iiiiii"`); using the 5-slot `"iiiii"`
+produced `"function signature mismatch"` at call time, not at
+compile/link time -- this class of bug won't be caught by anything
+short of actually invoking the call, so it's worth remembering as a
+specific, easy-to-get-wrong spot the next time a new C callback gets
+wired up this way.
+
+Verified: standalone Playwright cross-check of the generic JS RHS
+assembler against the *existing, previously-validated* compiled
+`hydrogen_minimal` wasm module, same initial conditions, same T (read
+back from the compiled solver's own ge->T conversion rather than
+independently inverting it) -- matched to 2e-5 relative error at full
+(1024-point) rate-table resolution, worse (3e-4) at this prototype's
+default 8x-downsampled (128-point) table; the residual is consistent
+with the compiled solver interpolating its rate tables in log-T-
+uniform-bin space while this prototype's `interpolateRate()` does a
+plain linear search+interpolate against the same (log-spaced, not
+downsampled-differently) T grid -- an interpolation-*scheme* mismatch,
+not a stoichiometry/rate-law bug, and expected to shrink toward zero as
+either table gets finer (confirmed: full-resolution error was ~14x
+smaller than the default-downsampling error). Full end-to-end UI
+regression: all 9 primordial species/22 reactions checked by default,
+full-network run converges to the requested end time with zero console
+errors; unchecking every He/H2/H- species correctly disables/unchecks
+every reaction that needs one (leaving exactly hydrogen_minimal's own
+k01/k02 subset selectable), and that restricted run also converges
+cleanly.
+
+**Explicitly out of scope for this prototype** (by design, not by
+oversight -- see the discussion this came from): no thermal/cooling
+coupling at all (fixed, user-dialed T only -- a cooling action's rate
+of energy exchange is *not* generic mass-action math the way a
+chemical reaction's rate is, so it doesn't fit this engine's one
+formula the reactions do; would need its own, separate generalization
+if pursued); no CHIANTI/UMIST/photoionization reactions in the catalog
+yet (deliberately deferred to "a separate project" per the discussion
+that prompted this -- the reaction-database JSON format should already
+accommodate CHIANTI's ion-by-ion rates with zero changes, since those
+are T-indexed exactly like every primordial_rates.py rate function;
+UMIST's/reaction_classes.py's photoionization rates are z-/redshift-
+indexed instead, which is the one real format gap a future project
+extending the catalog would need to actually solve, not just a
+labeling nicety -- flagged, not solved, here).
+
+Not merged to main -- lives on `wasm-generic-kinetics-prototype`,
+explicitly exploratory.
+
+**2026-09-11, continued: cooling implemented.**
+
+Asked directly to implement the "explicitly out of scope" cooling gap
+from the entry above. Cooling actions are genuinely *not* one universal
+formula the way reactions are (each is its own bespoke sympy
+expression), so unlike reactions -- generic math, needing no per-
+reaction code at all -- this needed lowering each action's *equation*
+once via sympy's own `jscode` printer (`export_cooling_action()` in
+generate_reaction_db.py), embedded as a JS expression string in the
+exported JSON and turned into a real callable via `new Function()` at
+load time. Still no per-*selection* codegen (every action in the
+catalog is lowered regardless of what's later checked) and no em++/
+compile step either way -- `new Function()` is JS's own built-in
+"make a callable from a source string" primitive, not a build step.
+
+Checking which cooling actions are actually *exportable* this way
+turned out better than expected: of the primordial network's 17
+cooling actions, only 2 (`gloverabel08`, `cie_cooling`) reference
+symbols unresolvable from their own equation tree (dengo's C codegen
+resolves them from hand-written surrounding C -- a critical-density/
+optical-depth-approximation formula each -- not from the symbolic
+equation alone); the other 15, including the non-trivial `h2formation`/
+`h2formation_extra` (temporaries nested a level deep: `h2heatfrac`,
+itself built from `ncrn`/`ncrd1`/`ncrd2` table lookups), lower cleanly.
+Detected generically by checking `eq.free_symbols` against an
+"accounted for" set (species + T + this action's own renamed table
+symbols + `ge`, the last needed only because `ReactionCoefficient.
+free_symbols` -- reaction_classes.py -- always forces `ge` into the set
+regardless of whether an equation is actually ge-dependent, dengo's own
+mechanism for symbolically differentiating a coefficient w.r.t. energy)
+-- not hardcoded by action name, so this keeps working correctly if
+primordial_cooling.py's own set of actions ever changes.
+
+Design choices, each a real (documented, not hidden) simplification
+versus the compiled solver:
+- **Single constant gamma=5/3** (monatomic ideal gas) for the ge<->T
+  conversion, instead of the compiled solver's T-dependent interpolated
+  gamma for H2-bearing gas (roto-vibrational degrees of freedom
+  activating). ge<->T is then closed-form both directions (no
+  bisection needed, unlike app.js's own geForTemperature()) --
+  `ge = n_total*kB*T / ((gamma-1)*mdensity_amu*mh)`, generic from
+  whichever species are active via their already-exported `weight`.
+- **z=0 always** for Compton cooling (the only cooling action using
+  redshift) -- matches this project's existing compiled widget's own
+  established convention (see the "why is z always 0" note on
+  app.js's IC_PRESETS).
+- **Approximate (not exact) Jacobian** for the `ge` row/column: the
+  species-species block stays exact/analytic (unchanged from the
+  chemistry-only prototype); `d(ge_rhs)/d(species)` and
+  `d(everything)/d(ge)` (including the T-dependence of reaction rates
+  now that T isn't fixed) are finite-differenced instead of derived
+  analytically. The compiled solver gets these exactly, via
+  `ReactionCoefficient._eval_derivative()`'s precomputed `dr<name>`
+  tables -- reproducing that here would mean symbolically
+  differentiating every jscode-lowered cooling expression *and* every
+  reaction's own rate table w.r.t. T, real additional work for what's
+  ultimately a Newton-convergence aid, not something that changes what
+  a *converged* answer means (BE_chem_solve.C's convergence check is on
+  the actual residual/update norm, not Jacobian fidelity). A deliberate
+  scope cut, not an oversight.
+
+Verified: a physically unambiguous sanity check, not just "it runs
+without errors" -- primordial gas at T=1e5 K (H2/H- species unchecked,
+so no formation-heating channel exists at all) with only the atomic
+cooling actions checked (collisional excitation/ionization, radiative
+recombination, bremsstrahlung, Compton) cools from 1.000e5 K to 6.209e3
+K over the run -- a large, correctly-signed net *cooling*, confirming
+the mdensity normalization, the jscode-lowered expressions' signs, and
+the ge<->T conversion all agree with each other rather than merely
+"not crashing". Separately, the full default-conditions run (all 9
+species, all 15 exportable cooling actions, T0=1000K, a cool/mostly-
+neutral starting point where net cooling power should genuinely be
+small) showed only a modest T change (1000K -> 1001K) over the same
+span -- also consistent, not a sign of a sign error, since collisional
+cooling scales with ionization fraction and this starting point is
+only trace-ionized. Full existing-page regression (all three fiducial
+networks, sweep, rates) and the chemistry-only subset-selection check
+(hydrogen_minimal's own k01/k02 reproduced from the full catalog) both
+re-run clean after this change, zero console errors. CSV export
+confirmed to carry a new `T_K` column with the evolving values.
+
+**2026-09-11, continued: a third tool -- construct.html, writing real
+dengo Python live in the browser.**
+
+Clarified after the previous entry's own writeup went a different
+direction than intended: not "recompute the same fixed catalog live
+instead of at build time" -- a genuinely more flexible *third* tool,
+alongside the three pre-compiled wasm networks and the checkbox-driven
+catalog picker, specifically for constructing networks that aren't in
+any catalog at all. One CodeMirror-edited Python box per reaction
+(picked over a single free-form script or a structured form -- "for
+simplicity's sake" -- each box self-contained: define Species, define a
+rate(T) function, call Reaction(...)), a "Build network" button, then
+the exact same engine (generic_kinetics.js, dengo_generic.js/.wasm) the
+checkbox tool already uses -- confirming the design insight from the
+previous entry after all, just aimed at the right target: the engine
+doesn't care whether its {species, reactions} data came from a static
+JSON, a live re-run of build_primordial(), or a user's own Reaction()
+calls from five seconds ago.
+
+**The real dengo package, not a hand-picked subset of files.** First
+attempt was going to vendor just the ~5 files reaction_classes.py
+actually needs (plus a stub __init__.py) into Pyodide's virtual
+filesystem -- reasonable, but strictly worse than what the user
+suggested instead: `uv build --wheel` (pure filesystem operation, no
+PyPI contact -- dengo isn't published there and isn't ready to be) into
+a wheel served as a static asset, installed into Pyodide via
+`micropip.install(url, {deps: false})`. Confirmed directly (a plain
+Python process with h5py stubbed in sys.modules, no Pyodide involved)
+that the *entire* real package -- `import dengo`, not just
+`dengo.reaction_classes` -- imports cleanly and Species/Reaction/
+rate-table evaluation all work, before wiring any of this into the
+browser. `deps=False` is required (dengo declares h5py/cython/
+setuptools as dependencies in pyproject.toml; none are needed just to
+construct Species/Reaction objects, and micropip would otherwise try
+to resolve them) -- interestingly, Pyodide's own package loader turned
+out to load a *real* h5py anyway as part of satisfying dengo's other
+declared deps (Jinja2/numpy/sympy are genuine Pyodide packages) --
+harmless either way since nothing this page exercises calls real HDF5
+I/O, but worth noting the "h5py isn't available in Pyodide" assumption
+from two entries ago may be stale/version-dependent, not re-verified
+further here.
+
+**Real bugs found and fixed, not just the expected first-draft
+plumbing misses** (missed script-tag/asset-copy entries, a
+`waitForFunction` argument-order mistake in my own test harness, an
+`extern "C"`-style linkage confusion -- all straightforward once
+found):
+- micropip.install() parses wheel *metadata out of the filename
+  itself* (PEP 427 naming: `name-version-pyTag-abiTag-platTag.whl`) --
+  renaming the built wheel to a fixed `dengo.whl` for simplicity broke
+  this ("Invalid wheel filename (wrong number of parts)"); fixed by
+  keeping `uv build`'s own filename and threading the actual name into
+  the page via a small `window.DENGO_WHEEL_FILENAME` global instead of
+  hardcoding it in construct_ui.js.
+- **A real, general bug in generic_kinetics.js's Jacobian**, latent
+  since the chemistry-only prototype two entries ago, found immediately
+  by this tool's own "really boring" A -> B -> C test case:
+  `d(term)/d(state_j)` was computed as `(p * term) / state[j]` --
+  exactly `0/0` (NaN, not 0) the moment any reactant's density is
+  *exactly* zero, which the checkbox tool's own species defaults (all
+  small positive trace values) never triggered but an intermediate
+  species genuinely starting empty (B, C above) does immediately.
+  Fixed by computing the derivative directly (`p * state[j]^(p-1) *
+  product of the *other* reactants' own factors`), which is exact
+  everywhere including zero (JS's `Math.pow(0, 0) === 1`, matching the
+  p=1 case's correct limit) rather than reconstructing it by dividing
+  back out of the already-computed term.
+
+Verified: the two starter reactions (A -> B at rate 0.1, B -> C at rate
+0.03, all species initial values defaulting to "0 unless never
+produced by any reaction" so A starts full and B/C start empty) produce
+the textbook sequential-decay curve -- A monotonically down to 0.0094,
+B rises to a genuine interior peak (0.587, at neither endpoint) then
+falls, C monotonically up to 0.675, and A+B+C = 1.0 to 5 significant
+figures throughout -- a real, checkable correctness signal, not just
+"it ran". Full build-and-run completed in ~16s cold (Pyodide + wheel
+install) and ran in 56ms once built. Re-ran the full existing-page
+regression (all three fiducial networks, sweep, rates, both the fixed-T
+and cooling-enabled checkbox-tool paths, and the earlier hot-atomic-
+cooling physics check) after the Jacobian fix landed -- identical
+results to before (T: 1e5 K -> 6.209e3 K, unchanged), confirming the
+fix only changes behavior at the zero-density edge case it targets.
+
+Not merged, not pushed -- lives on `wasm-generic-kinetics-prototype`,
+explicitly exploratory (per direct instruction: no push, and no PyPI
+publish of any kind for this work).
