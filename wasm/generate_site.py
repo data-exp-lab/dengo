@@ -17,11 +17,13 @@ gh-pages.yml). Every network's build is independent and this script
 continues past a single network's failure (reporting it at the end) --
 one broken fiducial network shouldn't take down the whole site.
 """
+import glob
 import json
 import os
 import shutil
 import subprocess
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -483,7 +485,7 @@ GENERIC_PAGE_TEMPLATE = """<!doctype html>
 <link rel="stylesheet" href="../style.css">
 </head>
 <body>
-<div class="nav"><a href="../">&larr; all networks</a></div>
+<div class="nav"><a href="../">&larr; all networks</a> <a href="construct.html">construct with Python &rarr;</a></div>
 <h1>Build your own network <span class="gk-prototype-badge">prototype</span></h1>
 <p class="sub">
   Every species and reaction dengo's primordial chemistry knows about
@@ -587,6 +589,106 @@ initGenericPage();
 </html>
 """
 
+CONSTRUCT_PAGE_TEMPLATE = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Construct a network -- dengo in the browser</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>%F0%9F%A7%AA</text></svg>">
+<link rel="stylesheet" href="../style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css">
+</head>
+<body>
+<div class="nav"><a href="../">&larr; all networks</a> <a href="index.html">&larr; build-your-own-network (checkbox version)</a></div>
+<h1>Construct a network <span class="gk-prototype-badge">prototype</span></h1>
+<p class="sub">
+  A third way to define a network, alongside the three pre-compiled
+  wasm ones and the checkbox tool -- instead of picking a subset of one
+  fixed, pre-baked catalog, write your own dengo <code>Species</code>/
+  <code>Reaction</code> definitions directly, one reaction per box
+  below, in real Python. The actual dengo package (not a lookalike)
+  runs live in your browser via <a href="https://pyodide.org/">Pyodide</a>
+  (loaded from a CDN the first time you click "Build network" -- a few
+  seconds, several MB, then cached) -- everything after that (the
+  mass-action RHS/Jacobian assembly and the stiff-ODE integrator itself)
+  is the exact same engine the checkbox tool uses, completely
+  unmodified. No thermal/cooling coupling here yet (see the checkbox
+  tool for that) -- these are ordinary, undramatic reaction networks;
+  try the two boring starter reactions below (A &rarr; B &rarr; C, a
+  classic sequential-decay textbook problem) to see the shape of it.
+  See NOTES.md.
+</p>
+
+<div class="layout">
+  <div class="panel">
+    <div class="row-inline">
+      <label>T (K)</label>
+      <input type="number" step="any" id="ck-T" value="1000">
+      <label>total time (s)</label>
+      <input type="number" step="any" id="ck-dtf" value="50">
+    </div>
+    <div id="ck-species-inputs"></div>
+
+    <div class="sweep-actions">
+      <button type="button" id="ck-build" class="btn-primary">Build network</button>
+      <button type="button" id="ck-run" class="btn-secondary" disabled>Run</button>
+      <button type="button" id="ck-download-csv" class="btn-secondary" disabled>Download CSV</button>
+      <span id="ck-status"></span>
+    </div>
+  </div>
+
+  <div id="charts">
+    <div class="chart-box">
+      <div class="chart-title">Species value vs. time</div>
+      <div id="ck-chart"></div>
+    </div>
+  </div>
+</div>
+
+<div id="ck-cards"></div>
+<div class="row-inline">
+  <button type="button" id="ck-add-card" class="btn-secondary">+ Add reaction</button>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/vega@5"></script>
+<script src="https://cdn.jsdelivr.net/npm/vega-lite@5"></script>
+<script src="https://cdn.jsdelivr.net/npm/vega-embed@6"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/python/python.min.js"></script>
+<script src="https://cdn.jsdelivr.net/pyodide/v0.26.2/full/pyodide.js"></script>
+<script src="dengo_generic.js"></script>
+<script src="../app.js"></script>
+<script src="../generic_kinetics.js"></script>
+<script>window.DENGO_WHEEL_FILENAME = "__DENGO_WHEEL_FILENAME__";</script>
+<script src="../construct_ui.js"></script>
+<script>
+addReactionCard(`from dengo.reaction_classes import Species, Reaction
+
+A = Species("A", 1.0)
+B = Species("B", 1.0)
+
+def rate(state):
+    return 0.1 + 0 * state.T  # constant -- a "really boring" rate law
+
+Reaction("A_to_B", rate, [(1, A)], [(1, B)])
+`);
+addReactionCard(`from dengo.reaction_classes import Species, Reaction
+
+B = Species("B", 1.0)
+C = Species("C", 1.0)
+
+def rate(state):
+    return 0.03 + 0 * state.T  # slower than A -> B, so B visibly rises then falls
+
+Reaction("B_to_C", rate, [(1, B)], [(1, C)])
+`);
+initConstructPage();
+</script>
+</body>
+</html>
+"""
+
 
 def find_emxx():
     emxx = shutil.which("em++")
@@ -634,6 +736,33 @@ def build_sweep_page(cfg, net_dir, repo, config):
         ))
 
 
+def build_dengo_wheel(generic_dir):
+    """Builds a plain local wheel of the *real* dengo package (`uv
+    build --wheel` -- a pure filesystem operation, no PyPI contact of
+    any kind: dengo isn't published there and this project isn't ready
+    for that) and copies it into generic_dir, keeping `uv build`'s own
+    version-suffixed filename (e.g. dengo-0.2.0.dev0-py3-none-any.whl)
+    -- micropip.install() parses metadata *out of the filename itself*
+    (PEP 427 naming), so a renamed-to-something-generic wheel fails
+    with "Invalid wheel filename" rather than installing; the actual
+    name is threaded into construct.html instead (see build_generic_
+    page() below) so construct_ui.js's bootstrapDengo() doesn't need to
+    hardcode a version. `deps=False` at install time skips h5py/cython/
+    setuptools (dengo's declared dependencies) -- neither available nor
+    needed just to construct Species/Reaction objects -- see NOTES.md.
+
+    Returns the wheel's own filename.
+    """
+    repo_root = os.path.dirname(HERE)
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(["uv", "build", "--wheel", "--out-dir", tmp], cwd=repo_root, check=True)
+        wheels = glob.glob(os.path.join(tmp, "*.whl"))
+        if len(wheels) != 1:
+            raise RuntimeError("expected exactly one wheel from `uv build --wheel`, got: %s" % wheels)
+        shutil.copy(wheels[0], generic_dir)
+        return os.path.basename(wheels[0])
+
+
 def build_generic_page(out_dir):
     """Prototype "build your own network" page (see GENERIC_PAGE_TEMPLATE's
     own intro text and wasm/README-generic.md): compiles the network-
@@ -642,6 +771,9 @@ def build_generic_page(out_dir):
     *once* -- not once per fiducial network, and never again when a
     user's species/reaction selection changes -- and exports the full
     primordial reaction database (generate_reaction_db.py) alongside it.
+    Also builds construct.html, the "write your own dengo Python" sibling
+    tool (build_dengo_wheel(), above) -- both share the same compiled
+    integrator and reaction-file location, so they're built together.
     """
     from generate_reaction_db import build_reaction_db
 
@@ -663,6 +795,10 @@ def build_generic_page(out_dir):
     )
 
     build_reaction_db(generic_dir)
+    wheel_filename = build_dengo_wheel(generic_dir)
+
+    with open(os.path.join(generic_dir, "construct.html"), "w") as f:
+        f.write(CONSTRUCT_PAGE_TEMPLATE.replace("__DENGO_WHEEL_FILENAME__", wheel_filename))
 
     with open(os.path.join(generic_dir, "index.html"), "w") as f:
         f.write(GENERIC_PAGE_TEMPLATE)
@@ -728,6 +864,7 @@ def main():
     shutil.copy(os.path.join(HERE, "sweep.js"), out_dir)
     shutil.copy(os.path.join(HERE, "generic_kinetics.js"), out_dir)
     shutil.copy(os.path.join(HERE, "generic_ui.js"), out_dir)
+    shutil.copy(os.path.join(HERE, "construct_ui.js"), out_dir)
     shutil.copy(os.path.join(HERE, "rates.js"), out_dir)
     shutil.copy(os.path.join(HERE, "style.css"), out_dir)
     # dengo-solver.js/.d.ts: a reusable wrapper around any dengo-generated

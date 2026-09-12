@@ -3875,3 +3875,90 @@ networks, sweep, rates) and the chemistry-only subset-selection check
 (hydrogen_minimal's own k01/k02 reproduced from the full catalog) both
 re-run clean after this change, zero console errors. CSV export
 confirmed to carry a new `T_K` column with the evolving values.
+
+**2026-09-11, continued: a third tool -- construct.html, writing real
+dengo Python live in the browser.**
+
+Clarified after the previous entry's own writeup went a different
+direction than intended: not "recompute the same fixed catalog live
+instead of at build time" -- a genuinely more flexible *third* tool,
+alongside the three pre-compiled wasm networks and the checkbox-driven
+catalog picker, specifically for constructing networks that aren't in
+any catalog at all. One CodeMirror-edited Python box per reaction
+(picked over a single free-form script or a structured form -- "for
+simplicity's sake" -- each box self-contained: define Species, define a
+rate(T) function, call Reaction(...)), a "Build network" button, then
+the exact same engine (generic_kinetics.js, dengo_generic.js/.wasm) the
+checkbox tool already uses -- confirming the design insight from the
+previous entry after all, just aimed at the right target: the engine
+doesn't care whether its {species, reactions} data came from a static
+JSON, a live re-run of build_primordial(), or a user's own Reaction()
+calls from five seconds ago.
+
+**The real dengo package, not a hand-picked subset of files.** First
+attempt was going to vendor just the ~5 files reaction_classes.py
+actually needs (plus a stub __init__.py) into Pyodide's virtual
+filesystem -- reasonable, but strictly worse than what the user
+suggested instead: `uv build --wheel` (pure filesystem operation, no
+PyPI contact -- dengo isn't published there and isn't ready to be) into
+a wheel served as a static asset, installed into Pyodide via
+`micropip.install(url, {deps: false})`. Confirmed directly (a plain
+Python process with h5py stubbed in sys.modules, no Pyodide involved)
+that the *entire* real package -- `import dengo`, not just
+`dengo.reaction_classes` -- imports cleanly and Species/Reaction/
+rate-table evaluation all work, before wiring any of this into the
+browser. `deps=False` is required (dengo declares h5py/cython/
+setuptools as dependencies in pyproject.toml; none are needed just to
+construct Species/Reaction objects, and micropip would otherwise try
+to resolve them) -- interestingly, Pyodide's own package loader turned
+out to load a *real* h5py anyway as part of satisfying dengo's other
+declared deps (Jinja2/numpy/sympy are genuine Pyodide packages) --
+harmless either way since nothing this page exercises calls real HDF5
+I/O, but worth noting the "h5py isn't available in Pyodide" assumption
+from two entries ago may be stale/version-dependent, not re-verified
+further here.
+
+**Real bugs found and fixed, not just the expected first-draft
+plumbing misses** (missed script-tag/asset-copy entries, a
+`waitForFunction` argument-order mistake in my own test harness, an
+`extern "C"`-style linkage confusion -- all straightforward once
+found):
+- micropip.install() parses wheel *metadata out of the filename
+  itself* (PEP 427 naming: `name-version-pyTag-abiTag-platTag.whl`) --
+  renaming the built wheel to a fixed `dengo.whl` for simplicity broke
+  this ("Invalid wheel filename (wrong number of parts)"); fixed by
+  keeping `uv build`'s own filename and threading the actual name into
+  the page via a small `window.DENGO_WHEEL_FILENAME` global instead of
+  hardcoding it in construct_ui.js.
+- **A real, general bug in generic_kinetics.js's Jacobian**, latent
+  since the chemistry-only prototype two entries ago, found immediately
+  by this tool's own "really boring" A -> B -> C test case:
+  `d(term)/d(state_j)` was computed as `(p * term) / state[j]` --
+  exactly `0/0` (NaN, not 0) the moment any reactant's density is
+  *exactly* zero, which the checkbox tool's own species defaults (all
+  small positive trace values) never triggered but an intermediate
+  species genuinely starting empty (B, C above) does immediately.
+  Fixed by computing the derivative directly (`p * state[j]^(p-1) *
+  product of the *other* reactants' own factors`), which is exact
+  everywhere including zero (JS's `Math.pow(0, 0) === 1`, matching the
+  p=1 case's correct limit) rather than reconstructing it by dividing
+  back out of the already-computed term.
+
+Verified: the two starter reactions (A -> B at rate 0.1, B -> C at rate
+0.03, all species initial values defaulting to "0 unless never
+produced by any reaction" so A starts full and B/C start empty) produce
+the textbook sequential-decay curve -- A monotonically down to 0.0094,
+B rises to a genuine interior peak (0.587, at neither endpoint) then
+falls, C monotonically up to 0.675, and A+B+C = 1.0 to 5 significant
+figures throughout -- a real, checkable correctness signal, not just
+"it ran". Full build-and-run completed in ~16s cold (Pyodide + wheel
+install) and ran in 56ms once built. Re-ran the full existing-page
+regression (all three fiducial networks, sweep, rates, both the fixed-T
+and cooling-enabled checkbox-tool paths, and the earlier hot-atomic-
+cooling physics check) after the Jacobian fix landed -- identical
+results to before (T: 1e5 K -> 6.209e3 K, unchanged), confirming the
+fix only changes behavior at the zero-density edge case it targets.
+
+Not merged, not pushed -- lives on `wasm-generic-kinetics-prototype`,
+explicitly exploratory (per direct instruction: no push, and no PyPI
+publish of any kind for this work).

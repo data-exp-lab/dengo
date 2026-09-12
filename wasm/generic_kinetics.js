@@ -177,11 +177,19 @@ function genericJacobian(db, rates, state, speciesOrder) {
   for (const r of db.reactions) {
     const rate = rates[r.name];
     if (rate === undefined) continue;
-    let term = rate;
-    for (const name in r.leftPower) term *= Math.pow(state[name], r.leftPower[name]);
-    for (const jName in r.leftPower) {
+    const leftNames = Object.keys(r.leftPower);
+    for (const jName of leftNames) {
       const p = r.leftPower[jName];
-      const dterm_dj = (p * term) / state[jName];
+      // d/dn_j [n_j^p * (other reactants' factors)] = p * n_j^(p-1) *
+      // (other factors) -- computed directly (not as term/n_j, which
+      // is 0/0 -- NaN, not 0 -- the moment any reactant's density is
+      // exactly zero, a real case here (an intermediate/product
+      // species genuinely starting at 0, not just astrophysically
+      // "small"), not just a theoretical edge case; see NOTES.md).
+      let dterm_dj = p * Math.pow(state[jName], p - 1) * rate;
+      for (const otherName of leftNames) {
+        if (otherName !== jName) dterm_dj *= Math.pow(state[otherName], r.leftPower[otherName]);
+      }
       const j = idx[jName];
       if (j === undefined) continue; // a reactant not in this run's species subset -- shouldn't happen if the UI keeps selections consistent, but skip rather than throw
       for (const iName in r.netChange) {

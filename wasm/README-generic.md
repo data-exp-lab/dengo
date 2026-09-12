@@ -5,13 +5,16 @@ merged.** See NOTES.md's 2026-09-11 entry for the full writeup
 (motivation, design, the two real bugs hit building it, and what was
 verified).
 
-A second, deliberately different path alongside the three fixed
-fiducial networks (`fiducial_networks.py`) `generate_site.py` already
-builds: instead of a Python-authored network compiled once via
-Emscripten, `generic/index.html` lets you check which species and
-reactions to include from a full catalog (today: everything
-`build_primordial()` knows), with **no compile step for whatever you
-pick**.
+Two more paths alongside the three fixed fiducial networks
+(`fiducial_networks.py`) `generate_site.py` already builds and compiles
+once via Emscripten:
+
+- `generic/index.html` -- check which species/reactions/cooling actions
+  to include from a full catalog (today: everything `build_primordial()`
+  knows), with **no compile step for whatever you pick**.
+- `generic/construct.html` -- write your *own* dengo `Species`/
+  `Reaction` definitions, live, one reaction per editor box, not
+  limited to the catalog at all. See "A third tool" below.
 
 ## Why this needed no new compiler at all
 
@@ -59,6 +62,42 @@ with T derived from it every step -- see NOTES.md's 2026-09-11
 17 primordial cooling actions can't be exported this way, and the
 Jacobian's finite-difference `ge` row/column).
 
+## A third tool: construct.html
+
+`generic/index.html` still only ever picks a subset of one fixed,
+pre-baked catalog. `construct.html` is for networks that aren't in any
+catalog at all: one CodeMirror-edited Python box per reaction (`+ Add
+reaction` for more), each defining real dengo `Species`/`Reaction`
+objects, run through the *exact same* engine (`generic_kinetics.js`,
+`dengo_generic.js`/`.wasm`) the checkbox tool uses -- the engine never
+changes, only where its `{species, reactions}` data comes from: a
+static JSON there, whatever a user's own Python just constructed here.
+
+- **The real dengo package**, not a reimplementation and not a hand-
+  picked subset of files: `build_dengo_wheel()` (generate_site.py) runs
+  `uv build --wheel` (a pure filesystem operation -- dengo isn't on
+  PyPI, and this project isn't ready for that) and serves the resulting
+  wheel as a static asset; `construct_ui.js`'s `bootstrapDengo()`
+  installs it into Pyodide via `micropip.install(url, {deps: false})`
+  (dengo's declared dependencies -- h5py/cython/setuptools -- are
+  neither available nor needed just to construct Species/Reaction
+  objects) and stubs a bare `h5py` module first (reaction_classes.py
+  imports it unconditionally at module level but never actually calls
+  it for anything this page exercises).
+- Each reaction box is self-contained: define `Species`, define a
+  `rate(state)` function (`state.T` is available, same convention as
+  every real dengo rate function), call `Reaction(name, rate, left,
+  right)`. After "Build network", every registered reaction's rate is
+  tabulated over a generic T grid and handed to the same
+  `loadReactionDb()`/`runGenericIntegration()` the checkbox tool calls.
+- No cooling/thermal coupling in this tool (yet) -- see the checkbox
+  tool for that.
+
+See NOTES.md's second 2026-09-11 entry for the full writeup, including
+a real, general bug this tool's own "boring" test case surfaced in the
+shared Jacobian (a `0/0` when a reactant's density is exactly zero --
+latent in the checkbox tool too, just never triggered there).
+
 ## Explicitly out of scope right now
 
 - **Cooling uses a single constant gamma (5/3, monatomic ideal gas)**
@@ -85,8 +124,15 @@ fiducial networks):
 ```sh
 uv run python wasm/generate_site.py /some/output/dir
 python3 -m http.server -d /some/output/dir 8080
-# then open http://localhost:8080/generic/
+# checkbox tool: http://localhost:8080/generic/
+# construct-with-Python tool: http://localhost:8080/generic/construct.html
 ```
+
+(`build_generic_page()` invokes `uv build --wheel` as part of this --
+requires `uv` on `PATH`, same as everything else in this repo's own
+tooling; no network/PyPI contact happens during the build itself, only
+later, in the browser, when Pyodide's own CDN assets and the wheel this
+build just produced are fetched.)
 
 ## Correctness check
 
