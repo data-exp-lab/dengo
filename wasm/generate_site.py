@@ -494,10 +494,16 @@ GENERIC_PAGE_TEMPLATE = """<!doctype html>
   to build a network than writing Python: ordinary mass-action kinetics
   (rate(T) times a product of reactant densities) is generic math, not
   per-network code, so it's assembled from data in JS instead of being
-  sympy/Emscripten-generated per selection -- only the stiff-ODE solver
-  itself (compiled once, reused unmodified for any selection) needs
-  Emscripten at all. Chemistry only for now, at a fixed temperature you
-  dial in -- no thermal (cooling) coupling yet. See NOTES.md.
+  sympy/Emscripten-generated per selection. Cooling actions aren't one
+  universal formula the way reactions are, so each one's equation is
+  instead lowered once (for the whole catalog, still not per selection)
+  via sympy's own jscode printer at export time. Either way, only the
+  stiff-ODE solver itself (compiled once, reused unmodified for any
+  selection) needs Emscripten at all -- checking/unchecking anything
+  here never triggers a build step. Check no cooling actions to hold T
+  fixed at the dialed value; check at least one and T evolves from it
+  instead (a single constant ideal-gas gamma, not the compiled solver's
+  own H2-aware one -- see README-generic.md). See NOTES.md.
 </p>
 
 <div class="layout">
@@ -505,6 +511,9 @@ GENERIC_PAGE_TEMPLATE = """<!doctype html>
     <div class="row">
       <label>T (K) <span class="val" id="gk-T-val"></span></label>
       <input type="range" id="gk-T" min="1" max="8" step="0.05" value="3">
+      <p class="preset-note">Fixed for the whole run unless at least one
+        cooling action below is checked, in which case this is just the
+        starting temperature.</p>
     </div>
     <div class="row">
       <label>initial n<sub>H</sub> (cm⁻³) <span class="val" id="gk-nH-val"></span></label>
@@ -529,6 +538,15 @@ GENERIC_PAGE_TEMPLATE = """<!doctype html>
       <div id="gk-reaction-list"></div>
     </details>
 
+    <details class="species-details">
+      <summary>Cooling (optional -- unchecked means T stays fixed)</summary>
+      <div class="row-inline">
+        <button type="button" id="gk-select-all-cool" class="btn-secondary">All</button>
+        <button type="button" id="gk-select-none-cool" class="btn-secondary">None</button>
+      </div>
+      <div id="gk-cooling-list"></div>
+    </details>
+
     <div class="sweep-actions">
       <button type="button" id="gk-run" class="btn-primary" disabled>Run</button>
       <button type="button" id="gk-download-csv" class="btn-secondary" disabled>Download CSV</button>
@@ -538,8 +556,12 @@ GENERIC_PAGE_TEMPLATE = """<!doctype html>
 
   <div id="charts">
     <div class="chart-box">
-      <div class="chart-title">Species density vs. time (fixed T)</div>
+      <div class="chart-title">Species density vs. time</div>
       <div id="gk-chart"></div>
+    </div>
+    <div class="chart-box" id="gk-chart-T-box" hidden>
+      <div class="chart-title">Temperature vs. time</div>
+      <div id="gk-chart-T"></div>
     </div>
   </div>
 </div>

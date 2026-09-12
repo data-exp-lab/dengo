@@ -40,16 +40,33 @@ required); it needs one hand-written assembler plus a data table. So:
   were implemented, so a JS closure is just as valid a callback as
   compiled C.
 - `wasm/generic_ui.js` / `generic/index.html` -- the checkbox UI. A
-  reaction is only selectable once every species it touches is checked
-  (mirrors `ChemicalNetwork.add_reaction(auto_add=False)`'s own
-  validation).
+  reaction or cooling action is only selectable once every species it
+  touches is checked (mirrors `ChemicalNetwork.add_reaction`/
+  `add_cooling(auto_add=False)`'s own validation).
+
+Cooling *isn't* one universal formula the way reactions are -- each
+action is its own bespoke sympy expression -- so it needed one more
+piece: `export_cooling_action()` (generate_reaction_db.py) lowers each
+action's equation *once*, via sympy's own `jscode` printer, into a JS
+expression string embedded in the exported JSON; `generic_kinetics.js`
+turns each into a real callable via `new Function()` at load time.
+Still no per-*selection* codegen (every action in the catalog is
+lowered regardless of what's later checked) and no compile step either
+way. Checking at least one cooling action switches the run from fixed-T
+to tracking `ge` (specific internal energy) as a real ODE variable,
+with T derived from it every step -- see NOTES.md's 2026-09-11
+"continued" entry for the full design (ge<->T conversion, why 2 of the
+17 primordial cooling actions can't be exported this way, and the
+Jacobian's finite-difference `ge` row/column).
 
 ## Explicitly out of scope right now
 
-- **No thermal/cooling coupling.** Runs at a fixed, user-dialed T.
-  A cooling action's energy-exchange rate isn't generic mass-action
-  math the way a reaction's rate is, so it doesn't fit this one
-  formula -- a real next step, not attempted here.
+- **Cooling uses a single constant gamma (5/3, monatomic ideal gas)**
+  for the ge<->T conversion, not the compiled solver's own T-dependent
+  interpolated gamma for H2-bearing gas. A real simplification (H2-heavy
+  gas's heat capacity reads a bit off), not just a labeling one.
+- **Compton cooling always runs at z=0** (matches this project's
+  existing compiled widget's own convention) -- no live redshift.
 - **No CHIANTI/UMIST/photoionization reactions yet** -- deliberately
   deferred to a separate project. The reaction-database format already
   accommodates CHIANTI's ion-by-ion rates with zero changes (they're
@@ -82,3 +99,14 @@ log-spaced T grid; the compiled solver interpolates in log-T-uniform-
 bin space), not a stoichiometry or rate-law bug -- confirmed by
 re-running at full (non-downsampled) table resolution, where the
 residual shrank by the expected amount rather than staying fixed.
+
+Cooling was checked with a physically unambiguous sign test rather than
+a numeric cross-check (the compiled widget doesn't expose a fixed-
+composition, no-chemistry cooling-only mode to compare against
+directly): primordial gas at T=1e5 K with H2/H- species unchecked (no
+formation-heating channel available at all) and only atomic cooling
+actions checked (collisional excitation/ionization, radiative
+recombination, bremsstrahlung, Compton) cools from 1.000e5 K to
+6.209e3 K over the run -- a large, correctly-signed net cooling. See
+NOTES.md for the full result including the (much smaller, also
+consistent) default-conditions case.

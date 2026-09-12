@@ -3794,3 +3794,84 @@ labeling nicety -- flagged, not solved, here).
 
 Not merged to main -- lives on `wasm-generic-kinetics-prototype`,
 explicitly exploratory.
+
+**2026-09-11, continued: cooling implemented.**
+
+Asked directly to implement the "explicitly out of scope" cooling gap
+from the entry above. Cooling actions are genuinely *not* one universal
+formula the way reactions are (each is its own bespoke sympy
+expression), so unlike reactions -- generic math, needing no per-
+reaction code at all -- this needed lowering each action's *equation*
+once via sympy's own `jscode` printer (`export_cooling_action()` in
+generate_reaction_db.py), embedded as a JS expression string in the
+exported JSON and turned into a real callable via `new Function()` at
+load time. Still no per-*selection* codegen (every action in the
+catalog is lowered regardless of what's later checked) and no em++/
+compile step either way -- `new Function()` is JS's own built-in
+"make a callable from a source string" primitive, not a build step.
+
+Checking which cooling actions are actually *exportable* this way
+turned out better than expected: of the primordial network's 17
+cooling actions, only 2 (`gloverabel08`, `cie_cooling`) reference
+symbols unresolvable from their own equation tree (dengo's C codegen
+resolves them from hand-written surrounding C -- a critical-density/
+optical-depth-approximation formula each -- not from the symbolic
+equation alone); the other 15, including the non-trivial `h2formation`/
+`h2formation_extra` (temporaries nested a level deep: `h2heatfrac`,
+itself built from `ncrn`/`ncrd1`/`ncrd2` table lookups), lower cleanly.
+Detected generically by checking `eq.free_symbols` against an
+"accounted for" set (species + T + this action's own renamed table
+symbols + `ge`, the last needed only because `ReactionCoefficient.
+free_symbols` -- reaction_classes.py -- always forces `ge` into the set
+regardless of whether an equation is actually ge-dependent, dengo's own
+mechanism for symbolically differentiating a coefficient w.r.t. energy)
+-- not hardcoded by action name, so this keeps working correctly if
+primordial_cooling.py's own set of actions ever changes.
+
+Design choices, each a real (documented, not hidden) simplification
+versus the compiled solver:
+- **Single constant gamma=5/3** (monatomic ideal gas) for the ge<->T
+  conversion, instead of the compiled solver's T-dependent interpolated
+  gamma for H2-bearing gas (roto-vibrational degrees of freedom
+  activating). ge<->T is then closed-form both directions (no
+  bisection needed, unlike app.js's own geForTemperature()) --
+  `ge = n_total*kB*T / ((gamma-1)*mdensity_amu*mh)`, generic from
+  whichever species are active via their already-exported `weight`.
+- **z=0 always** for Compton cooling (the only cooling action using
+  redshift) -- matches this project's existing compiled widget's own
+  established convention (see the "why is z always 0" note on
+  app.js's IC_PRESETS).
+- **Approximate (not exact) Jacobian** for the `ge` row/column: the
+  species-species block stays exact/analytic (unchanged from the
+  chemistry-only prototype); `d(ge_rhs)/d(species)` and
+  `d(everything)/d(ge)` (including the T-dependence of reaction rates
+  now that T isn't fixed) are finite-differenced instead of derived
+  analytically. The compiled solver gets these exactly, via
+  `ReactionCoefficient._eval_derivative()`'s precomputed `dr<name>`
+  tables -- reproducing that here would mean symbolically
+  differentiating every jscode-lowered cooling expression *and* every
+  reaction's own rate table w.r.t. T, real additional work for what's
+  ultimately a Newton-convergence aid, not something that changes what
+  a *converged* answer means (BE_chem_solve.C's convergence check is on
+  the actual residual/update norm, not Jacobian fidelity). A deliberate
+  scope cut, not an oversight.
+
+Verified: a physically unambiguous sanity check, not just "it runs
+without errors" -- primordial gas at T=1e5 K (H2/H- species unchecked,
+so no formation-heating channel exists at all) with only the atomic
+cooling actions checked (collisional excitation/ionization, radiative
+recombination, bremsstrahlung, Compton) cools from 1.000e5 K to 6.209e3
+K over the run -- a large, correctly-signed net *cooling*, confirming
+the mdensity normalization, the jscode-lowered expressions' signs, and
+the ge<->T conversion all agree with each other rather than merely
+"not crashing". Separately, the full default-conditions run (all 9
+species, all 15 exportable cooling actions, T0=1000K, a cool/mostly-
+neutral starting point where net cooling power should genuinely be
+small) showed only a modest T change (1000K -> 1001K) over the same
+span -- also consistent, not a sign of a sign error, since collisional
+cooling scales with ionization fraction and this starting point is
+only trace-ionized. Full existing-page regression (all three fiducial
+networks, sweep, rates) and the chemistry-only subset-selection check
+(hydrogen_minimal's own k01/k02 reproduced from the full catalog) both
+re-run clean after this change, zero console errors. CSV export
+confirmed to carry a new `T_K` column with the evolving values.
