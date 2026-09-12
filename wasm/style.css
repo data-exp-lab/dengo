@@ -178,6 +178,27 @@ input[type=range] { width: 100%; }
 .species-toggle input[type=checkbox] { margin: 0; }
 .chart-placeholder { color: var(--muted); font-size: 0.85em; padding: 16px 8px; margin: 0; }
 input:disabled { opacity: 0.5; }
+/* generic.html: build-your-own-network prototype (see NOTES.md) --
+   species checkboxes each carry their own initial-fraction slider,
+   dimmed (not removed -- avoids layout shift, same reasoning as the
+   sweep page's own "steps" field) while unchecked; a reaction's row is
+   just disabled+unchecked (not hidden) once a species it needs isn't
+   checked, so it's still visible as "not currently selectable". */
+.gk-prototype-badge {
+  font-size: 0.55em; font-weight: 600; color: var(--warn); border: 1px solid var(--warn);
+  border-radius: 4px; padding: 2px 6px; vertical-align: middle; margin-left: 8px;
+}
+.gk-species-row { opacity: 0.5; }
+.gk-species-row.gk-species-active { opacity: 1; }
+.gk-weight { color: var(--muted); font-size: 0.85em; font-weight: normal; }
+.gk-species-fraction { margin: 4px 0 12px 24px; }
+.gk-species-fraction label {
+  display: flex; justify-content: space-between; font-size: 0.8em; color: var(--muted); margin-bottom: 2px;
+}
+.gk-species-fraction label span.val { font-variant-numeric: tabular-nums; color: var(--accent); font-weight: 600; }
+.gk-reaction-row .checkbox-label { font-size: 0.85em; }
+.gk-reaction-row .checkbox-label:has(input:disabled) { opacity: 0.4; }
+.gk-eq { color: var(--muted); font-weight: normal; margin-left: 4px; }
 /* sweep.html: each parameter's row has one persistent slider that's
    destroyed/recreated with 1 or 2 handles when its checkbox toggles
    (see rebuildSlider() in sweep.js) -- nothing here needs to show/hide

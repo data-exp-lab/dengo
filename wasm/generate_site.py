@@ -466,6 +466,101 @@ LANDING_TEMPLATE = """<!doctype html>
 <ul class="network-list">
 {items}
 </ul>
+<p class="sub"><a href="generic/">Build your own network &rarr;</a> -- prototype:
+  pick species and reactions from a checklist instead of one of the three
+  fixed networks above, with no compile step for whatever you pick.</p>
+</body>
+</html>
+"""
+
+GENERIC_PAGE_TEMPLATE = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Build your own network -- dengo in the browser</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>%F0%9F%A7%AA</text></svg>">
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<div class="nav"><a href="../">&larr; all networks</a></div>
+<h1>Build your own network <span class="gk-prototype-badge">prototype</span></h1>
+<p class="sub">
+  Every species and reaction dengo's primordial chemistry knows about
+  (the same network the "Primordial H/He/H2" widget uses) -- check which
+  ones to include and run, with <strong>no compile step</strong> for
+  whatever subset you pick. A reaction is only selectable once every
+  species it touches is checked. This is a prototype of a different way
+  to build a network than writing Python: ordinary mass-action kinetics
+  (rate(T) times a product of reactant densities) is generic math, not
+  per-network code, so it's assembled from data in JS instead of being
+  sympy/Emscripten-generated per selection -- only the stiff-ODE solver
+  itself (compiled once, reused unmodified for any selection) needs
+  Emscripten at all. Chemistry only for now, at a fixed temperature you
+  dial in -- no thermal (cooling) coupling yet. See NOTES.md.
+</p>
+
+<div class="layout">
+  <div class="panel">
+    <div class="row">
+      <label>T (K) <span class="val" id="gk-T-val"></span></label>
+      <input type="range" id="gk-T" min="1" max="8" step="0.05" value="3">
+    </div>
+    <div class="row">
+      <label>initial n<sub>H</sub> (cm⁻³) <span class="val" id="gk-nH-val"></span></label>
+      <input type="range" id="gk-nH" min="-4" max="17" step="0.1" value="4">
+    </div>
+    <div class="row">
+      <label>total time: 10<sup>x</sup> s <span class="val" id="gk-dtf-val"></span></label>
+      <input type="range" id="gk-dtf" min="6" max="17" step="0.1" value="13">
+    </div>
+
+    <details class="species-details" open>
+      <summary>Species</summary>
+      <div id="gk-species-list"></div>
+    </details>
+
+    <details class="species-details" open>
+      <summary>Reactions</summary>
+      <div class="row-inline">
+        <button type="button" id="gk-select-all-rxn" class="btn-secondary">All</button>
+        <button type="button" id="gk-select-none-rxn" class="btn-secondary">None</button>
+      </div>
+      <div id="gk-reaction-list"></div>
+    </details>
+
+    <div class="sweep-actions">
+      <button type="button" id="gk-run" class="btn-primary" disabled>Run</button>
+      <button type="button" id="gk-download-csv" class="btn-secondary" disabled>Download CSV</button>
+      <span id="gk-status">loading reaction database&hellip;</span>
+    </div>
+  </div>
+
+  <div id="charts">
+    <div class="chart-box">
+      <div class="chart-title">Species density vs. time (fixed T)</div>
+      <div id="gk-chart"></div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/vega@5"></script>
+<script src="https://cdn.jsdelivr.net/npm/vega-lite@5"></script>
+<script src="https://cdn.jsdelivr.net/npm/vega-embed@6"></script>
+<script src="dengo_generic.js"></script>
+<script src="../app.js"></script>
+<script src="../generic_kinetics.js"></script>
+<script src="../generic_ui.js"></script>
+<script>
+for (const id of ["gk-T", "gk-nH", "gk-dtf"]) {
+  const el = document.getElementById(id);
+  const valEl = document.getElementById(id + "-val");
+  const update = () => { valEl.textContent = parseFloat(el.value).toFixed(2); };
+  el.addEventListener("input", update);
+  update();
+}
+initGenericPage();
+</script>
 </body>
 </html>
 """
@@ -515,6 +610,40 @@ def build_sweep_page(cfg, net_dir, repo, config):
         f.write(SWEEP_PAGE_TEMPLATE.format(
             title=cfg["title"], repo=repo, param_rows=param_rows, config_json=json.dumps(config),
         ))
+
+
+def build_generic_page(out_dir):
+    """Prototype "build your own network" page (see GENERIC_PAGE_TEMPLATE's
+    own intro text and wasm/README-generic.md): compiles the network-
+    agnostic Newton integrator (wasm/generic_solver/, vendoring the same
+    BE_chem_solve.C the per-network builds use, unmodified) exactly
+    *once* -- not once per fiducial network, and never again when a
+    user's species/reaction selection changes -- and exports the full
+    primordial reaction database (generate_reaction_db.py) alongside it.
+    """
+    from generate_reaction_db import build_reaction_db
+
+    generic_dir = os.path.join(out_dir, "generic")
+    os.makedirs(generic_dir, exist_ok=True)
+    solver_dir = os.path.join(HERE, "generic_solver")
+
+    subprocess.run(
+        [
+            find_emxx(), "-O3", "-o", os.path.join(generic_dir, "dengo_generic.js"),
+            os.path.join(solver_dir, "dengo_generic.cpp"), os.path.join(solver_dir, "BE_chem_solve.C"),
+            "-sEXPORTED_FUNCTIONS=_dengo_generic_alloc,_dengo_generic_free,_dengo_generic_step,_malloc,_free",
+            "-sEXPORTED_RUNTIME_METHODS=cwrap,ccall,HEAPF64,addFunction,removeFunction",
+            "-sALLOW_TABLE_GROWTH=1",
+            "-sMODULARIZE=1", "-sEXPORT_NAME=DengoGenericModule",
+            "-sALLOW_MEMORY_GROWTH=1",
+        ],
+        check=True,
+    )
+
+    build_reaction_db(generic_dir)
+
+    with open(os.path.join(generic_dir, "index.html"), "w") as f:
+        f.write(GENERIC_PAGE_TEMPLATE)
 
 
 def build_one(name, cfg, out_dir, repo):
@@ -575,6 +704,8 @@ def main():
 
     shutil.copy(os.path.join(HERE, "app.js"), out_dir)
     shutil.copy(os.path.join(HERE, "sweep.js"), out_dir)
+    shutil.copy(os.path.join(HERE, "generic_kinetics.js"), out_dir)
+    shutil.copy(os.path.join(HERE, "generic_ui.js"), out_dir)
     shutil.copy(os.path.join(HERE, "rates.js"), out_dir)
     shutil.copy(os.path.join(HERE, "style.css"), out_dir)
     # dengo-solver.js/.d.ts: a reusable wrapper around any dengo-generated
@@ -592,6 +723,13 @@ def main():
         except Exception as exc:
             print("!!! %s failed: %s" % (name, exc), file=sys.stderr)
             failed.append(name)
+
+    print("--- building generic (build-your-own-network prototype) ---")
+    try:
+        build_generic_page(out_dir)
+    except Exception as exc:
+        print("!!! generic failed: %s" % exc, file=sys.stderr)
+        failed.append("generic")
 
     items = "\n".join(
         '  <li><a href="%s/">%s</a><div class="desc">%s</div></li>'

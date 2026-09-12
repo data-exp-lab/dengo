@@ -3686,3 +3686,111 @@ the real accuracy shift described above), the step-cap warning
 (confirmed both that it stays silent across the full legitimate slider
 range, and that it correctly appears when the cap is actually hit).
 Full `pytest` suite unaffected (120/120).
+
+**2026-09-11: "build your own network" prototype -- generic (data-
+driven, no-recompile) mass-action kinetics engine, on a branch, not
+merged.**
+
+Prompted by a discussion of which parts of dengo's pipeline (network
+definition -> codegen -> Emscripten compile -> browser widget) could
+run inside e.g. a JupyterLite/Pyodide environment. Short version of
+that discussion: definition/rates/codegen (sympy + Jinja2, pure Python)
+already would, unmodified; the compile-to-wasm step is the genuine
+bottleneck (no mature, shippable "C++ compiler in the browser"), but
+there's more hope than expected there too -- a real, working
+Numba-in-JupyterLite pipeline already does the moral equivalent
+(llvmlite emits a wasm object, LLD links it in-process, Emscripten
+loads it as a side module, all client-side, no server round-trip).
+Redirected mid-discussion, twice, to a narrower and more useful target
+than "define arbitrary networks via live Python": (1) pick species/
+reactions from a preexisting, already-vetted catalog via checkboxes,
+not by writing Python; (2) build the engine assuming a richer catalog
+(CHIANTI ion-by-ion, UMIST) arrives later as a separate project --
+don't block on it, don't design it away.
+
+That reframing turned out to simplify the actual engineering a lot.
+Ordinary mass-action kinetics -- `rate(T) * product of reactant
+densities`, `d[X]/dt = net_stoichiometric_change * that same term` --
+is *generic math*, identical for every reaction regardless of which
+network it's in (see `Reaction.lhs_equation()`/`net_change()` in
+reaction_classes.py, which this mirrors). It doesn't need sympy or
+per-reaction code generation at all; it needs one hand-written
+assembler plus a data table (species, stoichiometry, a rate(T) table)
+of whatever reactions exist. So instead of "compile a solver for
+whatever's checked", the split is: a network-agnostic Newton solver
+(`wasm/generic_solver/dengo_generic.cpp`, vendoring `BE_chem_solve.C`
+unmodified, generalized from the production wasm build's compile-time
+`NSPECIES` to a runtime `nchem`) compiled *once*, ever, regardless of
+what gets checked -- and a generic RHS/Jacobian assembler
+(`wasm/generic_kinetics.js`) driven entirely by a reaction database
+JSON (`wasm/generate_reaction_db.py`, reusing `build_primordial()`'s
+already-registered species/reactions/rate functions directly, no new
+chemistry authored) and whatever subset of it a user has checked
+(`wasm/generic_ui.js`, `generic/index.html`). No em++ invocation
+happens for any selection, ever, after the one-time build.
+
+The JS callback boundary is Emscripten's `addFunction()`: the generic
+`dengo_generic_step()` takes the exact same `rhs_f`/`jac_f` C function-
+pointer types `BE_chem_solve.C` always took (it never knew or cared how
+`calculate_rhs_<name>` was implemented) -- so a JS closure registered
+via `addFunction()`, doing the mass-action sum directly against wasm
+linear memory, is just as valid a function pointer to it as compiled C
+was. A reaction is only selectable once every species it touches is
+checked (mirrors `ChemicalNetwork.add_reaction(auto_add=False)`'s own
+validation, not a new rule invented here).
+
+Two real bugs on the way to a working version, both straightforward
+once found: (1) `BE_chem_solve.C`'s own definition isn't `extern "C"`
+(plain, name-mangled C++, same as the production build already links
+against it), so declaring it `extern "C"` in the new generic wrapper
+was a linker-symbol mismatch, not a real language boundary -- fixed by
+matching its actual (mangled) linkage instead. (2) `Module.addFunction`
+signature strings are `(1 return) + (every parameter)` letters, one
+per 32-bit slot -- `rhs_f`/`jac_f` take 5 parameters
+(`double*, double*, int, int, void*`, all i32-sized on wasm32) plus an
+`int` return, i.e. 6 slots (`"iiiiii"`); using the 5-slot `"iiiii"`
+produced `"function signature mismatch"` at call time, not at
+compile/link time -- this class of bug won't be caught by anything
+short of actually invoking the call, so it's worth remembering as a
+specific, easy-to-get-wrong spot the next time a new C callback gets
+wired up this way.
+
+Verified: standalone Playwright cross-check of the generic JS RHS
+assembler against the *existing, previously-validated* compiled
+`hydrogen_minimal` wasm module, same initial conditions, same T (read
+back from the compiled solver's own ge->T conversion rather than
+independently inverting it) -- matched to 2e-5 relative error at full
+(1024-point) rate-table resolution, worse (3e-4) at this prototype's
+default 8x-downsampled (128-point) table; the residual is consistent
+with the compiled solver interpolating its rate tables in log-T-
+uniform-bin space while this prototype's `interpolateRate()` does a
+plain linear search+interpolate against the same (log-spaced, not
+downsampled-differently) T grid -- an interpolation-*scheme* mismatch,
+not a stoichiometry/rate-law bug, and expected to shrink toward zero as
+either table gets finer (confirmed: full-resolution error was ~14x
+smaller than the default-downsampling error). Full end-to-end UI
+regression: all 9 primordial species/22 reactions checked by default,
+full-network run converges to the requested end time with zero console
+errors; unchecking every He/H2/H- species correctly disables/unchecks
+every reaction that needs one (leaving exactly hydrogen_minimal's own
+k01/k02 subset selectable), and that restricted run also converges
+cleanly.
+
+**Explicitly out of scope for this prototype** (by design, not by
+oversight -- see the discussion this came from): no thermal/cooling
+coupling at all (fixed, user-dialed T only -- a cooling action's rate
+of energy exchange is *not* generic mass-action math the way a
+chemical reaction's rate is, so it doesn't fit this engine's one
+formula the reactions do; would need its own, separate generalization
+if pursued); no CHIANTI/UMIST/photoionization reactions in the catalog
+yet (deliberately deferred to "a separate project" per the discussion
+that prompted this -- the reaction-database JSON format should already
+accommodate CHIANTI's ion-by-ion rates with zero changes, since those
+are T-indexed exactly like every primordial_rates.py rate function;
+UMIST's/reaction_classes.py's photoionization rates are z-/redshift-
+indexed instead, which is the one real format gap a future project
+extending the catalog would need to actually solve, not just a
+labeling nicety -- flagged, not solved, here).
+
+Not merged to main -- lives on `wasm-generic-kinetics-prototype`,
+explicitly exploratory.
