@@ -3687,6 +3687,282 @@ the real accuracy shift described above), the step-cap warning
 range, and that it correctly appears when the cap is actually hit).
 Full `pytest` suite unaffected (120/120).
 
+**2026-09-11: "build your own network" prototype -- generic (data-
+driven, no-recompile) mass-action kinetics engine, on a branch, not
+merged.**
+
+Prompted by a discussion of which parts of dengo's pipeline (network
+definition -> codegen -> Emscripten compile -> browser widget) could
+run inside e.g. a JupyterLite/Pyodide environment. Short version of
+that discussion: definition/rates/codegen (sympy + Jinja2, pure Python)
+already would, unmodified; the compile-to-wasm step is the genuine
+bottleneck (no mature, shippable "C++ compiler in the browser"), but
+there's more hope than expected there too -- a real, working
+Numba-in-JupyterLite pipeline already does the moral equivalent
+(llvmlite emits a wasm object, LLD links it in-process, Emscripten
+loads it as a side module, all client-side, no server round-trip).
+Redirected mid-discussion, twice, to a narrower and more useful target
+than "define arbitrary networks via live Python": (1) pick species/
+reactions from a preexisting, already-vetted catalog via checkboxes,
+not by writing Python; (2) build the engine assuming a richer catalog
+(CHIANTI ion-by-ion, UMIST) arrives later as a separate project --
+don't block on it, don't design it away.
+
+That reframing turned out to simplify the actual engineering a lot.
+Ordinary mass-action kinetics -- `rate(T) * product of reactant
+densities`, `d[X]/dt = net_stoichiometric_change * that same term` --
+is *generic math*, identical for every reaction regardless of which
+network it's in (see `Reaction.lhs_equation()`/`net_change()` in
+reaction_classes.py, which this mirrors). It doesn't need sympy or
+per-reaction code generation at all; it needs one hand-written
+assembler plus a data table (species, stoichiometry, a rate(T) table)
+of whatever reactions exist. So instead of "compile a solver for
+whatever's checked", the split is: a network-agnostic Newton solver
+(`wasm/generic_solver/dengo_generic.cpp`, vendoring `BE_chem_solve.C`
+unmodified, generalized from the production wasm build's compile-time
+`NSPECIES` to a runtime `nchem`) compiled *once*, ever, regardless of
+what gets checked -- and a generic RHS/Jacobian assembler
+(`wasm/generic_kinetics.js`) driven entirely by a reaction database
+JSON (`wasm/generate_reaction_db.py`, reusing `build_primordial()`'s
+already-registered species/reactions/rate functions directly, no new
+chemistry authored) and whatever subset of it a user has checked
+(`wasm/generic_ui.js`, `generic/index.html`). No em++ invocation
+happens for any selection, ever, after the one-time build.
+
+The JS callback boundary is Emscripten's `addFunction()`: the generic
+`dengo_generic_step()` takes the exact same `rhs_f`/`jac_f` C function-
+pointer types `BE_chem_solve.C` always took (it never knew or cared how
+`calculate_rhs_<name>` was implemented) -- so a JS closure registered
+via `addFunction()`, doing the mass-action sum directly against wasm
+linear memory, is just as valid a function pointer to it as compiled C
+was. A reaction is only selectable once every species it touches is
+checked (mirrors `ChemicalNetwork.add_reaction(auto_add=False)`'s own
+validation, not a new rule invented here).
+
+Two real bugs on the way to a working version, both straightforward
+once found: (1) `BE_chem_solve.C`'s own definition isn't `extern "C"`
+(plain, name-mangled C++, same as the production build already links
+against it), so declaring it `extern "C"` in the new generic wrapper
+was a linker-symbol mismatch, not a real language boundary -- fixed by
+matching its actual (mangled) linkage instead. (2) `Module.addFunction`
+signature strings are `(1 return) + (every parameter)` letters, one
+per 32-bit slot -- `rhs_f`/`jac_f` take 5 parameters
+(`double*, double*, int, int, void*`, all i32-sized on wasm32) plus an
+`int` return, i.e. 6 slots (`"iiiiii"`); using the 5-slot `"iiiii"`
+produced `"function signature mismatch"` at call time, not at
+compile/link time -- this class of bug won't be caught by anything
+short of actually invoking the call, so it's worth remembering as a
+specific, easy-to-get-wrong spot the next time a new C callback gets
+wired up this way.
+
+Verified: standalone Playwright cross-check of the generic JS RHS
+assembler against the *existing, previously-validated* compiled
+`hydrogen_minimal` wasm module, same initial conditions, same T (read
+back from the compiled solver's own ge->T conversion rather than
+independently inverting it) -- matched to 2e-5 relative error at full
+(1024-point) rate-table resolution, worse (3e-4) at this prototype's
+default 8x-downsampled (128-point) table; the residual is consistent
+with the compiled solver interpolating its rate tables in log-T-
+uniform-bin space while this prototype's `interpolateRate()` does a
+plain linear search+interpolate against the same (log-spaced, not
+downsampled-differently) T grid -- an interpolation-*scheme* mismatch,
+not a stoichiometry/rate-law bug, and expected to shrink toward zero as
+either table gets finer (confirmed: full-resolution error was ~14x
+smaller than the default-downsampling error). Full end-to-end UI
+regression: all 9 primordial species/22 reactions checked by default,
+full-network run converges to the requested end time with zero console
+errors; unchecking every He/H2/H- species correctly disables/unchecks
+every reaction that needs one (leaving exactly hydrogen_minimal's own
+k01/k02 subset selectable), and that restricted run also converges
+cleanly.
+
+**Explicitly out of scope for this prototype** (by design, not by
+oversight -- see the discussion this came from): no thermal/cooling
+coupling at all (fixed, user-dialed T only -- a cooling action's rate
+of energy exchange is *not* generic mass-action math the way a
+chemical reaction's rate is, so it doesn't fit this engine's one
+formula the reactions do; would need its own, separate generalization
+if pursued); no CHIANTI/UMIST/photoionization reactions in the catalog
+yet (deliberately deferred to "a separate project" per the discussion
+that prompted this -- the reaction-database JSON format should already
+accommodate CHIANTI's ion-by-ion rates with zero changes, since those
+are T-indexed exactly like every primordial_rates.py rate function;
+UMIST's/reaction_classes.py's photoionization rates are z-/redshift-
+indexed instead, which is the one real format gap a future project
+extending the catalog would need to actually solve, not just a
+labeling nicety -- flagged, not solved, here).
+
+Not merged to main -- lives on `wasm-generic-kinetics-prototype`,
+explicitly exploratory.
+
+**2026-09-11, continued: cooling implemented.**
+
+Asked directly to implement the "explicitly out of scope" cooling gap
+from the entry above. Cooling actions are genuinely *not* one universal
+formula the way reactions are (each is its own bespoke sympy
+expression), so unlike reactions -- generic math, needing no per-
+reaction code at all -- this needed lowering each action's *equation*
+once via sympy's own `jscode` printer (`export_cooling_action()` in
+generate_reaction_db.py), embedded as a JS expression string in the
+exported JSON and turned into a real callable via `new Function()` at
+load time. Still no per-*selection* codegen (every action in the
+catalog is lowered regardless of what's later checked) and no em++/
+compile step either way -- `new Function()` is JS's own built-in
+"make a callable from a source string" primitive, not a build step.
+
+Checking which cooling actions are actually *exportable* this way
+turned out better than expected: of the primordial network's 17
+cooling actions, only 2 (`gloverabel08`, `cie_cooling`) reference
+symbols unresolvable from their own equation tree (dengo's C codegen
+resolves them from hand-written surrounding C -- a critical-density/
+optical-depth-approximation formula each -- not from the symbolic
+equation alone); the other 15, including the non-trivial `h2formation`/
+`h2formation_extra` (temporaries nested a level deep: `h2heatfrac`,
+itself built from `ncrn`/`ncrd1`/`ncrd2` table lookups), lower cleanly.
+Detected generically by checking `eq.free_symbols` against an
+"accounted for" set (species + T + this action's own renamed table
+symbols + `ge`, the last needed only because `ReactionCoefficient.
+free_symbols` -- reaction_classes.py -- always forces `ge` into the set
+regardless of whether an equation is actually ge-dependent, dengo's own
+mechanism for symbolically differentiating a coefficient w.r.t. energy)
+-- not hardcoded by action name, so this keeps working correctly if
+primordial_cooling.py's own set of actions ever changes.
+
+Design choices, each a real (documented, not hidden) simplification
+versus the compiled solver:
+- **Single constant gamma=5/3** (monatomic ideal gas) for the ge<->T
+  conversion, instead of the compiled solver's T-dependent interpolated
+  gamma for H2-bearing gas (roto-vibrational degrees of freedom
+  activating). ge<->T is then closed-form both directions (no
+  bisection needed, unlike app.js's own geForTemperature()) --
+  `ge = n_total*kB*T / ((gamma-1)*mdensity_amu*mh)`, generic from
+  whichever species are active via their already-exported `weight`.
+- **z=0 always** for Compton cooling (the only cooling action using
+  redshift) -- matches this project's existing compiled widget's own
+  established convention (see the "why is z always 0" note on
+  app.js's IC_PRESETS).
+- **Approximate (not exact) Jacobian** for the `ge` row/column: the
+  species-species block stays exact/analytic (unchanged from the
+  chemistry-only prototype); `d(ge_rhs)/d(species)` and
+  `d(everything)/d(ge)` (including the T-dependence of reaction rates
+  now that T isn't fixed) are finite-differenced instead of derived
+  analytically. The compiled solver gets these exactly, via
+  `ReactionCoefficient._eval_derivative()`'s precomputed `dr<name>`
+  tables -- reproducing that here would mean symbolically
+  differentiating every jscode-lowered cooling expression *and* every
+  reaction's own rate table w.r.t. T, real additional work for what's
+  ultimately a Newton-convergence aid, not something that changes what
+  a *converged* answer means (BE_chem_solve.C's convergence check is on
+  the actual residual/update norm, not Jacobian fidelity). A deliberate
+  scope cut, not an oversight.
+
+Verified: a physically unambiguous sanity check, not just "it runs
+without errors" -- primordial gas at T=1e5 K (H2/H- species unchecked,
+so no formation-heating channel exists at all) with only the atomic
+cooling actions checked (collisional excitation/ionization, radiative
+recombination, bremsstrahlung, Compton) cools from 1.000e5 K to 6.209e3
+K over the run -- a large, correctly-signed net *cooling*, confirming
+the mdensity normalization, the jscode-lowered expressions' signs, and
+the ge<->T conversion all agree with each other rather than merely
+"not crashing". Separately, the full default-conditions run (all 9
+species, all 15 exportable cooling actions, T0=1000K, a cool/mostly-
+neutral starting point where net cooling power should genuinely be
+small) showed only a modest T change (1000K -> 1001K) over the same
+span -- also consistent, not a sign of a sign error, since collisional
+cooling scales with ionization fraction and this starting point is
+only trace-ionized. Full existing-page regression (all three fiducial
+networks, sweep, rates) and the chemistry-only subset-selection check
+(hydrogen_minimal's own k01/k02 reproduced from the full catalog) both
+re-run clean after this change, zero console errors. CSV export
+confirmed to carry a new `T_K` column with the evolving values.
+
+**2026-09-11, continued: a third tool -- construct.html, writing real
+dengo Python live in the browser.**
+
+Clarified after the previous entry's own writeup went a different
+direction than intended: not "recompute the same fixed catalog live
+instead of at build time" -- a genuinely more flexible *third* tool,
+alongside the three pre-compiled wasm networks and the checkbox-driven
+catalog picker, specifically for constructing networks that aren't in
+any catalog at all. One CodeMirror-edited Python box per reaction
+(picked over a single free-form script or a structured form -- "for
+simplicity's sake" -- each box self-contained: define Species, define a
+rate(T) function, call Reaction(...)), a "Build network" button, then
+the exact same engine (generic_kinetics.js, dengo_generic.js/.wasm) the
+checkbox tool already uses -- confirming the design insight from the
+previous entry after all, just aimed at the right target: the engine
+doesn't care whether its {species, reactions} data came from a static
+JSON, a live re-run of build_primordial(), or a user's own Reaction()
+calls from five seconds ago.
+
+**The real dengo package, not a hand-picked subset of files.** First
+attempt was going to vendor just the ~5 files reaction_classes.py
+actually needs (plus a stub __init__.py) into Pyodide's virtual
+filesystem -- reasonable, but strictly worse than what the user
+suggested instead: `uv build --wheel` (pure filesystem operation, no
+PyPI contact -- dengo isn't published there and isn't ready to be) into
+a wheel served as a static asset, installed into Pyodide via
+`micropip.install(url, {deps: false})`. Confirmed directly (a plain
+Python process with h5py stubbed in sys.modules, no Pyodide involved)
+that the *entire* real package -- `import dengo`, not just
+`dengo.reaction_classes` -- imports cleanly and Species/Reaction/
+rate-table evaluation all work, before wiring any of this into the
+browser. `deps=False` is required (dengo declares h5py/cython/
+setuptools as dependencies in pyproject.toml; none are needed just to
+construct Species/Reaction objects, and micropip would otherwise try
+to resolve them) -- interestingly, Pyodide's own package loader turned
+out to load a *real* h5py anyway as part of satisfying dengo's other
+declared deps (Jinja2/numpy/sympy are genuine Pyodide packages) --
+harmless either way since nothing this page exercises calls real HDF5
+I/O, but worth noting the "h5py isn't available in Pyodide" assumption
+from two entries ago may be stale/version-dependent, not re-verified
+further here.
+
+**Real bugs found and fixed, not just the expected first-draft
+plumbing misses** (missed script-tag/asset-copy entries, a
+`waitForFunction` argument-order mistake in my own test harness, an
+`extern "C"`-style linkage confusion -- all straightforward once
+found):
+- micropip.install() parses wheel *metadata out of the filename
+  itself* (PEP 427 naming: `name-version-pyTag-abiTag-platTag.whl`) --
+  renaming the built wheel to a fixed `dengo.whl` for simplicity broke
+  this ("Invalid wheel filename (wrong number of parts)"); fixed by
+  keeping `uv build`'s own filename and threading the actual name into
+  the page via a small `window.DENGO_WHEEL_FILENAME` global instead of
+  hardcoding it in construct_ui.js.
+- **A real, general bug in generic_kinetics.js's Jacobian**, latent
+  since the chemistry-only prototype two entries ago, found immediately
+  by this tool's own "really boring" A -> B -> C test case:
+  `d(term)/d(state_j)` was computed as `(p * term) / state[j]` --
+  exactly `0/0` (NaN, not 0) the moment any reactant's density is
+  *exactly* zero, which the checkbox tool's own species defaults (all
+  small positive trace values) never triggered but an intermediate
+  species genuinely starting empty (B, C above) does immediately.
+  Fixed by computing the derivative directly (`p * state[j]^(p-1) *
+  product of the *other* reactants' own factors`), which is exact
+  everywhere including zero (JS's `Math.pow(0, 0) === 1`, matching the
+  p=1 case's correct limit) rather than reconstructing it by dividing
+  back out of the already-computed term.
+
+Verified: the two starter reactions (A -> B at rate 0.1, B -> C at rate
+0.03, all species initial values defaulting to "0 unless never
+produced by any reaction" so A starts full and B/C start empty) produce
+the textbook sequential-decay curve -- A monotonically down to 0.0094,
+B rises to a genuine interior peak (0.587, at neither endpoint) then
+falls, C monotonically up to 0.675, and A+B+C = 1.0 to 5 significant
+figures throughout -- a real, checkable correctness signal, not just
+"it ran". Full build-and-run completed in ~16s cold (Pyodide + wheel
+install) and ran in 56ms once built. Re-ran the full existing-page
+regression (all three fiducial networks, sweep, rates, both the fixed-T
+and cooling-enabled checkbox-tool paths, and the earlier hot-atomic-
+cooling physics check) after the Jacobian fix landed -- identical
+results to before (T: 1e5 K -> 6.209e3 K, unchanged), confirming the
+fix only changes behavior at the zero-density edge case it targets.
+
+Not merged, not pushed -- lives on `wasm-generic-kinetics-prototype`,
+explicitly exploratory (per direct instruction: no push, and no PyPI
+publish of any kind for this work).
+
 **2026-09-12, back on `main`: cool mode's time-axis panels default to
 linear, with a log toggle.**
 
@@ -3731,3 +4007,290 @@ in free-fall mode and reappears in cool mode. No console/page errors.
 Scope: `wasm/app.js` and `wasm/generate_site.py` on `main` only --
 unrelated to the still-open `wasm-generic-kinetics-prototype` branch/
 PR #30.
+
+**2026-09-15, continued: rate-explorer integration + save/load for
+in-progress work.**
+
+Asked directly to explore integrating with the existing reaction-rate
+explorer (rates.html/rates.js) and to add a serialization step so
+in-progress work isn't lost on reload. Both landed.
+
+*Rate explorer integration.* `rates.html`/`rates.js`'s formula editing
+was documented as "exploratory only... does not feed back into the
+compiled solver" -- true of the *compiled* per-network solver (would
+need a recompile), but the generic engine here never needs one, and
+`reaction_rates.py`'s `REACTION_RATES` dict already has a hand-
+transcribed, already-verified (per that file's own docstring) Vega-
+expression formula for every one of the primordial network's 22
+reactions -- the same names as `generate_reaction_db.py`'s own export
+(both come from `build_primordial()`), so no new transcription was
+needed at all.
+
+- `generate_reaction_db.py`: each exported reaction now carries that
+  formula (resolved through `presets[default_preset]` for k13/k22,
+  matching what rates.js itself shows by default) alongside the
+  existing downsampled `rate` table.
+- `generic_kinetics.js`: new `setReactionFormula()` compiles a formula
+  into a real callable via `new Function()` -- exactly the same idiom
+  `compileCoolingAction()` already uses for cooling's `jscode` output,
+  just with `datum.T`/`tev`/`logtev`/`logT` as the callable's single
+  `datum` argument and `pow`/`exp`/`log`/`sqrt`/`min`/`max` aliased to
+  `Math.*` (confirmed directly: every formula in reaction_rates.py
+  sticks to exactly that subset, nothing Vega-specific beyond bare
+  function calls and ternaries). `activeRatesAtT()` now prefers a
+  reaction's compiled `rateFn` over interpolating its `rate` table
+  whenever one exists.
+- `generic_ui.js`: new "Import edited rates" control on the checkbox
+  tool, reading *the exact JSON rates.js's own "Download JSON" already
+  produces* (`{network, reactions: {name: {selected, formula, preset}}}`)
+  -- no new export format needed on the rates.html side, just a new
+  consumer here. Overrides the matching reaction's live formula and
+  checked state; `refreshAvailability()` still has the final say on
+  whether a reaction stays checked (its species must be too).
+- Nav links added both directions (`generic/index.html` <-> the
+  *primordial* network's `rates.html` specifically -- cool/
+  hydrogen_minimal's rates pages don't get the link, since their
+  reaction sets don't correspond 1:1 to this catalog).
+
+Verified: a Node-only check (no browser needed -- generic_kinetics.js
+has no DOM/window dependency) confirmed every reaction's compiled
+formula matches its table's own value at grid nodes to ~1e-16 relative
+error (both ultimately come from the same `coeff_fn`, so this is a
+wiring check, not a re-verification of reaction_rates.py's own
+transcriptions) -- and, at *off*-grid T, the formula and the old
+table-interpolation genuinely diverge (up to 57% at low T for k01),
+confirming `activeRatesAtT()` really does take the formula path now,
+not silently still interpolating -- and, as a real side benefit (not
+just a wiring nicety), this removes the one documented residual in
+README-generic.md's own correctness write-up (the "interpolation-
+scheme difference" against the compiled solver), since it's now an
+exact evaluation rather than an interpolation. A full headless-Chrome
+run against the actual compiled wasm integrator: baseline run,
+`importRateOverrides()` via a real File object correctly recompiling
+and changing a reaction's rate, and the hot-atomic-cooling sign test
+(T: 1e5 K -> 6.209e3 K, the exact figure from the earlier verification)
+all still pass with formula-based rates active. No console errors.
+
+*Serialization.* Two project files, one per tool that needed it most:
+
+- `construct.html` (the one that actually mattered -- hand-written
+  Python per reaction is real, losable work): "Export project"/"Import
+  project" buttons. Export walks `#ck-cards` in DOM order, pulling each
+  CodeMirror instance's own source, plus T/total-time and (if a build
+  has happened at least once) the current per-species initial values.
+  Import clears every existing card, re-adds each saved one via the
+  existing `addReactionCard(source)`, restores T/total-time, and -- if
+  initial values were saved -- automatically re-runs "Build network"
+  (the real Pyodide/wheel/dengo path, not skipped) before restoring
+  them into the freshly-recreated inputs. `buildNetwork()` itself now
+  disables "Run" up front rather than only on success, so a *later*
+  failed rebuild (e.g. a since-broken imported card) can't leave "Run"
+  falsely enabled from an earlier successful build -- found directly by
+  testing exactly that sequence (build once successfully, then import a
+  deliberately broken project) before fixing it, not assumed safe.
+- `generic/index.html`: "Export selection"/"Import selection" buttons
+  covering every species/reaction/cooling checkbox, the fraction
+  sliders, T/n_H/total-time, and -- reusing the rate-formula work above
+  -- any reaction whose live formula differs from the catalog's own
+  default (snapshotted once at load as `originalFormulas`), so an
+  imported rate-explorer override round-trips through a saved selection
+  file too, not just a live session.
+
+Verified end-to-end in headless Chrome against the real compiled wasm
+integrator for both: for construct.html, build+run the two starter
+cards, add a third (C -> D) and change T, export, reload (confirmed
+this actually loses the third card and the T change), import the saved
+project back through the real `importProject()`/File path, confirm
+every card/T/species-initial value came back and the network still
+runs correctly. For generic/index.html, mutate species checks/T/n_H/a
+fraction slider/reaction and cooling checks/a rate-formula override,
+export, reload (confirmed loses the changes), import back, confirm
+every field was restored and a run afterward still succeeds. One
+apparent mismatch during this (an edited fraction slider reading back
+as 0 instead of the set value) turned out to be the test's own fault,
+not the feature's: the test set a non-step-aligned slider value, which
+`<input type="range" step="0.1">` silently snaps to the nearest valid
+step *at set-time*, before export ever ran -- confirmed by re-running
+with a step-aligned value, which round-tripped correctly.
+
+Still not merged, not pushed -- same branch, same "exploratory, no
+push" standing instruction.
+
+**2026-09-15, continued: the fiducial networks themselves, loadable as
+construct.html examples.**
+
+Asked directly to have "one of the build artifacts be the fiducial
+networks, so that I can load them as examples and modify them inline."
+New `wasm/generate_construct_examples.py`: for each of the three
+fiducial networks (fiducial_networks.py), writes
+`generic/examples/<key>.json` in the exact
+`{tool: "generic-construct", T, dtf, cards, species_initial}` shape
+construct_ui.js's own exportProject()/importProject() already read and
+write -- no new format, no new JS parsing path needed, just a new
+producer. A "Load example" dropdown on construct.html (populated from
+`FIDUCIAL_NETWORKS`, `__EXAMPLE_OPTIONS__` in `generate_site.py`)
+fetches one and feeds it through the same path a user's own imported
+project file takes.
+
+Each reaction's card is the *real* dengo rate function, not a
+reimplementation: `inspect.getsource()` pulls the literal Python source
+straight out of `primordial_rates.py`'s own `@reaction`-decorated
+closures (the exact code the compiled per-network widgets run), with
+just the decorator line dropped and the function renamed (every one is
+called `rxn` in its own closure there -- confusing with several cards
+open side by side here) -- then wrapped in
+`Species(...)`/`Reaction(...)` calls built from that reaction's own
+already-registered `left_side`/`right_side`. Scanned every reaction in
+all three networks via `dis.get_instructions(..., 'LOAD_GLOBAL')`
+(not assumed) to find the complete set of external names any of them
+actually need beyond `state`/`numpy`: just one, `tiny` (`dengo.
+chemistry_constants`) -- `k13`/`k22` (three-body H2 formation/
+dissociation) additionally read `state.threebody` off their `state`
+argument directly (an attribute access, not a global, so `dis` alone
+wouldn't have flagged it -- found by reading their source instead), a
+network-wide config value with no construct.html UI of its own, so
+every example is generated (and construct_ui.js's own `_State` stand-in
+now provides) a fixed default of 4, matching `ChemicalNetwork`'s own
+unexposed default.
+
+Each generated card is validated at build time, not just trusted:
+executed in an isolated namespace and its rate compared against the
+real, already-registered reaction's own tabulated `coeff_fn` output
+across that network's own T grid -- max relative error required
+< 1e-9 (all three networks: 0/22, 0/6, 0/2 reactions actually skipped
+by this check, i.e. every single one passed). `construct_ui.js`'s
+`_State` stand-in (`collectReactionDb()`) previously only set `.T` --
+extended to also set `.tev`/`.logtev`/`.logT`/`.threebody`, matching
+what these (and potentially any hand-written) cards' rate functions
+may reference; `importProject()`'s inner logic was split out into a
+reusable `applyProjectData()` so both a user's own imported file and a
+fetched example share one code path, not two.
+
+**A real, non-obvious ordering bug found while building this**: doing
+`inspect.getsource()` on one network's reaction *after* already having
+`exec()`'d a previous network's generated card (even for a completely
+unrelated reaction) raised `OSError: could not get source code` --
+some interaction between the exec()'d card's synthetic filename and
+`inspect`'s/`linecache`'s source-lookup bookkeeping for the real
+module, not chased further once confirmed that extracting *every*
+reaction's raw source across *all three* networks first, before any
+`exec()`/`compile()` call for any of them, sidesteps it entirely
+(confirmed directly: interleaved failed, two-phase didn't).
+
+Verified: a real Emscripten rebuild of the whole site (all three
+fiducial networks + the generic prototype's compiled-once integrator +
+wheel + all three example JSON files, zero skipped reactions in any of
+them) followed by a full headless-Chrome pass through the actual
+dropdown UI for all three examples -- each loads the right card count,
+rebuilds through the real Pyodide/dengo path, restores its own species-
+initial values, and runs to completion with zero console errors.
+Spot-checked the full primordial network's own run output directly
+(not just "it completed"): no NaN/negative values anywhere, and the
+result is physically sensible for fixed T=1000K with no cooling
+coupling (H2 forms substantially, 0.01 -> 10.1; the trace initial
+ionization recombines, H_2/de: 1 -> 0.053) -- a real chemistry result,
+not just a non-crashing one.
+
+Still not merged, not pushed -- same branch, same standing instruction.
+
+**2026-09-15, continued: construct.html's initial conditions, from the
+main widget's own named presets.**
+
+Asked directly ("have the initial conditions be something that we
+used in the other network... having a hard time evaluating") which of
+a few readings was meant; confirmed: reuse app.js's own `IC_PRESETS`
+("IGM background z≈20/z≈1000", "virial shock", "protostellar disk") --
+physically-motivated, already-validated bundles -- rather than the raw
+default_ics-derived numbers construct.html's fiducial-network examples
+seed from. Not re-authored: `IC_PRESETS`/its data live only in app.js,
+already loaded on construct.html before construct_ui.js (same
+top-level scope), so the new `applyIcPreset()` just reads it directly.
+
+New "Initial conditions" dropdown, independent of "Load example" --
+applies to whatever network is currently built, whichever way it got
+there (a loaded example or hand-written cards). Mirrors app.js's own
+`applyPreset()` as closely as construct.html's different input shape
+allows: that one sets log-fraction sliders; here each `ck-init-<name>`
+input holds an absolute density, so this sets `fraction * preset.nH`
+directly instead. Same underlying rules, applied to the different unit:
+a species this network has that the preset has no fraction for still
+gets set (to a trace floor), not left alone; a network with no H2_1
+species gets the preset's molecular-hydrogen fraction folded back into
+atomic H (2 nuclei per H2 molecule) so the hydrogen budget stays
+physically sensible rather than partly vanishing.
+
+Verified: a real Emscripten rebuild, then headless Chrome loading the
+full primordial example and applying "protostellar disk" -- T and
+every one of 9 species' initial value matched the expected
+`fraction * n_H` exactly, a run afterward completed with zero console
+errors; separately, loading hydrogen_minimal (no H2 species) and
+applying the same preset confirmed the H2-folding math lands exactly
+on H_1's expected combined value.
+
+**2026-09-15, continued: the preset dropdown above was silently doing
+nothing -- found and fixed.**
+
+Reported directly: "It doesn't seem to do anything. The values are all
+the same." Reproduced immediately: `applyIcPreset()` already declined
+to do anything before a build exists (`constructDb` is still `null` --
+the `ck-init-*` inputs it would set don't exist yet), printing a status
+message instead -- but the dropdown itself was left fully enabled the
+whole time, so selecting a preset on the still-unbuilt starter cards
+(the page's own default state) silently no-ops, and the one-line status
+message is easy to miss if you're looking at the (unchanged) inputs,
+not the status line. Confirmed directly this is exactly the scenario
+that reproduces the report.
+
+Fixed by making the dropdown genuinely non-interactive until it can
+actually do something, rather than relying on a status message alone:
+`ck-ic-preset` starts `disabled` in the template and now rides along
+with `ck-run`'s own disable-up-front-enable-on-success handling in
+`buildNetwork()` -- both need the same build to exist first. Confirmed
+directly: disabled before any build (an attempted `selectOption()` on
+it is refused, not silently accepted), enabled immediately once a build
+succeeds, and applying a preset then does correctly change T/species
+values (re-verified the virial-shock case end to end).
+
+**2026-09-15, continued: the initial-conditions preset needed to update
+total time too -- and one preset genuinely has little to show.**
+
+Reported directly, after the fix above: "Maybe make sure the time
+target is updated too. It's still not doing much of anything if I
+preselect the minihalo [virial-shock]." Right on both counts, but for
+two different reasons -- checked directly (a headless-Chrome sweep of
+`dtf` from 1e13 to 1e21 s against the full primordial network for
+every preset) rather than just picking a bigger number and hoping:
+
+- `applyIcPreset()` genuinely never touched `ck-dtf` at all -- it
+  stayed at whatever it already was (50 s from scratch, or 1e13 s if
+  a fiducial-network example was loaded first), regardless of preset.
+  Fixed: a new `IC_PRESET_DTF` lookup (construct_ui.js -- not part of
+  `IC_PRESETS`/app.js itself, since this is specific to how long *this*
+  fixed-T, no-cooling-coupling tool needs to run to show a preset's
+  chemistry, not a property of the preset itself) sets `ck-dtf` too now.
+- **But virial-shock (and bg-z20) genuinely don't show much on the
+  *dominant* species at any total time**, confirmed directly by the
+  sweep: only a trace ~2e-4 fraction of the gas started ionized in
+  either, and with no cooling/heating coupling in this tool, nothing
+  replenishes or drives further ionization -- what little recombines
+  just settles quietly (`de` decaying toward the floor), while H_1/
+  He_1 (the bulk of the gas) never move. bg-z1000 (already ~half-
+  ionized to start) and protostellar-disk (dense enough for runaway
+  3-body H2 formation) are the two that actually show dramatic
+  evolution here -- picked `IC_PRESET_DTF` values at or past where each
+  preset's own visible chemistry plateaus (1e15 s for bg-z20/bg-z1000/
+  virial-shock, 1e17 s for protostellar-disk).
+
+This is a real, physically-accurate limitation of construct.html's
+current fixed-T/no-cooling model, not something a better total-time
+choice can paper over -- said so directly rather than implying the fix
+"solves" virial-shock's own case, both in NOTES.md here and in the
+page's own preset-note text.
+
+Verified: re-ran the same three presets end to end in headless Chrome
+after the fix -- `ck-dtf` now reads 1e15/1e15/1e17 s respectively after
+selecting bg-z1000/virial-shock/protostellar-disk, bg-z1000 and
+protostellar-disk both show large, real species changes (H_1: 76->63.9
+and 5e11->7.3 respectively), and virial-shock's own H_1/He_1 are
+confirmed to barely move (0.237->0.237003, 0.0189->0.0189) -- exactly
+the physically-expected result, not a leftover bug. No console errors.

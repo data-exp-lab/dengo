@@ -17,11 +17,13 @@ gh-pages.yml). Every network's build is independent and this script
 continues past a single network's failure (reporting it at the end) --
 one broken fiducial network shouldn't take down the whole site.
 """
+import glob
 import json
 import os
 import shutil
 import subprocess
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -325,16 +327,16 @@ RATES_PAGE_TEMPLATE = """<!doctype html>
 <link rel="stylesheet" href="../style.css">
 </head>
 <body>
-<div class="nav"><a href="../">&larr; all networks</a> <a href="index.html">&larr; {title} widget</a></div>
+<div class="nav"><a href="../">&larr; all networks</a> <a href="index.html">&larr; {title} widget</a>{generic_nav_link}</div>
 <h1>{title}: reaction rates</h1>
 <p class="sub">
   Every reaction rate coefficient this network uses, plotted over its
   configured temperature range and editable in place (Vega expression
   syntax -- the same T/tev/logtev/logT variables
   <a href="https://github.com/{repo}/blob/main/src/dengo/primordial_rates.py">primordial_rates.py</a>'s
-  own functions use). Changes here are exploratory only -- editing a
-  formula updates its own plot immediately but does not (yet) feed back
-  into the compiled solver on the <a href="index.html">widget page</a>.
+  own functions use). Changes here don't feed back into the *compiled*
+  solver on the <a href="index.html">widget page</a> (that would need a
+  recompile, and isn't planned).{generic_note}
   Select which reactions to show, then export the current set (including
   any edits) to a small JSON file, or load one back in.
 </p>
@@ -470,6 +472,284 @@ LANDING_TEMPLATE = """<!doctype html>
 <ul class="network-list">
 {items}
 </ul>
+<p class="sub"><a href="generic/">Build your own network &rarr;</a> -- prototype:
+  pick species and reactions from a checklist instead of one of the three
+  fixed networks above, with no compile step for whatever you pick.</p>
+</body>
+</html>
+"""
+
+GENERIC_PAGE_TEMPLATE = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Build your own network -- dengo in the browser</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>%F0%9F%A7%AA</text></svg>">
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<div class="nav"><a href="../">&larr; all networks</a> <a href="construct.html">construct with Python &rarr;</a> <a href="../primordial/rates.html">reaction rates &rarr;</a></div>
+<h1>Build your own network <span class="gk-prototype-badge">prototype</span></h1>
+<p class="sub">
+  Every species and reaction dengo's primordial chemistry knows about
+  (the same network the "Primordial H/He/H2" widget uses) -- check which
+  ones to include and run, with <strong>no compile step</strong> for
+  whatever subset you pick. A reaction is only selectable once every
+  species it touches is checked. This is a prototype of a different way
+  to build a network than writing Python: ordinary mass-action kinetics
+  (rate(T) times a product of reactant densities) is generic math, not
+  per-network code, so it's assembled from data in JS instead of being
+  sympy/Emscripten-generated per selection. Cooling actions aren't one
+  universal formula the way reactions are, so each one's equation is
+  instead lowered once (for the whole catalog, still not per selection)
+  via sympy's own jscode printer at export time. Either way, only the
+  stiff-ODE solver itself (compiled once, reused unmodified for any
+  selection) needs Emscripten at all -- checking/unchecking anything
+  here never triggers a build step. Check no cooling actions to hold T
+  fixed at the dialed value; check at least one and T evolves from it
+  instead (a single constant ideal-gas gamma, not the compiled solver's
+  own H2-aware one -- see README-generic.md). See NOTES.md.
+</p>
+
+<div class="layout">
+  <div class="panel">
+    <div class="row">
+      <label>T (K) <span class="val" id="gk-T-val"></span></label>
+      <input type="range" id="gk-T" min="1" max="8" step="0.05" value="3">
+      <p class="preset-note">Fixed for the whole run unless at least one
+        cooling action below is checked, in which case this is just the
+        starting temperature.</p>
+    </div>
+    <div class="row">
+      <label>initial n<sub>H</sub> (cm⁻³) <span class="val" id="gk-nH-val"></span></label>
+      <input type="range" id="gk-nH" min="-4" max="17" step="0.1" value="4">
+    </div>
+    <div class="row">
+      <label>total time: 10<sup>x</sup> s <span class="val" id="gk-dtf-val"></span></label>
+      <input type="range" id="gk-dtf" min="6" max="17" step="0.1" value="13">
+    </div>
+
+    <details class="species-details" open>
+      <summary>Species</summary>
+      <div id="gk-species-list"></div>
+    </details>
+
+    <details class="species-details" open>
+      <summary>Reactions</summary>
+      <div class="row-inline">
+        <button type="button" id="gk-select-all-rxn" class="btn-secondary">All</button>
+        <button type="button" id="gk-select-none-rxn" class="btn-secondary">None</button>
+        <label class="rates-upload-label">Import edited rates
+          <input type="file" id="gk-rates-import" accept="application/json">
+        </label>
+      </div>
+      <p class="preset-note">Loads a JSON file exported by the
+        <a href="../primordial/rates.html">reaction rates</a> page's own
+        "Download JSON" -- overrides the matching reaction(s)' rate
+        formula here (and its checked state) with whatever was edited/
+        selected there. Unlike that page on its own, edits actually
+        change the physics of a run here -- no recompile needed for a
+        different formula, same as no recompile is needed for a
+        different species/reaction selection.</p>
+      <div id="gk-reaction-list"></div>
+    </details>
+
+    <details class="species-details">
+      <summary>Cooling (optional -- unchecked means T stays fixed)</summary>
+      <div class="row-inline">
+        <button type="button" id="gk-select-all-cool" class="btn-secondary">All</button>
+        <button type="button" id="gk-select-none-cool" class="btn-secondary">None</button>
+      </div>
+      <div id="gk-cooling-list"></div>
+    </details>
+
+    <div class="sweep-actions">
+      <button type="button" id="gk-run" class="btn-primary" disabled>Run</button>
+      <button type="button" id="gk-download-csv" class="btn-secondary" disabled>Download CSV</button>
+      <button type="button" id="gk-export-selection" class="btn-secondary">Export selection</button>
+      <label class="rates-upload-label">Import selection
+        <input type="file" id="gk-import-selection" accept="application/json">
+      </label>
+      <span id="gk-status">loading reaction database&hellip;</span>
+    </div>
+  </div>
+
+  <div id="charts">
+    <div class="chart-box">
+      <div class="chart-title">Species density vs. time</div>
+      <div id="gk-chart"></div>
+    </div>
+    <div class="chart-box" id="gk-chart-T-box" hidden>
+      <div class="chart-title">Temperature vs. time</div>
+      <div id="gk-chart-T"></div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/vega@5"></script>
+<script src="https://cdn.jsdelivr.net/npm/vega-lite@5"></script>
+<script src="https://cdn.jsdelivr.net/npm/vega-embed@6"></script>
+<script src="dengo_generic.js"></script>
+<script src="../app.js"></script>
+<script src="../generic_kinetics.js"></script>
+<script src="../generic_ui.js"></script>
+<script>
+for (const id of ["gk-T", "gk-nH", "gk-dtf"]) {
+  const el = document.getElementById(id);
+  const valEl = document.getElementById(id + "-val");
+  const update = () => { valEl.textContent = parseFloat(el.value).toFixed(2); };
+  el.addEventListener("input", update);
+  update();
+}
+initGenericPage();
+</script>
+</body>
+</html>
+"""
+
+CONSTRUCT_PAGE_TEMPLATE = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Construct a network -- dengo in the browser</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>%F0%9F%A7%AA</text></svg>">
+<link rel="stylesheet" href="../style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css">
+</head>
+<body>
+<div class="nav"><a href="../">&larr; all networks</a> <a href="index.html">&larr; build-your-own-network (checkbox version)</a></div>
+<h1>Construct a network <span class="gk-prototype-badge">prototype</span></h1>
+<p class="sub">
+  A third way to define a network, alongside the three pre-compiled
+  wasm ones and the checkbox tool -- instead of picking a subset of one
+  fixed, pre-baked catalog, write your own dengo <code>Species</code>/
+  <code>Reaction</code> definitions directly, one reaction per box
+  below, in real Python. The actual dengo package (not a lookalike)
+  runs live in your browser via <a href="https://pyodide.org/">Pyodide</a>
+  (loaded from a CDN the first time you click "Build network" -- a few
+  seconds, several MB, then cached) -- everything after that (the
+  mass-action RHS/Jacobian assembly and the stiff-ODE integrator itself)
+  is the exact same engine the checkbox tool uses, completely
+  unmodified. No thermal/cooling coupling here yet (see the checkbox
+  tool for that) -- these are ordinary, undramatic reaction networks;
+  try the two boring starter reactions below (A &rarr; B &rarr; C, a
+  classic sequential-decay textbook problem) to see the shape of it, or
+  load one of the real fiducial networks below as a starting point
+  instead -- the exact same reaction source the compiled widgets run,
+  editable inline. See NOTES.md.
+</p>
+
+<div class="layout">
+  <div class="panel">
+    <div class="row-inline">
+      <label>Load example</label>
+      <select id="ck-load-example">
+        <option value="">— none (starter cards above) —</option>
+        __EXAMPLE_OPTIONS__
+      </select>
+    </div>
+    <p class="preset-note">Replaces every card below with one fiducial
+      network's own real reactions (species/rate functions pulled
+      directly from dengo's own source, not reimplemented) and rebuilds
+      automatically -- your current cards are discarded, so export first
+      if you want to keep them.</p>
+    <div class="row-inline">
+      <label>T (K)</label>
+      <input type="number" step="any" id="ck-T" value="1000">
+      <label>total time (s)</label>
+      <input type="number" step="any" id="ck-dtf" value="50">
+    </div>
+    <div class="row-inline">
+      <label>Initial conditions</label>
+      <select id="ck-ic-preset" disabled>
+        <option value="">— custom (leave as-is) —</option>
+        <option value="bg-z20">IGM background (z ≈ 20)</option>
+        <option value="bg-z1000">IGM background (z ≈ 1000)</option>
+        <option value="virial-shock">Virial shock (10⁶ M☉ minihalo)</option>
+        <option value="protostellar-disk">Primordial protostellar disk</option>
+      </select>
+    </div>
+    <p class="preset-note">The same physically-motivated presets as the
+      main widget's own (see its "Initial conditions" dropdown) --
+      sets T and every matching species' initial value here (n_H
+      &times; that preset's fraction); a species this network has that
+      the preset has no fraction for still gets set, to a trace floor,
+      same as there. Also sets a total run time long enough to show
+      each preset's own chemistry play out at this fixed T (no cooling
+      coupling here yet, so nothing drives further heating/ionization on
+      its own) -- for "IGM background (z&thinsp;&approx;&thinsp;20)" and
+      "Virial shock", that's still very little on the dominant species:
+      only a trace fraction started ionized, and it just quietly
+      recombines with nothing to replenish it. Disabled until a build
+      succeeds (species inputs below don't exist until then); a species
+      the preset specifies but this network doesn't have is simply not
+      applicable here.</p>
+    <div id="ck-species-inputs"></div>
+
+    <div class="sweep-actions">
+      <button type="button" id="ck-build" class="btn-primary">Build network</button>
+      <button type="button" id="ck-run" class="btn-secondary" disabled>Run</button>
+      <button type="button" id="ck-download-csv" class="btn-secondary" disabled>Download CSV</button>
+      <span id="ck-status"></span>
+    </div>
+  </div>
+
+  <div id="charts">
+    <div class="chart-box">
+      <div class="chart-title">Species value vs. time</div>
+      <div id="ck-chart"></div>
+    </div>
+  </div>
+</div>
+
+<div id="ck-cards"></div>
+<div class="row-inline">
+  <button type="button" id="ck-add-card" class="btn-secondary">+ Add reaction</button>
+  <button type="button" id="ck-export-project" class="btn-secondary">Export project</button>
+  <label class="rates-upload-label">Import project
+    <input type="file" id="ck-import-project" accept="application/json">
+  </label>
+  <span class="preset-note">Save/load every reaction card (and T/total
+    time) as one JSON file -- nothing here is kept if you close or
+    reload the page otherwise.</span>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/vega@5"></script>
+<script src="https://cdn.jsdelivr.net/npm/vega-lite@5"></script>
+<script src="https://cdn.jsdelivr.net/npm/vega-embed@6"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/python/python.min.js"></script>
+<script src="https://cdn.jsdelivr.net/pyodide/v0.26.2/full/pyodide.js"></script>
+<script src="dengo_generic.js"></script>
+<script src="../app.js"></script>
+<script src="../generic_kinetics.js"></script>
+<script>window.DENGO_WHEEL_FILENAME = "__DENGO_WHEEL_FILENAME__";</script>
+<script src="../construct_ui.js"></script>
+<script>
+addReactionCard(`from dengo.reaction_classes import Species, Reaction
+
+A = Species("A", 1.0)
+B = Species("B", 1.0)
+
+def rate(state):
+    return 0.1 + 0 * state.T  # constant -- a "really boring" rate law
+
+Reaction("A_to_B", rate, [(1, A)], [(1, B)])
+`);
+addReactionCard(`from dengo.reaction_classes import Species, Reaction
+
+B = Species("B", 1.0)
+C = Species("C", 1.0)
+
+def rate(state):
+    return 0.03 + 0 * state.T  # slower than A -> B, so B visibly rises then falls
+
+Reaction("B_to_C", rate, [(1, B)], [(1, C)])
+`);
+initConstructPage();
+</script>
 </body>
 </html>
 """
@@ -484,7 +764,7 @@ def find_emxx():
     return emxx
 
 
-def build_rates_page(network, cfg, net_dir, repo):
+def build_rates_page(name, network, cfg, net_dir, repo):
     """The reaction-rate viewer needs none of the compiled solver -- just
     the network's own reaction list (to filter REACTION_RATES down to
     what this particular network actually uses) and its configured
@@ -502,9 +782,27 @@ def build_rates_page(network, cfg, net_dir, repo):
         "Tmax": float(network.T.max()),
         "rates": rates,
     }
+    # The "build your own network" generic/index.html tool's own catalog
+    # comes from build_primordial() too (generate_reaction_db.py), so
+    # only *this* network's rates page names match its reaction list --
+    # linking from cool/hydrogen_minimal's own rates.html would point at
+    # a tool whose reactions don't correspond 1:1 to what's edited here.
+    if name == "primordial":
+        generic_nav_link = ' <a href="../generic/">build-your-own-network &rarr;</a>'
+        generic_note = (
+            ' Edits here can also be imported directly into the '
+            '<a href="../generic/">build-your-own-network</a> tool '
+            '(its own "Import edited rates" control) -- there, unlike '
+            'here, they actually do change a run\'s physics, no '
+            'recompile needed.'
+        )
+    else:
+        generic_nav_link = ""
+        generic_note = ""
     with open(os.path.join(net_dir, "rates.html"), "w") as f:
         f.write(RATES_PAGE_TEMPLATE.format(
             title=cfg["title"], repo=repo, config_json=json.dumps(config),
+            generic_nav_link=generic_nav_link, generic_note=generic_note,
         ))
 
 
@@ -521,12 +819,91 @@ def build_sweep_page(cfg, net_dir, repo, config):
         ))
 
 
+def build_dengo_wheel(generic_dir):
+    """Builds a plain local wheel of the *real* dengo package (`uv
+    build --wheel` -- a pure filesystem operation, no PyPI contact of
+    any kind: dengo isn't published there and this project isn't ready
+    for that) and copies it into generic_dir, keeping `uv build`'s own
+    version-suffixed filename (e.g. dengo-0.2.0.dev0-py3-none-any.whl)
+    -- micropip.install() parses metadata *out of the filename itself*
+    (PEP 427 naming), so a renamed-to-something-generic wheel fails
+    with "Invalid wheel filename" rather than installing; the actual
+    name is threaded into construct.html instead (see build_generic_
+    page() below) so construct_ui.js's bootstrapDengo() doesn't need to
+    hardcode a version. `deps=False` at install time skips h5py/cython/
+    setuptools (dengo's declared dependencies) -- neither available nor
+    needed just to construct Species/Reaction objects -- see NOTES.md.
+
+    Returns the wheel's own filename.
+    """
+    repo_root = os.path.dirname(HERE)
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(["uv", "build", "--wheel", "--out-dir", tmp], cwd=repo_root, check=True)
+        wheels = glob.glob(os.path.join(tmp, "*.whl"))
+        if len(wheels) != 1:
+            raise RuntimeError("expected exactly one wheel from `uv build --wheel`, got: %s" % wheels)
+        shutil.copy(wheels[0], generic_dir)
+        return os.path.basename(wheels[0])
+
+
+def build_generic_page(out_dir):
+    """Prototype "build your own network" page (see GENERIC_PAGE_TEMPLATE's
+    own intro text and wasm/README-generic.md): compiles the network-
+    agnostic Newton integrator (wasm/generic_solver/, vendoring the same
+    BE_chem_solve.C the per-network builds use, unmodified) exactly
+    *once* -- not once per fiducial network, and never again when a
+    user's species/reaction selection changes -- and exports the full
+    primordial reaction database (generate_reaction_db.py) alongside it.
+    Also builds construct.html, the "write your own dengo Python" sibling
+    tool (build_dengo_wheel(), above) -- both share the same compiled
+    integrator and reaction-file location, so they're built together --
+    plus, for that tool, one loadable example project per fiducial
+    network (generate_construct_examples.py: real dengo reaction source,
+    not reimplemented, cross-checked against each network's own
+    already-registered rate functions at build time).
+    """
+    from generate_reaction_db import build_reaction_db
+    from generate_construct_examples import build_all_examples
+
+    generic_dir = os.path.join(out_dir, "generic")
+    os.makedirs(generic_dir, exist_ok=True)
+    solver_dir = os.path.join(HERE, "generic_solver")
+
+    subprocess.run(
+        [
+            find_emxx(), "-O3", "-o", os.path.join(generic_dir, "dengo_generic.js"),
+            os.path.join(solver_dir, "dengo_generic.cpp"), os.path.join(solver_dir, "BE_chem_solve.C"),
+            "-sEXPORTED_FUNCTIONS=_dengo_generic_alloc,_dengo_generic_free,_dengo_generic_step,_malloc,_free",
+            "-sEXPORTED_RUNTIME_METHODS=cwrap,ccall,HEAPF64,addFunction,removeFunction",
+            "-sALLOW_TABLE_GROWTH=1",
+            "-sMODULARIZE=1", "-sEXPORT_NAME=DengoGenericModule",
+            "-sALLOW_MEMORY_GROWTH=1",
+        ],
+        check=True,
+    )
+
+    build_reaction_db(generic_dir)
+    wheel_filename = build_dengo_wheel(generic_dir)
+    build_all_examples(os.path.join(generic_dir, "examples"))
+
+    example_options = "\n        ".join(
+        '<option value="%s">%s</option>' % (key, cfg["title"]) for key, cfg in FIDUCIAL_NETWORKS.items()
+    )
+    construct_html = CONSTRUCT_PAGE_TEMPLATE.replace("__DENGO_WHEEL_FILENAME__", wheel_filename)
+    construct_html = construct_html.replace("__EXAMPLE_OPTIONS__", example_options)
+    with open(os.path.join(generic_dir, "construct.html"), "w") as f:
+        f.write(construct_html)
+
+    with open(os.path.join(generic_dir, "index.html"), "w") as f:
+        f.write(GENERIC_PAGE_TEMPLATE)
+
+
 def build_one(name, cfg, out_dir, repo):
     net_dir = os.path.join(out_dir, name)
     os.makedirs(net_dir, exist_ok=True)
 
     network = cfg["build"]()
-    build_rates_page(network, cfg, net_dir, repo)
+    build_rates_page(name, network, cfg, net_dir, repo)
     network.write_wasm_solver(name, output_dir=net_dir)
 
     subprocess.run(
@@ -579,6 +956,9 @@ def main():
 
     shutil.copy(os.path.join(HERE, "app.js"), out_dir)
     shutil.copy(os.path.join(HERE, "sweep.js"), out_dir)
+    shutil.copy(os.path.join(HERE, "generic_kinetics.js"), out_dir)
+    shutil.copy(os.path.join(HERE, "generic_ui.js"), out_dir)
+    shutil.copy(os.path.join(HERE, "construct_ui.js"), out_dir)
     shutil.copy(os.path.join(HERE, "rates.js"), out_dir)
     shutil.copy(os.path.join(HERE, "style.css"), out_dir)
     # dengo-solver.js/.d.ts: a reusable wrapper around any dengo-generated
@@ -596,6 +976,13 @@ def main():
         except Exception as exc:
             print("!!! %s failed: %s" % (name, exc), file=sys.stderr)
             failed.append(name)
+
+    print("--- building generic (build-your-own-network prototype) ---")
+    try:
+        build_generic_page(out_dir)
+    except Exception as exc:
+        print("!!! generic failed: %s" % exc, file=sys.stderr)
+        failed.append("generic")
 
     items = "\n".join(
         '  <li><a href="%s/">%s</a><div class="desc">%s</div></li>'
