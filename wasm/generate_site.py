@@ -676,9 +676,16 @@ CONSTRUCT_PAGE_TEMPLATE = """<!doctype html>
       sets T and every matching species' initial value here (n_H
       &times; that preset's fraction); a species this network has that
       the preset has no fraction for still gets set, to a trace floor,
-      same as there. Disabled until a build succeeds (species inputs
-      below don't exist until then); a species the preset specifies but
-      this network doesn't have is simply not applicable here.</p>
+      same as there. Also sets a total run time long enough to show
+      each preset's own chemistry play out at this fixed T (no cooling
+      coupling here yet, so nothing drives further heating/ionization on
+      its own) -- for "IGM background (z&thinsp;&approx;&thinsp;20)" and
+      "Virial shock", that's still very little on the dominant species:
+      only a trace fraction started ionized, and it just quietly
+      recombines with nothing to replenish it. Disabled until a build
+      succeeds (species inputs below don't exist until then); a species
+      the preset specifies but this network doesn't have is simply not
+      applicable here.</p>
     <div id="ck-species-inputs"></div>
 
     <div class="sweep-actions">

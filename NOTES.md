@@ -4250,3 +4250,47 @@ directly: disabled before any build (an attempted `selectOption()` on
 it is refused, not silently accepted), enabled immediately once a build
 succeeds, and applying a preset then does correctly change T/species
 values (re-verified the virial-shock case end to end).
+
+**2026-09-15, continued: the initial-conditions preset needed to update
+total time too -- and one preset genuinely has little to show.**
+
+Reported directly, after the fix above: "Maybe make sure the time
+target is updated too. It's still not doing much of anything if I
+preselect the minihalo [virial-shock]." Right on both counts, but for
+two different reasons -- checked directly (a headless-Chrome sweep of
+`dtf` from 1e13 to 1e21 s against the full primordial network for
+every preset) rather than just picking a bigger number and hoping:
+
+- `applyIcPreset()` genuinely never touched `ck-dtf` at all -- it
+  stayed at whatever it already was (50 s from scratch, or 1e13 s if
+  a fiducial-network example was loaded first), regardless of preset.
+  Fixed: a new `IC_PRESET_DTF` lookup (construct_ui.js -- not part of
+  `IC_PRESETS`/app.js itself, since this is specific to how long *this*
+  fixed-T, no-cooling-coupling tool needs to run to show a preset's
+  chemistry, not a property of the preset itself) sets `ck-dtf` too now.
+- **But virial-shock (and bg-z20) genuinely don't show much on the
+  *dominant* species at any total time**, confirmed directly by the
+  sweep: only a trace ~2e-4 fraction of the gas started ionized in
+  either, and with no cooling/heating coupling in this tool, nothing
+  replenishes or drives further ionization -- what little recombines
+  just settles quietly (`de` decaying toward the floor), while H_1/
+  He_1 (the bulk of the gas) never move. bg-z1000 (already ~half-
+  ionized to start) and protostellar-disk (dense enough for runaway
+  3-body H2 formation) are the two that actually show dramatic
+  evolution here -- picked `IC_PRESET_DTF` values at or past where each
+  preset's own visible chemistry plateaus (1e15 s for bg-z20/bg-z1000/
+  virial-shock, 1e17 s for protostellar-disk).
+
+This is a real, physically-accurate limitation of construct.html's
+current fixed-T/no-cooling model, not something a better total-time
+choice can paper over -- said so directly rather than implying the fix
+"solves" virial-shock's own case, both in NOTES.md here and in the
+page's own preset-note text.
+
+Verified: re-ran the same three presets end to end in headless Chrome
+after the fix -- `ck-dtf` now reads 1e15/1e15/1e17 s respectively after
+selecting bg-z1000/virial-shock/protostellar-disk, bg-z1000 and
+protostellar-disk both show large, real species changes (H_1: 76->63.9
+and 5e11->7.3 respectively), and virial-shock's own H_1/He_1 are
+confirmed to barely move (0.237->0.237003, 0.0189->0.0189) -- exactly
+the physically-expected result, not a leftover bug. No console errors.

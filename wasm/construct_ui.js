@@ -445,6 +445,34 @@ async function loadExampleNetwork(key) {
 // species gets set, a preset-less one still gets the 1e-12 trace
 // floor rather than being left alone" rule, just adapted to this
 // tool's own units.
+// How long a run actually needs to show each preset's own chemistry
+// playing out to (near-)completion at fixed T -- construct.html has no
+// cooling coupling, so nothing drives further heating/ionization once
+// a preset's starting point is set, unlike IC_PRESETS' own nH/T/
+// fractions (app.js), these aren't a property of the preset itself,
+// just how long *this* fixed-T/no-cooling tool needs to run to show
+// it, so they live here rather than there. Not guessed: swept dtf from
+// 1e13 to 1e21 s against the full primordial network for each preset
+// (headless Chrome, see NOTES.md) and picked a value at or past where
+// the visible chemistry actually plateaus.
+//
+// bg-z20 and virial-shock still show very little change on the
+// *dominant* species regardless of how long this runs: only a tiny
+// fraction of the gas started ionized (2e-4 in both) and nothing in
+// this fixed-T model replenishes or drives further ionization/heating
+// -- what little recombines just settles quietly, and the bulk neutral
+// gas never moves. That's a real, physical result of this tool's
+// current no-cooling limitation, not something a bigger total time can
+// paper over -- bg-z1000 (already half-ionized to start) and
+// protostellar-disk (dense enough for 3-body H2 formation to run away)
+// are the two that actually show dramatic evolution here.
+const IC_PRESET_DTF = {
+  "bg-z20": 1e15,
+  "bg-z1000": 1e15,
+  "virial-shock": 1e15,
+  "protostellar-disk": 1e17,
+};
+
 function applyIcPreset(key) {
   const preset = IC_PRESETS[key];
   if (!preset) return;
@@ -453,6 +481,8 @@ function applyIcPreset(key) {
     return;
   }
   document.getElementById("ck-T").value = preset.T;
+  const dtf = IC_PRESET_DTF[key];
+  if (dtf !== undefined) document.getElementById("ck-dtf").value = dtf;
   // Same H2-folding rule as applyPreset(): a network with no H2_1
   // species can't represent the preset's molecular-hydrogen fraction
   // at all -- folded back into atomic H so the total hydrogen budget
@@ -469,7 +499,8 @@ function applyIcPreset(key) {
     el.value = frac * preset.nH;
     applied++;
   }
-  setStatus(`applied "${key}" initial conditions (T=${preset.T} K, n_H=${preset.nH} cm⁻³, ${applied} species set) -- click "Run" to see it`);
+  const dtfNote = dtf !== undefined ? `, total time=${dtf.toExponential(0)} s` : "";
+  setStatus(`applied "${key}" initial conditions (T=${preset.T} K, n_H=${preset.nH} cm⁻³${dtfNote}, ${applied} species set) -- click "Run" to see it`);
 }
 
 function initConstructPage() {
