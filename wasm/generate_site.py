@@ -635,12 +635,26 @@ CONSTRUCT_PAGE_TEMPLATE = """<!doctype html>
   unmodified. No thermal/cooling coupling here yet (see the checkbox
   tool for that) -- these are ordinary, undramatic reaction networks;
   try the two boring starter reactions below (A &rarr; B &rarr; C, a
-  classic sequential-decay textbook problem) to see the shape of it.
-  See NOTES.md.
+  classic sequential-decay textbook problem) to see the shape of it, or
+  load one of the real fiducial networks below as a starting point
+  instead -- the exact same reaction source the compiled widgets run,
+  editable inline. See NOTES.md.
 </p>
 
 <div class="layout">
   <div class="panel">
+    <div class="row-inline">
+      <label>Load example</label>
+      <select id="ck-load-example">
+        <option value="">— none (starter cards above) —</option>
+        __EXAMPLE_OPTIONS__
+      </select>
+    </div>
+    <p class="preset-note">Replaces every card below with one fiducial
+      network's own real reactions (species/rate functions pulled
+      directly from dengo's own source, not reimplemented) and rebuilds
+      automatically -- your current cards are discarded, so export first
+      if you want to keep them.</p>
     <div class="row-inline">
       <label>T (K)</label>
       <input type="number" step="any" id="ck-T" value="1000">
@@ -817,9 +831,14 @@ def build_generic_page(out_dir):
     primordial reaction database (generate_reaction_db.py) alongside it.
     Also builds construct.html, the "write your own dengo Python" sibling
     tool (build_dengo_wheel(), above) -- both share the same compiled
-    integrator and reaction-file location, so they're built together.
+    integrator and reaction-file location, so they're built together --
+    plus, for that tool, one loadable example project per fiducial
+    network (generate_construct_examples.py: real dengo reaction source,
+    not reimplemented, cross-checked against each network's own
+    already-registered rate functions at build time).
     """
     from generate_reaction_db import build_reaction_db
+    from generate_construct_examples import build_all_examples
 
     generic_dir = os.path.join(out_dir, "generic")
     os.makedirs(generic_dir, exist_ok=True)
@@ -840,9 +859,15 @@ def build_generic_page(out_dir):
 
     build_reaction_db(generic_dir)
     wheel_filename = build_dengo_wheel(generic_dir)
+    build_all_examples(os.path.join(generic_dir, "examples"))
 
+    example_options = "\n        ".join(
+        '<option value="%s">%s</option>' % (key, cfg["title"]) for key, cfg in FIDUCIAL_NETWORKS.items()
+    )
+    construct_html = CONSTRUCT_PAGE_TEMPLATE.replace("__DENGO_WHEEL_FILENAME__", wheel_filename)
+    construct_html = construct_html.replace("__EXAMPLE_OPTIONS__", example_options)
     with open(os.path.join(generic_dir, "construct.html"), "w") as f:
-        f.write(CONSTRUCT_PAGE_TEMPLATE.replace("__DENGO_WHEEL_FILENAME__", wheel_filename))
+        f.write(construct_html)
 
     with open(os.path.join(generic_dir, "index.html"), "w") as f:
         f.write(GENERIC_PAGE_TEMPLATE)

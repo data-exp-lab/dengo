@@ -98,6 +98,41 @@ a real, general bug this tool's own "boring" test case surfaced in the
 shared Jacobian (a `0/0` when a reactant's density is exactly zero --
 latent in the checkbox tool too, just never triggered there).
 
+## Loading a fiducial network as a construct.html example
+
+construct.html's own two starter cards are deliberately "really
+boring" (A -> B -> C). `wasm/generate_construct_examples.py` builds
+one loadable example per fiducial network instead -- construct.html's
+"Load example" dropdown fetches `generic/examples/<network>.json`
+(the exact same `{tool: "generic-construct", T, dtf, cards,
+species_initial}` project-file shape "Export project"/"Import project"
+already use) and feeds it through the same import path.
+
+Each card is the *real* dengo rate function, not a reimplementation:
+`inspect.getsource()` pulls the literal source straight out of
+`primordial_rates.py`'s own `@reaction`-decorated closures -- the exact
+code the compiled per-network widgets run -- re-wrapped (decorator
+dropped, function renamed) into a self-contained
+`Species(...)`/`def ...`/`Reaction(...)` card, with the reaction's own
+already-registered stoichiometry, not re-parsed out of the decorator
+text. Every reaction in all three networks was scanned (`dis`, not
+assumed) for exactly which external names its rate function needs
+beyond `state`/`numpy`: one, `tiny` (`dengo.chemistry_constants`) --
+plus `state.threebody` (k13/k22's three-body H2 channel selector, a
+network-wide config value with no construct.html UI of its own, fixed
+at ChemicalNetwork's own default of 4 for every example).
+`construct_ui.js`'s `_State` stand-in now provides
+`.tev`/`.logtev`/`.logT`/`.threebody` alongside `.T`, matching what
+these (and any hand-written) cards' rate functions may reference.
+
+Every generated card is validated at build time against the real,
+already-registered reaction's own tabulated rate (not just trusted) --
+see NOTES.md's 2026-09-15 "the fiducial networks themselves" entry for
+the numbers, a genuinely tricky `inspect.getsource()`/`exec()` ordering
+bug found and fixed along the way, and what was verified end-to-end
+(a real Emscripten rebuild, then all three examples loaded and run
+through the actual dropdown UI in headless Chrome).
+
 ## Integration with the reaction-rate explorer (rates.html)
 
 `rates.html`/`rates.js` (the per-network reaction-rate viewer/editor)

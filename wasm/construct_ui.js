@@ -132,6 +132,19 @@ class _State:
     pass
 _state = _State()
 _state.T = T_grid
+# Every real dengo rate function (primordial_rates.py) references some
+# subset of these -- not just T -- via the same state.tev/logtev/logT
+# convention documented in reaction_rates.py; state.threebody (gating
+# k13/k22's three-body H2 formation/dissociation channel choice) has
+# no UI here, so it's fixed at ChemicalNetwork's own default (see
+# chemical_network.py: self.threebody = 4) -- a hand-written card need
+# not touch any of this (the two "really boring" starter cards don't),
+# but one built from a real network's own reaction source (see
+# generate_construct_examples.py) does.
+_state.tev = T_grid / 11605.0
+_state.logtev = np.log(_state.tev)
+_state.logT = np.log(T_grid)
+_state.threebody = 4
 
 reactions_out = []
 touched = set()
@@ -331,9 +344,50 @@ function exportProject() {
   URL.revokeObjectURL(url);
 }
 
+// The actual load logic, shared by two entry points: a user's own file
+// (importProject(), below) and a build-time-generated fiducial-network
+// example (loadExampleNetwork(), see initConstructPage()) -- same
+// {tool, T, dtf, cards, species_initial} shape either way, so there's
+// nothing entry-point-specific in here at all.
+async function applyProjectData(data) {
+  if (!Array.isArray(data.cards)) {
+    alert("That file doesn't look like a construct.html project (no \"cards\" array).");
+    return;
+  }
+  removeAllCards();
+  for (const source of data.cards) addReactionCard(source);
+  if (data.T !== undefined) document.getElementById("ck-T").value = data.T;
+  if (data.dtf !== undefined) document.getElementById("ck-dtf").value = data.dtf;
+  document.getElementById("ck-run").disabled = true;
+  document.getElementById("ck-download-csv").disabled = true;
+  setStatus(`loaded ${data.cards.length} reaction(s) -- click "Build network" to continue`);
+
+  // Restoring species_initial needs the ck-init-* inputs to exist,
+  // which only happens after a real build (same Pyodide/dengo path
+  // "Build network" itself takes, not skipped or faked here) --
+  // done automatically so a saved project's starting point comes
+  // back exactly as it was, not just its reaction source.
+  if (data.species_initial) {
+    await buildNetwork();
+    // buildNetwork() only clears ck-run's disabled flag once it
+    // actually succeeds (every earlier failure path returns before
+    // that line) -- checked rather than assumed, so a build failure
+    // here (e.g. a since-broken card) reports *that* status instead
+    // of silently claiming initial values were restored when the
+    // ck-init-* inputs to restore them into were never created.
+    if (!document.getElementById("ck-run").disabled) {
+      for (const [name, value] of Object.entries(data.species_initial)) {
+        const el = document.getElementById("ck-init-" + name);
+        if (el) el.value = value;
+      }
+      setStatus(`loaded ${data.cards.length} reaction(s), rebuilt, restored initial values`);
+    }
+  }
+}
+
 function importProject(file) {
   const reader = new FileReader();
-  reader.onload = async () => {
+  reader.onload = () => {
     let data;
     try {
       data = JSON.parse(reader.result);
@@ -341,39 +395,7 @@ function importProject(file) {
       alert("Could not parse that file as JSON: " + e.message);
       return;
     }
-    if (!Array.isArray(data.cards)) {
-      alert("That file doesn't look like a construct.html project (no \"cards\" array).");
-      return;
-    }
-    removeAllCards();
-    for (const source of data.cards) addReactionCard(source);
-    if (data.T !== undefined) document.getElementById("ck-T").value = data.T;
-    if (data.dtf !== undefined) document.getElementById("ck-dtf").value = data.dtf;
-    document.getElementById("ck-run").disabled = true;
-    document.getElementById("ck-download-csv").disabled = true;
-    setStatus(`loaded ${data.cards.length} reaction(s) -- click "Build network" to continue`);
-
-    // Restoring species_initial needs the ck-init-* inputs to exist,
-    // which only happens after a real build (same Pyodide/dengo path
-    // "Build network" itself takes, not skipped or faked here) --
-    // done automatically so a saved project's starting point comes
-    // back exactly as it was, not just its reaction source.
-    if (data.species_initial) {
-      await buildNetwork();
-      // buildNetwork() only clears ck-run's disabled flag once it
-      // actually succeeds (every earlier failure path returns before
-      // that line) -- checked rather than assumed, so a build failure
-      // here (e.g. a since-broken card) reports *that* status instead
-      // of silently claiming initial values were restored when the
-      // ck-init-* inputs to restore them into were never created.
-      if (!document.getElementById("ck-run").disabled) {
-        for (const [name, value] of Object.entries(data.species_initial)) {
-          const el = document.getElementById("ck-init-" + name);
-          if (el) el.value = value;
-        }
-        setStatus(`loaded ${data.cards.length} reaction(s), rebuilt, restored initial values`);
-      }
-    }
+    applyProjectData(data);
   };
   reader.readAsText(file);
 }
@@ -383,6 +405,27 @@ function importProject(file) {
 // load can seed specific example reactions (see CONSTRUCT_PAGE_
 // TEMPLATE in generate_site.py) rather than always starting from one
 // generic default.
+// Fetches one build-time-generated fiducial-network example
+// (generate_construct_examples.py -- real dengo reaction source,
+// inspect.getsource()'d out of primordial_rates.py, not reimplemented,
+// see that file's own module docstring) and loads it exactly like an
+// imported project file -- same applyProjectData(), just fetched from
+// a same-origin static asset instead of read from a File.
+async function loadExampleNetwork(key) {
+  if (!key) return;
+  setStatus(`loading example "${key}"…`);
+  let data;
+  try {
+    const resp = await fetch(`examples/${key}.json`);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    data = await resp.json();
+  } catch (e) {
+    setStatus(`could not load example "${key}": ${e.message}`);
+    return;
+  }
+  await applyProjectData(data);
+}
+
 function initConstructPage() {
   document.getElementById("ck-add-card").addEventListener("click", () => addReactionCard());
   document.getElementById("ck-build").addEventListener("click", buildNetwork);
@@ -393,5 +436,13 @@ function initConstructPage() {
     if (e.target.files[0]) importProject(e.target.files[0]);
     e.target.value = ""; // allow re-importing the same filename twice in a row
   });
+  const exampleSelect = document.getElementById("ck-load-example");
+  if (exampleSelect) {
+    exampleSelect.addEventListener("change", (e) => {
+      const key = e.target.value;
+      e.target.value = ""; // back to the placeholder -- this is a one-shot action, not a persistent mode
+      if (key) loadExampleNetwork(key);
+    });
+  }
   setStatus("click “Build network” to load Pyodide and run your reactions");
 }

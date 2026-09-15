@@ -4115,3 +4115,80 @@ with a step-aligned value, which round-tripped correctly.
 
 Still not merged, not pushed -- same branch, same "exploratory, no
 push" standing instruction.
+
+**2026-09-15, continued: the fiducial networks themselves, loadable as
+construct.html examples.**
+
+Asked directly to have "one of the build artifacts be the fiducial
+networks, so that I can load them as examples and modify them inline."
+New `wasm/generate_construct_examples.py`: for each of the three
+fiducial networks (fiducial_networks.py), writes
+`generic/examples/<key>.json` in the exact
+`{tool: "generic-construct", T, dtf, cards, species_initial}` shape
+construct_ui.js's own exportProject()/importProject() already read and
+write -- no new format, no new JS parsing path needed, just a new
+producer. A "Load example" dropdown on construct.html (populated from
+`FIDUCIAL_NETWORKS`, `__EXAMPLE_OPTIONS__` in `generate_site.py`)
+fetches one and feeds it through the same path a user's own imported
+project file takes.
+
+Each reaction's card is the *real* dengo rate function, not a
+reimplementation: `inspect.getsource()` pulls the literal Python source
+straight out of `primordial_rates.py`'s own `@reaction`-decorated
+closures (the exact code the compiled per-network widgets run), with
+just the decorator line dropped and the function renamed (every one is
+called `rxn` in its own closure there -- confusing with several cards
+open side by side here) -- then wrapped in
+`Species(...)`/`Reaction(...)` calls built from that reaction's own
+already-registered `left_side`/`right_side`. Scanned every reaction in
+all three networks via `dis.get_instructions(..., 'LOAD_GLOBAL')`
+(not assumed) to find the complete set of external names any of them
+actually need beyond `state`/`numpy`: just one, `tiny` (`dengo.
+chemistry_constants`) -- `k13`/`k22` (three-body H2 formation/
+dissociation) additionally read `state.threebody` off their `state`
+argument directly (an attribute access, not a global, so `dis` alone
+wouldn't have flagged it -- found by reading their source instead), a
+network-wide config value with no construct.html UI of its own, so
+every example is generated (and construct_ui.js's own `_State` stand-in
+now provides) a fixed default of 4, matching `ChemicalNetwork`'s own
+unexposed default.
+
+Each generated card is validated at build time, not just trusted:
+executed in an isolated namespace and its rate compared against the
+real, already-registered reaction's own tabulated `coeff_fn` output
+across that network's own T grid -- max relative error required
+< 1e-9 (all three networks: 0/22, 0/6, 0/2 reactions actually skipped
+by this check, i.e. every single one passed). `construct_ui.js`'s
+`_State` stand-in (`collectReactionDb()`) previously only set `.T` --
+extended to also set `.tev`/`.logtev`/`.logT`/`.threebody`, matching
+what these (and potentially any hand-written) cards' rate functions
+may reference; `importProject()`'s inner logic was split out into a
+reusable `applyProjectData()` so both a user's own imported file and a
+fetched example share one code path, not two.
+
+**A real, non-obvious ordering bug found while building this**: doing
+`inspect.getsource()` on one network's reaction *after* already having
+`exec()`'d a previous network's generated card (even for a completely
+unrelated reaction) raised `OSError: could not get source code` --
+some interaction between the exec()'d card's synthetic filename and
+`inspect`'s/`linecache`'s source-lookup bookkeeping for the real
+module, not chased further once confirmed that extracting *every*
+reaction's raw source across *all three* networks first, before any
+`exec()`/`compile()` call for any of them, sidesteps it entirely
+(confirmed directly: interleaved failed, two-phase didn't).
+
+Verified: a real Emscripten rebuild of the whole site (all three
+fiducial networks + the generic prototype's compiled-once integrator +
+wheel + all three example JSON files, zero skipped reactions in any of
+them) followed by a full headless-Chrome pass through the actual
+dropdown UI for all three examples -- each loads the right card count,
+rebuilds through the real Pyodide/dengo path, restores its own species-
+initial values, and runs to completion with zero console errors.
+Spot-checked the full primordial network's own run output directly
+(not just "it completed"): no NaN/negative values anywhere, and the
+result is physically sensible for fixed T=1000K with no cooling
+coupling (H2 forms substantially, 0.01 -> 10.1; the trace initial
+ionization recombines, H_2/de: 1 -> 0.053) -- a real chemistry result,
+not just a non-crashing one.
+
+Still not merged, not pushed -- same branch, same standing instruction.
