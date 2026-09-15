@@ -204,8 +204,13 @@ async function buildNetwork() {
   // rebuild (e.g. after editing a card) fails partway through. Also
   // what importProject() checks afterward to tell a real rebuild
   // success apart from a failure, rather than assuming its own instance
-  // of that same "not yet cleared" ambiguity away.
+  // of that same "not yet cleared" ambiguity away. ck-ic-preset rides
+  // along with ck-run here -- both need constructDb/the ck-init-*
+  // inputs to actually do anything, and leaving the preset dropdown
+  // enabled while unbuilt let it silently no-op (found directly: it's
+  // exactly what "selecting a preset does nothing" turned out to be).
   document.getElementById("ck-run").disabled = true;
+  document.getElementById("ck-ic-preset").disabled = true;
   await ensurePyodideLoaded();
   if (!constructMod) constructMod = await DengoGenericModule(); // the same compiled-once integrator generic/index.html uses, loaded lazily here too
   clearRegistries();
@@ -227,6 +232,7 @@ async function buildNetwork() {
   constructDb = loadReactionDb(dbRaw);
   buildSpeciesInputs(dbRaw);
   document.getElementById("ck-run").disabled = false;
+  document.getElementById("ck-ic-preset").disabled = false;
   setStatus(`built: ${dbRaw.species.length} species, ${dbRaw.reactions.length} reaction(s)`);
 }
 

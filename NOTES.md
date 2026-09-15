@@ -4226,3 +4226,27 @@ every one of 9 species' initial value matched the expected
 errors; separately, loading hydrogen_minimal (no H2 species) and
 applying the same preset confirmed the H2-folding math lands exactly
 on H_1's expected combined value.
+
+**2026-09-15, continued: the preset dropdown above was silently doing
+nothing -- found and fixed.**
+
+Reported directly: "It doesn't seem to do anything. The values are all
+the same." Reproduced immediately: `applyIcPreset()` already declined
+to do anything before a build exists (`constructDb` is still `null` --
+the `ck-init-*` inputs it would set don't exist yet), printing a status
+message instead -- but the dropdown itself was left fully enabled the
+whole time, so selecting a preset on the still-unbuilt starter cards
+(the page's own default state) silently no-ops, and the one-line status
+message is easy to miss if you're looking at the (unchanged) inputs,
+not the status line. Confirmed directly this is exactly the scenario
+that reproduces the report.
+
+Fixed by making the dropdown genuinely non-interactive until it can
+actually do something, rather than relying on a status message alone:
+`ck-ic-preset` starts `disabled` in the template and now rides along
+with `ck-run`'s own disable-up-front-enable-on-success handling in
+`buildNetwork()` -- both need the same build to exist first. Confirmed
+directly: disabled before any build (an attempted `selectOption()` on
+it is refused, not silently accepted), enabled immediately once a build
+succeeds, and applying a preset then does correctly change T/species
+values (re-verified the virial-shock case end to end).

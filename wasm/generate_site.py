@@ -663,7 +663,7 @@ CONSTRUCT_PAGE_TEMPLATE = """<!doctype html>
     </div>
     <div class="row-inline">
       <label>Initial conditions</label>
-      <select id="ck-ic-preset">
+      <select id="ck-ic-preset" disabled>
         <option value="">— custom (leave as-is) —</option>
         <option value="bg-z20">IGM background (z ≈ 20)</option>
         <option value="bg-z1000">IGM background (z ≈ 1000)</option>
@@ -676,9 +676,9 @@ CONSTRUCT_PAGE_TEMPLATE = """<!doctype html>
       sets T and every matching species' initial value here (n_H
       &times; that preset's fraction); a species this network has that
       the preset has no fraction for still gets set, to a trace floor,
-      same as there. Needs a build first (species inputs below don't
-      exist until then); a species the preset specifies but this
-      network doesn't have is simply not applicable here.</p>
+      same as there. Disabled until a build succeeds (species inputs
+      below don't exist until then); a species the preset specifies but
+      this network doesn't have is simply not applicable here.</p>
     <div id="ck-species-inputs"></div>
 
     <div class="sweep-actions">
