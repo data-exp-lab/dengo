@@ -323,16 +323,16 @@ RATES_PAGE_TEMPLATE = """<!doctype html>
 <link rel="stylesheet" href="../style.css">
 </head>
 <body>
-<div class="nav"><a href="../">&larr; all networks</a> <a href="index.html">&larr; {title} widget</a></div>
+<div class="nav"><a href="../">&larr; all networks</a> <a href="index.html">&larr; {title} widget</a>{generic_nav_link}</div>
 <h1>{title}: reaction rates</h1>
 <p class="sub">
   Every reaction rate coefficient this network uses, plotted over its
   configured temperature range and editable in place (Vega expression
   syntax -- the same T/tev/logtev/logT variables
   <a href="https://github.com/{repo}/blob/main/src/dengo/primordial_rates.py">primordial_rates.py</a>'s
-  own functions use). Changes here are exploratory only -- editing a
-  formula updates its own plot immediately but does not (yet) feed back
-  into the compiled solver on the <a href="index.html">widget page</a>.
+  own functions use). Changes here don't feed back into the *compiled*
+  solver on the <a href="index.html">widget page</a> (that would need a
+  recompile, and isn't planned).{generic_note}
   Select which reactions to show, then export the current set (including
   any edits) to a small JSON file, or load one back in.
 </p>
@@ -485,7 +485,7 @@ GENERIC_PAGE_TEMPLATE = """<!doctype html>
 <link rel="stylesheet" href="../style.css">
 </head>
 <body>
-<div class="nav"><a href="../">&larr; all networks</a> <a href="construct.html">construct with Python &rarr;</a></div>
+<div class="nav"><a href="../">&larr; all networks</a> <a href="construct.html">construct with Python &rarr;</a> <a href="../primordial/rates.html">reaction rates &rarr;</a></div>
 <h1>Build your own network <span class="gk-prototype-badge">prototype</span></h1>
 <p class="sub">
   Every species and reaction dengo's primordial chemistry knows about
@@ -536,7 +536,18 @@ GENERIC_PAGE_TEMPLATE = """<!doctype html>
       <div class="row-inline">
         <button type="button" id="gk-select-all-rxn" class="btn-secondary">All</button>
         <button type="button" id="gk-select-none-rxn" class="btn-secondary">None</button>
+        <label class="rates-upload-label">Import edited rates
+          <input type="file" id="gk-rates-import" accept="application/json">
+        </label>
       </div>
+      <p class="preset-note">Loads a JSON file exported by the
+        <a href="../primordial/rates.html">reaction rates</a> page's own
+        "Download JSON" -- overrides the matching reaction(s)' rate
+        formula here (and its checked state) with whatever was edited/
+        selected there. Unlike that page on its own, edits actually
+        change the physics of a run here -- no recompile needed for a
+        different formula, same as no recompile is needed for a
+        different species/reaction selection.</p>
       <div id="gk-reaction-list"></div>
     </details>
 
@@ -552,6 +563,10 @@ GENERIC_PAGE_TEMPLATE = """<!doctype html>
     <div class="sweep-actions">
       <button type="button" id="gk-run" class="btn-primary" disabled>Run</button>
       <button type="button" id="gk-download-csv" class="btn-secondary" disabled>Download CSV</button>
+      <button type="button" id="gk-export-selection" class="btn-secondary">Export selection</button>
+      <label class="rates-upload-label">Import selection
+        <input type="file" id="gk-import-selection" accept="application/json">
+      </label>
       <span id="gk-status">loading reaction database&hellip;</span>
     </div>
   </div>
@@ -649,6 +664,13 @@ CONSTRUCT_PAGE_TEMPLATE = """<!doctype html>
 <div id="ck-cards"></div>
 <div class="row-inline">
   <button type="button" id="ck-add-card" class="btn-secondary">+ Add reaction</button>
+  <button type="button" id="ck-export-project" class="btn-secondary">Export project</button>
+  <label class="rates-upload-label">Import project
+    <input type="file" id="ck-import-project" accept="application/json">
+  </label>
+  <span class="preset-note">Save/load every reaction card (and T/total
+    time) as one JSON file -- nothing here is kept if you close or
+    reload the page otherwise.</span>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/vega@5"></script>
@@ -699,7 +721,7 @@ def find_emxx():
     return emxx
 
 
-def build_rates_page(network, cfg, net_dir, repo):
+def build_rates_page(name, network, cfg, net_dir, repo):
     """The reaction-rate viewer needs none of the compiled solver -- just
     the network's own reaction list (to filter REACTION_RATES down to
     what this particular network actually uses) and its configured
@@ -717,9 +739,27 @@ def build_rates_page(network, cfg, net_dir, repo):
         "Tmax": float(network.T.max()),
         "rates": rates,
     }
+    # The "build your own network" generic/index.html tool's own catalog
+    # comes from build_primordial() too (generate_reaction_db.py), so
+    # only *this* network's rates page names match its reaction list --
+    # linking from cool/hydrogen_minimal's own rates.html would point at
+    # a tool whose reactions don't correspond 1:1 to what's edited here.
+    if name == "primordial":
+        generic_nav_link = ' <a href="../generic/">build-your-own-network &rarr;</a>'
+        generic_note = (
+            ' Edits here can also be imported directly into the '
+            '<a href="../generic/">build-your-own-network</a> tool '
+            '(its own "Import edited rates" control) -- there, unlike '
+            'here, they actually do change a run\'s physics, no '
+            'recompile needed.'
+        )
+    else:
+        generic_nav_link = ""
+        generic_note = ""
     with open(os.path.join(net_dir, "rates.html"), "w") as f:
         f.write(RATES_PAGE_TEMPLATE.format(
             title=cfg["title"], repo=repo, config_json=json.dumps(config),
+            generic_nav_link=generic_nav_link, generic_note=generic_note,
         ))
 
 
@@ -809,7 +849,7 @@ def build_one(name, cfg, out_dir, repo):
     os.makedirs(net_dir, exist_ok=True)
 
     network = cfg["build"]()
-    build_rates_page(network, cfg, net_dir, repo)
+    build_rates_page(name, network, cfg, net_dir, repo)
     network.write_wasm_solver(name, output_dir=net_dir)
 
     subprocess.run(

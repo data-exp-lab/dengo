@@ -98,6 +98,55 @@ a real, general bug this tool's own "boring" test case surfaced in the
 shared Jacobian (a `0/0` when a reactant's density is exactly zero --
 latent in the checkbox tool too, just never triggered there).
 
+## Integration with the reaction-rate explorer (rates.html)
+
+`rates.html`/`rates.js` (the per-network reaction-rate viewer/editor)
+predates this prototype and says of itself that edits are "exploratory
+only... does not feed back into the compiled solver" -- true of the
+*compiled* per-network solver (that would need a recompile), but not of
+the generic engine here, which never does. `reaction_rates.py`'s
+`REACTION_RATES` dict (rates.html's own hand-transcribed, already-
+verified Vega-expression formulas) is threaded straight through
+`generate_reaction_db.py` into `reaction_db.json`; `generic_kinetics.js`
+compiles each into a real callable (`setReactionFormula()`, the same
+`new Function()` idiom cooling's `jscode` already used) and prefers it
+over interpolating the downsampled `rate` table. The checkbox tool's
+"Import edited rates" control reads *the exact JSON rates.html's own
+"Download JSON" produces* -- no new export format, just a new consumer
+-- and overrides the matching reaction's live formula and checked
+state. Nav links connect `generic/index.html` and specifically the
+*primordial* network's `rates.html` (the only one whose reaction set
+matches this catalog 1:1).
+
+Side benefit, not just an integration nicety: evaluating the exact
+formula instead of interpolating a table removes the one documented
+residual in this file's own "Correctness check" section below (see
+there for the numbers).
+
+## Saving and loading in-progress work
+
+Neither tool persisted anything before this -- a reload silently lost
+everything. Both now have plain Blob-download / FileReader-import
+project files (same idiom as rates.js/app.js's CSV export elsewhere in
+this codebase):
+
+- **construct.html**: "Export project"/"Import project" -- every
+  reaction card's own Python source (in on-screen order), T/total time,
+  and (if a build has happened) the current per-species initial values.
+  Importing clears all current cards, re-adds the saved ones, and
+  automatically re-runs "Build network" (the real Pyodide/wheel/dengo
+  path) if initial values need restoring into the freshly-rebuilt
+  inputs.
+- **generic/index.html**: "Export selection"/"Import selection" --
+  every species/reaction/cooling checkbox, the fraction sliders,
+  T/n_H/total time, and any reaction whose live formula differs from
+  the catalog default (so an imported rate-explorer override round-
+  trips through a saved selection file too).
+
+See NOTES.md's 2026-09-15 entry for what was verified (a real, failure-
+mode-checked round trip in headless Chrome against the actual compiled
+wasm integrator for both tools, not just a happy-path check).
+
 ## Explicitly out of scope right now
 
 - **Cooling uses a single constant gamma (5/3, monatomic ideal gas)**
@@ -145,6 +194,19 @@ log-spaced T grid; the compiled solver interpolates in log-T-uniform-
 bin space), not a stoichiometry or rate-law bug -- confirmed by
 re-running at full (non-downsampled) table resolution, where the
 residual shrank by the expected amount rather than staying fixed.
+
+**Update, 2026-09-15**: every reaction now evaluates its rate via a
+live-compiled formula (see "Integration with the reaction-rate
+explorer" above) rather than interpolating that table at all, which
+removes this residual entirely for any reaction reaction_rates.py has
+a transcription for (today: all 22) -- confirmed directly (a Node-only
+check, no browser needed) that the formula matches the table's own
+value at grid nodes to ~1e-16 relative error (both come from the same
+`coeff_fn`, so this checks the wiring, not the transcription itself --
+reaction_rates.py's own docstring already covers that) and genuinely
+diverges from the old table-interpolated value off-grid (up to 57% at
+low T for k01), confirming the exact-evaluation path is really what's
+active now.
 
 Cooling was checked with a physically unambiguous sign test rather than
 a numeric cross-check (the compiled widget doesn't expose a fixed-

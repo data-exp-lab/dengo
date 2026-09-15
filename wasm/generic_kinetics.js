@@ -32,10 +32,45 @@ function loadReactionDb(db) {
     // left/right themselves are kept too (not just leftPower/netChange)
     // -- purely for display (generic_ui.js's reactionLabel()/
     // reactionSpeciesNames()), never read by the RHS/Jacobian math below.
-    return { name: r.name, left: r.left, right: r.right, leftPower, netChange, rate: r.rate };
+    const entry = {
+      name: r.name, left: r.left, right: r.right, leftPower, netChange, rate: r.rate,
+      presets: r.presets, default_preset: r.default_preset,
+    };
+    // `formula` (reaction_rates.py's hand-transcribed Vega-expression
+    // string, threaded through by generate_reaction_db.py) is compiled
+    // once here, same as cooling's `js` below -- see setReactionFormula().
+    // Reactions with no transcription (none, today) simply keep the
+    // downsampled `rate` table as their only rate source.
+    if (r.formula) setReactionFormula(entry, r.formula);
+    return entry;
   });
   const cooling = (db.cooling || []).map(compileCoolingAction);
   return { T_grid: db.T_grid, constants: db.constants, species: db.species, reactions, cooling };
+}
+
+// Compiles one reaction's rate formula (reaction_rates.py's Vega-
+// expression-syntax string -- `datum.T`/`datum.tev`/`datum.logtev`/
+// `datum.logT`, plus `pow`/`exp`/`log`/`sqrt`/`min`/`max`, ternaries --
+// every formula in reaction_rates.py sticks to exactly this subset,
+// confirmed directly) into a real callable, mutating `entry` in place
+// (sets `.formula` and `.rateFn`). Exactly the same "new Function() is
+// just JS's own string->callable primitive" idiom compileCoolingAction()
+// already uses below -- `log` here is natural log, matching Vega's own
+// (and dengo's own state.logT/logtev convention), not log10.
+//
+// Used both when a reaction database first loads (formulas already
+// baked in by generate_reaction_db.py) and later, live, when
+// generic_ui.js imports a rate explorer (rates.html) JSON export and
+// overrides one reaction's formula in place -- the whole point of
+// exposing this as its own function rather than inlining it into
+// loadReactionDb() above.
+function setReactionFormula(entry, formula) {
+  entry.formula = formula;
+  entry.rateFn = new Function(
+    "datum",
+    "const pow=Math.pow, exp=Math.exp, log=Math.log, sqrt=Math.sqrt, min=Math.min, max=Math.max; "
+    + "return (" + formula + ");",
+  );
 }
 
 // One real JS function per cooling action, compiled once when the
@@ -75,11 +110,21 @@ function interpolateRate(db, rateTable, T) {
 // with no thermal coupling (T fixed for the whole run), this is
 // evaluated once per run and reused; with cooling active, T itself
 // evolves (see TFromGe() below) so this is called fresh every RHS/
-// Jacobian evaluation instead -- same interpolateRate() either way.
+// Jacobian evaluation instead -- same either way.
+//
+// Prefers a reaction's live-compiled formula (r.rateFn, see
+// setReactionFormula() above) over interpolating its downsampled
+// `rate` table whenever one's present -- an exact evaluation at the
+// query T rather than a linear interpolation between table points,
+// and (not merely a side effect) the same mechanism that lets a rate-
+// explorer-edited formula actually change the physics here. Falls back
+// to the table for the rare reaction with no transcription at all.
 function activeRatesAtT(db, activeNames, T) {
   const rates = {};
+  const tev = T / 11605.0, logtev = Math.log(tev), logT = Math.log(T);
   for (const r of db.reactions) {
-    if (activeNames.has(r.name)) rates[r.name] = interpolateRate(db, r.rate, T);
+    if (!activeNames.has(r.name)) continue;
+    rates[r.name] = r.rateFn ? r.rateFn({ T, tev, logtev, logT }) : interpolateRate(db, r.rate, T);
   }
   return rates;
 }

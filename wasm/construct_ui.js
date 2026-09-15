@@ -186,6 +186,13 @@ function buildSpeciesInputs(dbRaw) {
 }
 
 async function buildNetwork() {
+  // Disabled up front, not just left alone -- a *previous* build's
+  // success shouldn't linger as a false "still runnable" signal if this
+  // rebuild (e.g. after editing a card) fails partway through. Also
+  // what importProject() checks afterward to tell a real rebuild
+  // success apart from a failure, rather than assuming its own instance
+  // of that same "not yet cleared" ambiguity away.
+  document.getElementById("ck-run").disabled = true;
   await ensurePyodideLoaded();
   if (!constructMod) constructMod = await DengoGenericModule(); // the same compiled-once integrator generic/index.html uses, loaded lazily here too
   clearRegistries();
@@ -279,6 +286,98 @@ function downloadConstructCsv() {
   URL.revokeObjectURL(url);
 }
 
+// -- Save/load in-progress work ------------------------------------------
+// Everything a user has actually typed here (one or more real, possibly
+// nontrivial Python reactions) lives only in this page's DOM/CodeMirror
+// state -- a reload loses it outright, with no warning. Same Blob-
+// download / FileReader-import idiom already used three times elsewhere
+// in this codebase (rates.js, app.js's CSV export, sweep.js) -- no new
+// mechanism, just applied to a project file instead of results.
+function removeAllCards() {
+  for (const id of Object.keys(editors)) delete editors[id];
+  document.getElementById("ck-cards").innerHTML = "";
+}
+
+function exportProject() {
+  // DOM order (not Object.keys(editors) insertion order, though those
+  // should always agree) -- ties the exported card order directly to
+  // what's visibly on screen, robust even if that ever changes.
+  const cards = Array.from(document.querySelectorAll("#ck-cards .ck-card"))
+    .map((card) => editors[card.id].getValue());
+  const out = {
+    tool: "generic-construct",
+    T: parseFloat(document.getElementById("ck-T").value),
+    dtf: parseFloat(document.getElementById("ck-dtf").value),
+    cards,
+  };
+  // Initial-value overrides only exist once "Build network" has run at
+  // least once (buildSpeciesInputs() is what creates the ck-init-*
+  // fields) -- included when available so a deliberately-tweaked-away-
+  // from-default starting point round-trips too, but their absence
+  // (a project saved before ever building) isn't an error either.
+  if (constructDb) {
+    out.species_initial = Object.fromEntries(
+      constructDb.species.map((sp) => [sp.name, parseFloat(document.getElementById("ck-init-" + sp.name).value)]),
+    );
+  }
+  const blob = new Blob([JSON.stringify(out, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "construct_project.json";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function importProject(file) {
+  const reader = new FileReader();
+  reader.onload = async () => {
+    let data;
+    try {
+      data = JSON.parse(reader.result);
+    } catch (e) {
+      alert("Could not parse that file as JSON: " + e.message);
+      return;
+    }
+    if (!Array.isArray(data.cards)) {
+      alert("That file doesn't look like a construct.html project (no \"cards\" array).");
+      return;
+    }
+    removeAllCards();
+    for (const source of data.cards) addReactionCard(source);
+    if (data.T !== undefined) document.getElementById("ck-T").value = data.T;
+    if (data.dtf !== undefined) document.getElementById("ck-dtf").value = data.dtf;
+    document.getElementById("ck-run").disabled = true;
+    document.getElementById("ck-download-csv").disabled = true;
+    setStatus(`loaded ${data.cards.length} reaction(s) -- click "Build network" to continue`);
+
+    // Restoring species_initial needs the ck-init-* inputs to exist,
+    // which only happens after a real build (same Pyodide/dengo path
+    // "Build network" itself takes, not skipped or faked here) --
+    // done automatically so a saved project's starting point comes
+    // back exactly as it was, not just its reaction source.
+    if (data.species_initial) {
+      await buildNetwork();
+      // buildNetwork() only clears ck-run's disabled flag once it
+      // actually succeeds (every earlier failure path returns before
+      // that line) -- checked rather than assumed, so a build failure
+      // here (e.g. a since-broken card) reports *that* status instead
+      // of silently claiming initial values were restored when the
+      // ck-init-* inputs to restore them into were never created.
+      if (!document.getElementById("ck-run").disabled) {
+        for (const [name, value] of Object.entries(data.species_initial)) {
+          const el = document.getElementById("ck-init-" + name);
+          if (el) el.value = value;
+        }
+        setStatus(`loaded ${data.cards.length} reaction(s), rebuilt, restored initial values`);
+      }
+    }
+  };
+  reader.readAsText(file);
+}
+
 // Starter cards (if any) are added by the page's own inline script,
 // via addReactionCard(source), *before* this runs -- so a fresh page
 // load can seed specific example reactions (see CONSTRUCT_PAGE_
@@ -289,5 +388,10 @@ function initConstructPage() {
   document.getElementById("ck-build").addEventListener("click", buildNetwork);
   document.getElementById("ck-run").addEventListener("click", runConstruct);
   document.getElementById("ck-download-csv").addEventListener("click", downloadConstructCsv);
+  document.getElementById("ck-export-project").addEventListener("click", exportProject);
+  document.getElementById("ck-import-project").addEventListener("change", (e) => {
+    if (e.target.files[0]) importProject(e.target.files[0]);
+    e.target.value = ""; // allow re-importing the same filename twice in a row
+  });
   setStatus("click “Build network” to load Pyodide and run your reactions");
 }

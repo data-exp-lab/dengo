@@ -16,6 +16,7 @@
 let genericMod = null;
 let genericDb = null;
 let lastGenericResult = null; // {t, s, speciesOrder, hasCooling} -- CSV export source
+let originalFormulas = {}; // reaction name -> catalog-default formula string, snapshotted once at load (see initGenericPage()) -- exportSelection()'s only way to tell a rate-explorer-imported override apart from an untouched catalog default
 
 function reactionLabel(r) {
   const side = (arr) => arr.map(([n, name]) => (n === 1 ? name : `${n}${name}`)).join(" + ");
@@ -226,6 +227,53 @@ function runGeneric() {
   document.getElementById("gk-download-csv").disabled = false;
 }
 
+// Imports the *exact* JSON rates.html's own "Download JSON" produces
+// (rates.js's exportJson(): {network, reactions: {name: {selected,
+// formula, preset}}}) -- no new export format needed on that side at
+// all. This is what actually lets the rate explorer's edits feed
+// something real: rates.js's own doc comment calls that page
+// "exploratory only... does not feed back into the compiled solver",
+// but the generic engine here never needs a recompile, so there's
+// nothing to feed back *into* -- a reaction's live-compiled formula
+// (setReactionFormula(), generic_kinetics.js) is just swapped for the
+// new one and the very next run uses it.
+//
+// A reaction rates.html doesn't know about (this tool's catalog and a
+// given network's rates.html page should always agree today, since
+// both come from build_primordial(), but nothing enforces that at
+// import time) is skipped rather than failing the whole import, same
+// defensive convention rates.js's own importJson() already uses for
+// the reverse direction.
+function importRateOverrides(file) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    let data;
+    try {
+      data = JSON.parse(reader.result);
+    } catch (e) {
+      alert("Could not parse that file as JSON: " + e.message);
+      return;
+    }
+    const byName = Object.fromEntries(genericDb.reactions.map((r) => [r.name, r]));
+    let matched = 0, skipped = 0;
+    for (const [name, override] of Object.entries(data.reactions || {})) {
+      const entry = byName[name];
+      if (!entry || override.formula === undefined) { skipped++; continue; }
+      setReactionFormula(entry, override.formula);
+      const checkbox = document.getElementById("gk-rxn-" + name);
+      // refreshAvailability() (called below) still has the final say --
+      // it re-disables/unchecks this if the reaction's own species
+      // aren't all checked, same rule every other checkbox here follows.
+      if (checkbox) checkbox.checked = !!override.selected;
+      matched++;
+    }
+    refreshAvailability();
+    document.getElementById("gk-status").textContent =
+      `imported rate overrides: ${matched} reaction(s) matched, ${skipped} skipped`;
+  };
+  reader.readAsText(file);
+}
+
 function downloadGenericCsv() {
   if (!lastGenericResult) return;
   const { t, s, speciesOrder } = lastGenericResult;
@@ -247,9 +295,112 @@ function downloadGenericCsv() {
   URL.revokeObjectURL(url);
 }
 
+// -- Save/load in-progress work ------------------------------------------
+// Every checkbox, slider, and imported rate override here lives only in
+// this page's DOM/JS state -- same Blob-download / FileReader-import
+// idiom as everything else in this codebase (rates.js, downloadGenericCsv()
+// above, construct_ui.js's exportProject()).
+function exportSelection() {
+  const species = {};
+  for (const sp of genericDb.species) {
+    species[sp.name] = {
+      checked: document.getElementById("gk-sp-" + sp.name).checked,
+      log_fraction: parseFloat(document.getElementById(`gk-sp-${sp.name}-frac`).value),
+    };
+  }
+  const reactions = {};
+  for (const r of genericDb.reactions) {
+    reactions[r.name] = { checked: document.getElementById("gk-rxn-" + r.name).checked };
+  }
+  const cooling = {};
+  for (const c of genericDb.cooling) {
+    cooling[c.name] = { checked: document.getElementById("gk-cool-" + c.name).checked };
+  }
+  // Only a reaction whose *current* formula differs from the catalog's
+  // own default is worth round-tripping here -- everything else is
+  // already implied by the exported network/reaction name and would
+  // just bloat the file with 22 reactions' worth of formula text that
+  // reaction_db.json already provides on its own.
+  const rate_overrides = {};
+  for (const r of genericDb.reactions) {
+    if (r.formula !== originalFormulas[r.name]) rate_overrides[r.name] = { formula: r.formula };
+  }
+  const out = {
+    tool: "generic-checkbox",
+    T: parseFloat(document.getElementById("gk-T").value),
+    nH: parseFloat(document.getElementById("gk-nH").value),
+    dtf: parseFloat(document.getElementById("gk-dtf").value),
+    species, reactions, cooling,
+  };
+  if (Object.keys(rate_overrides).length) out.rate_overrides = rate_overrides;
+  const blob = new Blob([JSON.stringify(out, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "generic_selection.json";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+// A reaction/species/cooling name this page's current catalog doesn't
+// have is skipped rather than failing the whole import -- same
+// defensive convention importRateOverrides()/rates.js's importJson()
+// already use, since nothing here enforces the imported file actually
+// came from *this* catalog version.
+function importSelection(file) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    let data;
+    try {
+      data = JSON.parse(reader.result);
+    } catch (e) {
+      alert("Could not parse that file as JSON: " + e.message);
+      return;
+    }
+    for (const [name, override] of Object.entries(data.rate_overrides || {})) {
+      const entry = genericDb.reactions.find((r) => r.name === name);
+      if (entry && override.formula !== undefined) setReactionFormula(entry, override.formula);
+    }
+    for (const [name, s] of Object.entries(data.species || {})) {
+      const cb = document.getElementById("gk-sp-" + name);
+      const frac = document.getElementById(`gk-sp-${name}-frac`);
+      if (cb) cb.checked = !!s.checked;
+      if (frac && s.log_fraction !== undefined) {
+        frac.value = s.log_fraction;
+        frac.dispatchEvent(new Event("input")); // updates its own val readout
+      }
+    }
+    refreshSpeciesRowVisibility();
+    for (const [name, r] of Object.entries(data.reactions || {})) {
+      const cb = document.getElementById("gk-rxn-" + name);
+      if (cb) cb.checked = !!r.checked;
+    }
+    for (const [name, c] of Object.entries(data.cooling || {})) {
+      const cb = document.getElementById("gk-cool-" + name);
+      if (cb) cb.checked = !!c.checked;
+    }
+    for (const id of ["T", "nH", "dtf"]) {
+      if (data[id] === undefined) continue;
+      const el = document.getElementById("gk-" + id);
+      el.value = data[id];
+      el.dispatchEvent(new Event("input")); // updates its own val readout (see GENERIC_PAGE_TEMPLATE's inline script)
+    }
+    // Has the final say on every reaction/cooling checkbox above -- a
+    // species the import left unchecked still disables/unchecks
+    // anything that depends on it, the same rule every other checkbox
+    // change on this page already goes through.
+    refreshAvailability();
+    document.getElementById("gk-status").textContent = "loaded selection from file";
+  };
+  reader.readAsText(file);
+}
+
 async function initGenericPage() {
   const dbResp = await fetch("reaction_db.json");
   genericDb = loadReactionDb(await dbResp.json());
+  originalFormulas = Object.fromEntries(genericDb.reactions.map((r) => [r.name, r.formula]));
 
   buildSpeciesRows();
   buildReactionRows();
@@ -279,6 +430,15 @@ async function initGenericPage() {
   document.getElementById("gk-select-none-cool").addEventListener("click", () => {
     for (const c of genericDb.cooling) document.getElementById("gk-cool-" + c.name).checked = false;
     updateRunEnabled();
+  });
+  document.getElementById("gk-rates-import").addEventListener("change", (e) => {
+    if (e.target.files[0]) importRateOverrides(e.target.files[0]);
+    e.target.value = "";
+  });
+  document.getElementById("gk-export-selection").addEventListener("click", exportSelection);
+  document.getElementById("gk-import-selection").addEventListener("change", (e) => {
+    if (e.target.files[0]) importSelection(e.target.files[0]);
+    e.target.value = ""; // allow re-importing the same filename twice in a row
   });
 
   genericMod = await DengoGenericModule();

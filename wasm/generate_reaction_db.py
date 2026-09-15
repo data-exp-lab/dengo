@@ -33,6 +33,17 @@ optical-depth-approximation formula each), not from the symbolic
 equation alone -- so they're detected (not hardcoded by name) and
 skipped; see export_cooling_action()'s docstring.
 
+Every reaction also carries reaction_rates.py's own hand-transcribed
+Vega-expression-syntax formula (the same REACTION_RATES dict the
+per-network rates.html page already uses) -- generic_kinetics.js
+compiles it into a real callable and evaluates it directly rather than
+interpolating the `rate` table, and generic_ui.js can import a JSON
+file exported by rates.html's own "Download JSON" (edited formulas/
+presets/selections) to override it live. This is what actually lets
+the rate explorer's edits (documented there as "exploratory only...
+does not feed back into the compiled solver") feed something real,
+without needing a recompile.
+
 Run from anywhere:  python3 wasm/generate_reaction_db.py [output_dir]
 """
 import json
@@ -45,6 +56,7 @@ from sympy.printing import jscode
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from fiducial_networks import FIDUCIAL_NETWORKS, build_primordial  # noqa: E402
+from reaction_rates import REACTION_RATES  # noqa: E402
 from dengo.chemistry_constants import kboltz, mh  # noqa: E402
 
 # The compiled solvers' own rate tables use 1024 T-bins (see
@@ -150,15 +162,41 @@ def build_reaction_db(out_dir):
         if s.name != "ge"
     ]
 
+    # Every reaction also carries the same hand-transcribed, Vega-
+    # expression-syntax formula reaction_rates.py already hands the
+    # per-network rates.html page (build_rates_page(), generate_site.py)
+    # -- same REACTION_RATES dict, same reaction names (this is the
+    # primordial network too, so they line up 1:1), no new transcription.
+    # generic_kinetics.js compiles this into a real callable and prefers
+    # it over the downsampled `rate` table below whenever it's present
+    # (exact evaluation at the query T, not an interpolation) -- `rate`
+    # stays as a fallback for the (today: none) reaction REACTION_RATES
+    # doesn't cover, and so old exported reaction_db.json consumers don't
+    # break. `presets`/`default_preset` (only k13/k22 today) are passed
+    # through unchanged -- the rate explorer's own preset dropdown
+    # concept, reused rather than reinvented here.
     reactions = []
     for name, rxn in sorted(network.reactions.items()):
         rate = rxn.coeff_fn(network)[::DOWNSAMPLE]
-        reactions.append({
+        entry = {
             "name": name,
             "left": [[n, s.name] for n, s in rxn.left_side],
             "right": [[n, s.name] for n, s in rxn.right_side],
             "rate": rate.tolist(),
-        })
+        }
+        transcribed = REACTION_RATES.get(name)
+        if transcribed is not None:
+            if "presets" in transcribed:
+                entry["presets"] = transcribed["presets"]
+                entry["default_preset"] = transcribed["default_preset"]
+                # The top-level "formula" is documented (reaction_rates.py)
+                # as only a fallback for reactions with no presets at all
+                # -- resolve through presets[default_preset] here too,
+                # rather than assuming the two are kept in sync by hand.
+                entry["formula"] = transcribed["presets"][transcribed["default_preset"]]
+            else:
+                entry["formula"] = transcribed["formula"]
+        reactions.append(entry)
 
     cooling = []
     skipped = []

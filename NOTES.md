@@ -3962,3 +3962,111 @@ fix only changes behavior at the zero-density edge case it targets.
 Not merged, not pushed -- lives on `wasm-generic-kinetics-prototype`,
 explicitly exploratory (per direct instruction: no push, and no PyPI
 publish of any kind for this work).
+
+**2026-09-15, continued: rate-explorer integration + save/load for
+in-progress work.**
+
+Asked directly to explore integrating with the existing reaction-rate
+explorer (rates.html/rates.js) and to add a serialization step so
+in-progress work isn't lost on reload. Both landed.
+
+*Rate explorer integration.* `rates.html`/`rates.js`'s formula editing
+was documented as "exploratory only... does not feed back into the
+compiled solver" -- true of the *compiled* per-network solver (would
+need a recompile), but the generic engine here never needs one, and
+`reaction_rates.py`'s `REACTION_RATES` dict already has a hand-
+transcribed, already-verified (per that file's own docstring) Vega-
+expression formula for every one of the primordial network's 22
+reactions -- the same names as `generate_reaction_db.py`'s own export
+(both come from `build_primordial()`), so no new transcription was
+needed at all.
+
+- `generate_reaction_db.py`: each exported reaction now carries that
+  formula (resolved through `presets[default_preset]` for k13/k22,
+  matching what rates.js itself shows by default) alongside the
+  existing downsampled `rate` table.
+- `generic_kinetics.js`: new `setReactionFormula()` compiles a formula
+  into a real callable via `new Function()` -- exactly the same idiom
+  `compileCoolingAction()` already uses for cooling's `jscode` output,
+  just with `datum.T`/`tev`/`logtev`/`logT` as the callable's single
+  `datum` argument and `pow`/`exp`/`log`/`sqrt`/`min`/`max` aliased to
+  `Math.*` (confirmed directly: every formula in reaction_rates.py
+  sticks to exactly that subset, nothing Vega-specific beyond bare
+  function calls and ternaries). `activeRatesAtT()` now prefers a
+  reaction's compiled `rateFn` over interpolating its `rate` table
+  whenever one exists.
+- `generic_ui.js`: new "Import edited rates" control on the checkbox
+  tool, reading *the exact JSON rates.js's own "Download JSON" already
+  produces* (`{network, reactions: {name: {selected, formula, preset}}}`)
+  -- no new export format needed on the rates.html side, just a new
+  consumer here. Overrides the matching reaction's live formula and
+  checked state; `refreshAvailability()` still has the final say on
+  whether a reaction stays checked (its species must be too).
+- Nav links added both directions (`generic/index.html` <-> the
+  *primordial* network's `rates.html` specifically -- cool/
+  hydrogen_minimal's rates pages don't get the link, since their
+  reaction sets don't correspond 1:1 to this catalog).
+
+Verified: a Node-only check (no browser needed -- generic_kinetics.js
+has no DOM/window dependency) confirmed every reaction's compiled
+formula matches its table's own value at grid nodes to ~1e-16 relative
+error (both ultimately come from the same `coeff_fn`, so this is a
+wiring check, not a re-verification of reaction_rates.py's own
+transcriptions) -- and, at *off*-grid T, the formula and the old
+table-interpolation genuinely diverge (up to 57% at low T for k01),
+confirming `activeRatesAtT()` really does take the formula path now,
+not silently still interpolating -- and, as a real side benefit (not
+just a wiring nicety), this removes the one documented residual in
+README-generic.md's own correctness write-up (the "interpolation-
+scheme difference" against the compiled solver), since it's now an
+exact evaluation rather than an interpolation. A full headless-Chrome
+run against the actual compiled wasm integrator: baseline run,
+`importRateOverrides()` via a real File object correctly recompiling
+and changing a reaction's rate, and the hot-atomic-cooling sign test
+(T: 1e5 K -> 6.209e3 K, the exact figure from the earlier verification)
+all still pass with formula-based rates active. No console errors.
+
+*Serialization.* Two project files, one per tool that needed it most:
+
+- `construct.html` (the one that actually mattered -- hand-written
+  Python per reaction is real, losable work): "Export project"/"Import
+  project" buttons. Export walks `#ck-cards` in DOM order, pulling each
+  CodeMirror instance's own source, plus T/total-time and (if a build
+  has happened at least once) the current per-species initial values.
+  Import clears every existing card, re-adds each saved one via the
+  existing `addReactionCard(source)`, restores T/total-time, and -- if
+  initial values were saved -- automatically re-runs "Build network"
+  (the real Pyodide/wheel/dengo path, not skipped) before restoring
+  them into the freshly-recreated inputs. `buildNetwork()` itself now
+  disables "Run" up front rather than only on success, so a *later*
+  failed rebuild (e.g. a since-broken imported card) can't leave "Run"
+  falsely enabled from an earlier successful build -- found directly by
+  testing exactly that sequence (build once successfully, then import a
+  deliberately broken project) before fixing it, not assumed safe.
+- `generic/index.html`: "Export selection"/"Import selection" buttons
+  covering every species/reaction/cooling checkbox, the fraction
+  sliders, T/n_H/total-time, and -- reusing the rate-formula work above
+  -- any reaction whose live formula differs from the catalog's own
+  default (snapshotted once at load as `originalFormulas`), so an
+  imported rate-explorer override round-trips through a saved selection
+  file too, not just a live session.
+
+Verified end-to-end in headless Chrome against the real compiled wasm
+integrator for both: for construct.html, build+run the two starter
+cards, add a third (C -> D) and change T, export, reload (confirmed
+this actually loses the third card and the T change), import the saved
+project back through the real `importProject()`/File path, confirm
+every card/T/species-initial value came back and the network still
+runs correctly. For generic/index.html, mutate species checks/T/n_H/a
+fraction slider/reaction and cooling checks/a rate-formula override,
+export, reload (confirmed loses the changes), import back, confirm
+every field was restored and a run afterward still succeeds. One
+apparent mismatch during this (an edited fraction slider reading back
+as 0 instead of the set value) turned out to be the test's own fault,
+not the feature's: the test set a non-step-aligned slider value, which
+`<input type="range" step="0.1">` silently snaps to the nearest valid
+step *at set-time*, before export ever ran -- confirmed by re-running
+with a step-aligned value, which round-tripped correctly.
+
+Still not merged, not pushed -- same branch, same "exploratory, no
+push" standing instruction.
