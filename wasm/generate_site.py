@@ -661,6 +661,24 @@ CONSTRUCT_PAGE_TEMPLATE = """<!doctype html>
       <label>total time (s)</label>
       <input type="number" step="any" id="ck-dtf" value="50">
     </div>
+    <div class="row-inline">
+      <label>Initial conditions</label>
+      <select id="ck-ic-preset">
+        <option value="">— custom (leave as-is) —</option>
+        <option value="bg-z20">IGM background (z ≈ 20)</option>
+        <option value="bg-z1000">IGM background (z ≈ 1000)</option>
+        <option value="virial-shock">Virial shock (10⁶ M☉ minihalo)</option>
+        <option value="protostellar-disk">Primordial protostellar disk</option>
+      </select>
+    </div>
+    <p class="preset-note">The same physically-motivated presets as the
+      main widget's own (see its "Initial conditions" dropdown) --
+      sets T and every matching species' initial value here (n_H
+      &times; that preset's fraction); a species this network has that
+      the preset has no fraction for still gets set, to a trace floor,
+      same as there. Needs a build first (species inputs below don't
+      exist until then); a species the preset specifies but this
+      network doesn't have is simply not applicable here.</p>
     <div id="ck-species-inputs"></div>
 
     <div class="sweep-actions">

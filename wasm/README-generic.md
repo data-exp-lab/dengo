@@ -133,6 +133,13 @@ bug found and fixed along the way, and what was verified end-to-end
 (a real Emscripten rebuild, then all three examples loaded and run
 through the actual dropdown UI in headless Chrome).
 
+An "Initial conditions" dropdown sits alongside "Load example",
+applying to whatever's currently built either way -- app.js's own
+`IC_PRESETS` (already loaded on this page, not re-authored here),
+adapted from that page's log-fraction sliders to this one's absolute-
+density inputs (`fraction * preset.nH`), same species-defaulting and
+H2-folding rules. See NOTES.md's matching 2026-09-15 entry.
+
 ## Integration with the reaction-rate explorer (rates.html)
 
 `rates.html`/`rates.js` (the per-network reaction-rate viewer/editor)

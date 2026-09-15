@@ -426,6 +426,46 @@ async function loadExampleNetwork(key) {
   await applyProjectData(data);
 }
 
+// Reuses app.js's own IC_PRESETS/applyPreset() data directly (app.js
+// is loaded on this page before construct_ui.js, same top-level scope
+// -- see CONSTRUCT_PAGE_TEMPLATE) rather than re-authoring the same
+// four physically-motivated (nH, T, per-species fraction) bundles here
+// -- one set of numbers, one place they could go stale. Mirrors
+// applyPreset()'s own behavior as closely as this tool's different
+// input shape allows: that one sets log-fraction *sliders*
+// (Math.log10(frac)); construct.html's own species-initial inputs are
+// plain number fields holding an absolute density, so this sets
+// `frac * preset.nH` directly instead -- same source data, same "every
+// species gets set, a preset-less one still gets the 1e-12 trace
+// floor rather than being left alone" rule, just adapted to this
+// tool's own units.
+function applyIcPreset(key) {
+  const preset = IC_PRESETS[key];
+  if (!preset) return;
+  if (!constructDb) {
+    setStatus("Build a network first -- initial-value inputs don't exist until then.");
+    return;
+  }
+  document.getElementById("ck-T").value = preset.T;
+  // Same H2-folding rule as applyPreset(): a network with no H2_1
+  // species can't represent the preset's molecular-hydrogen fraction
+  // at all -- folded back into atomic H so the total hydrogen budget
+  // stays physically sensible rather than partly vanishing.
+  const hasH2 = constructDb.species.some((sp) => sp.name === "H2_1");
+  let applied = 0;
+  for (const sp of constructDb.species) {
+    const el = document.getElementById("ck-init-" + sp.name);
+    if (!el) continue; // this network doesn't have that species -- nothing to set
+    let frac = (preset.fractions && preset.fractions[sp.name] !== undefined) ? preset.fractions[sp.name] : 1e-12;
+    if (sp.name === "H_1" && !hasH2 && preset.fractions) {
+      frac += 2 * ((preset.fractions.H2_1 || 0) + (preset.fractions.H2_2 || 0));
+    }
+    el.value = frac * preset.nH;
+    applied++;
+  }
+  setStatus(`applied "${key}" initial conditions (T=${preset.T} K, n_H=${preset.nH} cm⁻³, ${applied} species set) -- click "Run" to see it`);
+}
+
 function initConstructPage() {
   document.getElementById("ck-add-card").addEventListener("click", () => addReactionCard());
   document.getElementById("ck-build").addEventListener("click", buildNetwork);
@@ -442,6 +482,14 @@ function initConstructPage() {
       const key = e.target.value;
       e.target.value = ""; // back to the placeholder -- this is a one-shot action, not a persistent mode
       if (key) loadExampleNetwork(key);
+    });
+  }
+  const icSelect = document.getElementById("ck-ic-preset");
+  if (icSelect) {
+    icSelect.addEventListener("change", (e) => {
+      const key = e.target.value;
+      e.target.value = ""; // one-shot action, same convention as ck-load-example above
+      if (key) applyIcPreset(key);
     });
   }
   setStatus("click “Build network” to load Pyodide and run your reactions");

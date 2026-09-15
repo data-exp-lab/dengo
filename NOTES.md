@@ -4192,3 +4192,37 @@ ionization recombines, H_2/de: 1 -> 0.053) -- a real chemistry result,
 not just a non-crashing one.
 
 Still not merged, not pushed -- same branch, same standing instruction.
+
+**2026-09-15, continued: construct.html's initial conditions, from the
+main widget's own named presets.**
+
+Asked directly ("have the initial conditions be something that we
+used in the other network... having a hard time evaluating") which of
+a few readings was meant; confirmed: reuse app.js's own `IC_PRESETS`
+("IGM background z≈20/z≈1000", "virial shock", "protostellar disk") --
+physically-motivated, already-validated bundles -- rather than the raw
+default_ics-derived numbers construct.html's fiducial-network examples
+seed from. Not re-authored: `IC_PRESETS`/its data live only in app.js,
+already loaded on construct.html before construct_ui.js (same
+top-level scope), so the new `applyIcPreset()` just reads it directly.
+
+New "Initial conditions" dropdown, independent of "Load example" --
+applies to whatever network is currently built, whichever way it got
+there (a loaded example or hand-written cards). Mirrors app.js's own
+`applyPreset()` as closely as construct.html's different input shape
+allows: that one sets log-fraction sliders; here each `ck-init-<name>`
+input holds an absolute density, so this sets `fraction * preset.nH`
+directly instead. Same underlying rules, applied to the different unit:
+a species this network has that the preset has no fraction for still
+gets set (to a trace floor), not left alone; a network with no H2_1
+species gets the preset's molecular-hydrogen fraction folded back into
+atomic H (2 nuclei per H2 molecule) so the hydrogen budget stays
+physically sensible rather than partly vanishing.
+
+Verified: a real Emscripten rebuild, then headless Chrome loading the
+full primordial example and applying "protostellar disk" -- T and
+every one of 9 species' initial value matched the expected
+`fraction * n_H` exactly, a run afterward completed with zero console
+errors; separately, loading hydrogen_minimal (no H2 species) and
+applying the same preset confirmed the H2-folding math lands exactly
+on H_1's expected combined value.
