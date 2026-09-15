@@ -14,6 +14,18 @@ let mod, idx, speciesNames;
 let init, step, statePtr, rhsPtr, temperature;
 let currentMode = "freefall"; // free-fall collapse is the primary case this widget targets -- see NOTES.md
 let temperatureDisplayMode = "T"; // "T" (K) or "ge" (specific internal energy, erg/g)
+// Cool mode's time-axis panels (temperature/thermal-energy, ionization/H2,
+// species) default to linear -- most runs here span at most a few
+// dynamical/cooling times, where linear reads more naturally than a log
+// axis compressing the interesting late-time behavior into a sliver at
+// the right edge. "log" is still one click away for the runs that do
+// span many decades of time (e.g. a very cold/slowly-recombining start).
+// Only meaningful when xKind === "time" (cool mode) -- free-fall mode's
+// x-axis is density, never time, so this has no effect there; free-fall's
+// own *density-vs-time* panel (densityTimePanel(), plotting lookback time
+// on its y-axis) is deliberately left alone too, per its own existing
+// comment on why plain log already suits it there.
+let timeScaleMode = "linear"; // "linear" or "log"
 let lastResult = null; // the current mode's most recent full run (redraw()'s own result), for CSV export
 let pageTitle = "dengo"; // network title, for the exported CSV's filename only
 let runView = null; // the current run-view's Vega View object, re-set on every redraw()
@@ -639,10 +651,12 @@ function metricPanel({ data, xField, yField, xKind, yTitle, tooltip, extra, brus
     labelExpr: xKind === "time" ? TIME_LABEL_EXPR : undefined,
   };
   // Time (unlike density) can legitimately be exactly 0 now that the
-  // initial condition itself is plotted -- symlog (linear near zero,
-  // log further out) shows that point instead of silently dropping it
-  // the way a pure log scale would.
-  const xScale = { type: xKind === "time" ? "symlog" : "log" };
+  // initial condition itself is plotted. Linear is the default for a
+  // time axis (see timeScaleMode above) and handles t=0 trivially; the
+  // "log" toggle uses symlog rather than a pure log scale specifically
+  // so that point stays visible (linear near zero, log further out)
+  // instead of being silently dropped.
+  const xScale = { type: xKind === "time" ? (timeScaleMode === "log" ? "symlog" : "linear") : "log" };
   // Even the panels with no *visible* points (everything except the
   // zoomed one) still get real, invisible point geometry here -- not
   // just a bare `"line"` mark -- so their tooltip has something to
@@ -771,7 +785,7 @@ function ionPanel(xKind, rows, width, zoomDomain) {
       encoding: {
         x: {
           field: "x", type: "quantitative",
-          scale: { type: xKind === "time" ? "symlog" : "log" },
+          scale: { type: xKind === "time" ? (timeScaleMode === "log" ? "symlog" : "linear") : "log" },
           axis: {
             title: xKind === "time" ? "t (s)" : "n (cm⁻³)", titleFontSize: 10, labelOverlap: "greedy",
             labelAngle: xKind === "time" ? -40 : 0,
@@ -819,7 +833,7 @@ function speciesPanel(xKind, rows, width, zoomDomain) {
       encoding: {
         x: {
           field: "x", type: "quantitative",
-          scale: { type: xKind === "time" ? "symlog" : "log" },
+          scale: { type: xKind === "time" ? (timeScaleMode === "log" ? "symlog" : "linear") : "log" },
           axis: {
             title: xKind === "time" ? "t (s)" : "n (cm⁻³)", titleFontSize: 10, labelOverlap: "greedy",
             labelAngle: xKind === "time" ? -40 : 0,
@@ -1290,6 +1304,11 @@ function setMode(mode) {
   for (const id of ["ntarget-row", "collapse-rate-row", "ff-step-row", "shock-row"]) {
     document.getElementById(id).style.display = mode === "freefall" ? "" : "none";
   }
+  // The time-scale toggle only affects time-axis panels, which only
+  // exist in cool mode (free-fall's shared x-axis is density) -- hidden
+  // rather than just inert in free-fall mode, so it doesn't look like a
+  // live control that's actually doing nothing.
+  document.getElementById("time-scale-row").style.display = mode === "cool" ? "" : "none";
   scheduleRedraw();
 }
 
@@ -1479,6 +1498,14 @@ function setTemperatureDisplayMode(mode) {
   scheduleRedraw();
 }
 
+// See timeScaleMode above -- only affects cool mode's time-axis panels.
+function setTimeScaleMode(mode) {
+  timeScaleMode = mode;
+  document.getElementById("time-scale-linear").classList.toggle("active", mode === "linear");
+  document.getElementById("time-scale-log").classList.toggle("active", mode === "log");
+  scheduleRedraw();
+}
+
 function initPage(config) {
   document.getElementById("page-title").textContent = config.title;
   document.getElementById("T").value = Math.log10(config.default_T);
@@ -1499,6 +1526,8 @@ function initPage(config) {
   document.getElementById("mode-freefall").addEventListener("click", () => setMode("freefall"));
   document.getElementById("T-mode-T").addEventListener("click", () => setTemperatureDisplayMode("T"));
   document.getElementById("T-mode-ge").addEventListener("click", () => setTemperatureDisplayMode("ge"));
+  document.getElementById("time-scale-linear").addEventListener("click", () => setTimeScaleMode("linear"));
+  document.getElementById("time-scale-log").addEventListener("click", () => setTimeScaleMode("log"));
   document.getElementById("ic-preset").addEventListener("change", (e) => applyPreset(e.target.value));
   for (const id of ["nH", "T", "dtf", "ntarget", "nshock", "mach", "collapse-rate", "tolerance", "ff-step"]) {
     document.getElementById(id).addEventListener("input", scheduleRedraw);
