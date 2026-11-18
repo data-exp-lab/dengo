@@ -104,8 +104,22 @@ n = 10⁻² to 10¹³ cm⁻³ and T = 30 to 2×10⁴ K.
   - cooling times agree in sign for every cell, with a 0.6% median
     difference.
 
+**Inside Enzo:** unmodified enzo-dev builds and runs against this library.
+`examples/enzo_grackle_shim/` has the setup, scripts and results: a
+primordial CoolingTest and a one-zone free-fall collapse, compared with
+the real libgrackle.
+
 Chemistry after a step is not asserted against Grackle, because the two
-codes use different rate fits. Known differences from the comparison grid:
+codes use different rate fits. Known differences in dengo's physics, from
+the comparison grid and the Enzo runs:
+
+- **No collisional ionization by neutral atoms.** dengo lacks Grackle's
+  k57 (H + H) and k58 (H + He). Fully neutral gas heated to ~10⁴ K
+  therefore stays neutral, because there are no electrons to seed
+  electron-impact ionization.
+- **Free-fall collapse above n_H ≈ 10¹³ cm⁻³:** dengo dissociates its H2
+  and heats to ~5800 K, where Grackle stays molecular at ~2000 K. Below
+  that density the two tracks agree to a few percent.
 
 - **Tables cover 10 K to 10⁸ K** in dengo, against 1 K to 10⁹ K in
   Grackle. Rates outside that range are held at the edge values.

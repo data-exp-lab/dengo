@@ -8,6 +8,29 @@ and dengo's own generated C template (`src/dengo/templates/cython_solver/
 cython_solver.C.template`, `src/dengo/BE_chem_solve.C`) directly rather
 than going from memory. No code changed to produce this document.
 
+## Update, 2026-11-18: the C-level drop-in now exists
+
+Option (A) below, the boundary adapter, has been built in two layers:
+
+1. **`ChemicalNetwork.write_c_api()`** generates a grid-level C API for any
+   network: one array per species over a ghost-zone-padded grid, with
+   per-field unit factors and independent per-cell sub-stepping (OpenMP
+   over cells).
+2. **`dengo.grackle_shim`** sits on top of it. It builds a `libgrackle`
+   implementing Grackle 3.4.1's full public C API, backed by the
+   primordial network. See `src/dengo/grackle_shim/README.md`.
+
+Unmodified Enzo builds and runs against it; `examples/enzo_grackle_shim/`
+has the setup and results. All three mismatches listed below are handled
+at that boundary.
+
+The remaining differences are in dengo's physics, not the interface:
+
+- dengo has no k57/k58 collisional ionization by neutral atoms;
+- it diverges from Grackle in free-fall collapse above n_H ≈ 10¹³ cm⁻³.
+
+The rest of this document is the original scoping, kept for the record.
+
 ## Short answer
 
 **Python-level: yes, for a real but narrower physics scope, and it's
