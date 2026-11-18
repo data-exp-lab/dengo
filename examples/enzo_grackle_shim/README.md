@@ -77,10 +77,20 @@ Things that bit along the way, none of them dengo-specific:
 
 ### Physics differences (in dengo, not the shim)
 
-- **Above n_H ≈ 10¹³ cm⁻³, dengo dissociates its H2.** It heats to about
-  5800 K and re-forms H2 by ~10¹⁶ cm⁻³; Grackle stays molecular at
-  ~2000 K. The cause hasn't been found yet. This is the protostellar
-  regime, so it matters for Pop III collapse.
+- **Above n_H ≈ 10¹³ cm⁻³, dengo dissociates its H2 under this driving.**
+  It heats to about 5800 K and re-forms H2 by ~10¹⁶ cm⁻³; Grackle stays
+  molecular at ~2000 K. This is the protostellar regime, so it matters for
+  Pop III collapse.
+  - **Not the shim.** dengo's pre-existing Python compat layer (Cython
+    `Solver`, no C library) gives the same track under the same driver.
+  - **Different from September.** NOTES.md's decoupled comparison found
+    dengo staying molecular (f_H2 ≈ 0.98–1.0) through 10¹³–3×10¹⁵ cm⁻³
+    within ~2–34% of Grackle in T. That run used a different driver and
+    initial state. Enzo's one-zone test heats with a fixed Gamma = 5/3
+    and starts with helium fully ionized.
+  - **Open question:** which part of this driving tips dengo, and not
+    Grackle, into dissociation. dengo already runs ~3–10% hotter than
+    Grackle at 10¹²–10¹³ cm⁻³, just before the runaway.
 
   | n_H [cm⁻³] | Enzo + dengo: T, f_H2 | driver + Grackle: T, f_H2 |
   |---|---|---|
