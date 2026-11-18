@@ -504,7 +504,7 @@ def run_{{ solver_name }}(ics, double dtf, int niter=10000,
         Relative tolerance and abundance floor used by the Newton solver.
     adaptive_step : bool
         Grow the internal step by 2x after each success, halve it on
-        failure (down to 1e-15 of dtf, at which point integration stops).
+        failure (down to 1e-25 of dtf, at which point integration stops).
     intermediate : bool
         If True, also return the full (cell, niter) trajectory.
     redshift : float
