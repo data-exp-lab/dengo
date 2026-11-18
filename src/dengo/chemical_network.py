@@ -1026,3 +1026,33 @@ class ChemicalNetwork(object):
             f.write(template_inst.render(**template_vars))
 
         self._write_solver_tables_bin(output_dir, solver_name)
+
+    def write_c_api(self, solver_name, output_dir="."):
+        """Generate the solver core plus a grid-level C API for embedding
+        this network in a compiled simulation code -- no Python or Cython
+        at build or run time.
+
+        Writes ``{solver_name}_solver.h``/``.C`` and ``BE_chem_solve.C``
+        (identical to ``write_cython_solver()``'s), ``{solver_name}_c_api.h``
+        /``.C`` (``{solver_name}_create``/``_solve_grid``/
+        ``_cooling_time_grid``/``_temperature_grid``: one array per
+        species over a ghost-zone-padded 1-3D grid, each interior cell
+        stepped independently -- see the generated header), and
+        ``{solver_name}_tables.bin``. Compile the three ``.C`` files with
+        any C++ compiler (add ``-fopenmp`` to spread cells over threads).
+        """
+        self.update_ode_species()
+        if not os.path.isdir(output_dir):
+            os.makedirs(output_dir)
+
+        env = self._make_jinja_env()
+        template_vars = dict(network=self, solver_name=solver_name)
+        self._write_solver_core(solver_name, output_dir, env, template_vars)
+
+        for iname, oname in [("c_api/c_api.h.template", "%s_c_api.h" % solver_name),
+                             ("c_api/c_api.C.template", "%s_c_api.C" % solver_name)]:
+            template_inst = env.get_template(iname)
+            with open(os.path.join(output_dir, oname), "w") as f:
+                f.write(template_inst.render(**template_vars))
+
+        self._write_solver_tables_bin(output_dir, solver_name)
