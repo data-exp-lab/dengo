@@ -1,0 +1,119 @@
+/***********************************************************************
+/
+/ Grackle variable types
+/
+/
+/ Copyright (c) 2013, Enzo/Grackle Development Team.
+/
+/ Distributed under the terms of the Enzo Public Licence.
+/
+/ The full license is in the file LICENSE, distributed with this 
+/ software.
+************************************************************************/
+
+// this should go before the header-guard
+#ifndef GRIMPL_PUBLIC_INCLUDE
+  #include "grackle_misc.h"
+  GRIMPL_COMPTIME_WARNING(
+    "You are using a deprecated header file; include the public \"grackle.h\" "
+    "header file instead! In a future Grackle version, \"grackle_types.h\" "
+    "may cease to exist (or contents may change in an incompatible manner)."
+  );
+#endif
+
+
+#ifndef __GRACKLE_TYPES_H__
+#define __GRACKLE_TYPES_H__
+/***********************************************************************
+/  
+/ VARIABLE TYPES
+/
+************************************************************************/
+
+#include "grackle_float.h"
+
+// the following include-directive only exists because the definition of
+// the code_units type got moved and we don't want to break anybody's
+// code who expect that type to be defined in this file
+#include "grackle_chemistry_data.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif /* __cplusplus */
+
+#ifdef GRACKLE_FLOAT_4
+#define gr_float float
+#endif
+
+#ifdef GRACKLE_FLOAT_8
+#define gr_float double
+#endif
+
+#if defined(GRACKLE_FLOAT_4) == defined(GRACKLE_FLOAT_8)
+#error "Both GRACKLE_FLOAT_4 and GRACKLE_FLOAT_8 are defined. Only one can be defined."
+#endif
+
+typedef struct
+{
+
+  int grid_rank;
+  int *grid_dimension;
+  int *grid_start;
+  int *grid_end;
+
+  gr_float grid_dx;
+
+  gr_float *density;
+  gr_float *HI_density;
+  gr_float *HII_density;
+  gr_float *HM_density;
+  gr_float *HeI_density;
+  gr_float *HeII_density;
+  gr_float *HeIII_density;
+  gr_float *H2I_density;
+  gr_float *H2II_density;
+  gr_float *DI_density;
+  gr_float *DII_density;
+  gr_float *HDI_density;
+  gr_float *e_density;
+  gr_float *metal_density;
+  gr_float *dust_density;
+
+  gr_float *internal_energy;
+  gr_float *x_velocity;
+  gr_float *y_velocity;
+  gr_float *z_velocity;
+
+  gr_float *volumetric_heating_rate;
+  gr_float *specific_heating_rate;
+
+  gr_float *temperature_floor;
+
+  gr_float *RT_heating_rate;
+  gr_float *RT_HI_ionization_rate;
+  gr_float *RT_HeI_ionization_rate;
+  gr_float *RT_HeII_ionization_rate;
+  gr_float *RT_H2_dissociation_rate;
+
+  gr_float *H2_self_shielding_length;
+  gr_float *H2_custom_shielding_factor;
+
+  gr_float *isrf_habing;
+
+} grackle_field_data;
+
+
+typedef struct
+{
+
+  const char* version;
+  const char* branch;
+  const char* revision;
+
+} grackle_version;
+
+#ifdef __cplusplus
+} /* extern "C" */
+#endif /* __cplusplus */
+
+#endif /* __GRACKLE_TYPES_H__ */
