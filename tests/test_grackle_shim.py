@@ -100,7 +100,7 @@ def dengo_reference(mod, res, dt, z):
         for g in FIELDS:
             s.state[0, mod.SPECIES_INDEX[DENGO[g]]] = f[g] * fac[g]
         s.state[0, mod.SPECIES_INDEX["ge"]] = f["internal_energy"] * fac["internal_energy"]
-        s.step_inplace(dt)
+        s.step_inplace(dt, niter=10000, first_step=dt / 200.0)
         new = {g: s.state[0, mod.SPECIES_INDEX[DENGO[g]]] / fac[g] for g in FIELDS}
         new["internal_energy"] = s.state[0, mod.SPECIES_INDEX["ge"]] / fac["internal_energy"]
         s.close()

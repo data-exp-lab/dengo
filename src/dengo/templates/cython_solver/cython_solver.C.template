@@ -494,7 +494,8 @@ void {{ solver_name }}_free_scratch({{ solver_name }}_scratch *sc)
 double {{ solver_name }}_advance({{ solver_name }}_data *data,
                                  {{ solver_name }}_scratch *sc,
                                  double *input, int dims, double dtf,
-                                 int niter, double reltol, double floor_value,
+                                 int niter, double dt_first,
+                                 double reltol, double floor_value,
                                  int adaptive_step, int *n_steps,
                                  {{ solver_name }}_step_callback callback,
                                  void *callback_ctx)
@@ -513,7 +514,7 @@ double {{ solver_name }}_advance({{ solver_name }}_data *data,
         sc->prev[i] = input[i];
     }
 
-    double dt = dtf / niter;
+    double dt = (dt_first > 0.0) ? fmin(dt_first, dtf) : dtf / niter;
     double ttot = 0.0;
     int it = 0;
     while (it < niter && ttot < dtf) {

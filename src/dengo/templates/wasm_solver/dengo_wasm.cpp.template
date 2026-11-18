@@ -76,7 +76,7 @@ double *dengo_wasm_rhs_ptr() {
    bit-for-bit identical on the same initial conditions. */
 EMSCRIPTEN_KEEPALIVE
 int dengo_wasm_step(double dtf, int niter, double reltol) {
-    double ttot = {{ solver_name }}_advance(g_data, g_scratch, g_input, 1, dtf, niter,
+    double ttot = {{ solver_name }}_advance(g_data, g_scratch, g_input, 1, dtf, niter, 0.0,
                                             reltol, 1.0e-20, 1, NULL, NULL, NULL);
     return ttot >= dtf;
 }

@@ -12,6 +12,9 @@ struct {{ solver_name }}_context {
 void {{ solver_name }}_default_options({{ solver_name }}_options *opts)
 {
     opts->niter = 10000;
+    /* The step-size policy dengo was tuned and benchmarked with: start at
+       dt/200 and double (NOTES.md, 2026-09). niter is only the cap. */
+    opts->first_step_fraction = 1.0 / 200.0;
     opts->reltol = 1.0e-5;
     opts->floor_value = 1.0e-20;
     opts->use_cie_optical_depth = 1;
@@ -155,6 +158,7 @@ int {{ solver_name }}_solve_grid({{ solver_name }}_context *ctx,
                 gather(grid, idx, u);
                 reset_temperature_guess(data);
                 double ttot = {{ solver_name }}_advance(data, sc, u, 1, dt, ctx->opts.niter,
+                                                        ctx->opts.first_step_fraction * dt,
                                                         ctx->opts.reltol, ctx->opts.floor_value,
                                                         1, NULL, NULL, NULL);
                 if (ttot < dt) failed++;
