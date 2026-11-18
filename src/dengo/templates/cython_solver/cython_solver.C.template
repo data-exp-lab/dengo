@@ -542,7 +542,14 @@ double {{ solver_name }}_advance({{ solver_name }}_data *data,
                 input[i] = sc->prev[i];
                 sc->scale[i] = fmax(fabs(sc->prev[i]), floor_value);
             }
-            if (dt < 1.0e-15 * dtf) break;
+            /* Give up only once the sub-step is absurdly small relative
+               to dtf. This used to be 1e-15*dtf, which for a long dtf
+               (~1e12-1e13 s, e.g. a hydro step) is ~ms -- and a strongly
+               out-of-equilibrium dense cell can legitimately need
+               sub-ms first steps, so it failed or not depending on where
+               the halvings happened to land. Only affects paths that
+               would otherwise have given up. */
+            if (dt < 1.0e-25 * dtf) break;
         }
     }
     if (n_steps != NULL) *n_steps = it;
