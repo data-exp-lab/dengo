@@ -113,6 +113,8 @@ void {{ solver_name }}_free_data({{ solver_name }}_data *data);
 typedef struct {{ solver_name }}_scratch {
     int dims;
     double *prev, *scale, *atol, *rtol, *u0, *s, *gu, *Ju;
+    /* running totals over every _advance() call made with this scratch */
+    long long n_accepted, n_rejected;
 } {{ solver_name }}_scratch;
 
 {{ solver_name }}_scratch *{{ solver_name }}_alloc_scratch(int dims);

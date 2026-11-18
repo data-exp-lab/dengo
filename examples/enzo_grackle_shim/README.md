@@ -101,22 +101,45 @@ Things that bit along the way, none of them dengo-specific:
 
 ### Performance
 
-dengo-grackle is far slower than real Grackle on the CoolingTest
-(1775 cells × 1289 cycles, wall time for the whole run):
+Measured on the CoolingTest: 1775 cells × 1289 cycles, about 2.29 M
+cell-solves. `DENGO_GRACKLE_STATS=1` makes the library print its own
+counters at exit.
 
-| Library | Wall time |
-|---|---|
-| Real Grackle 3.4.1 (gracklepy wheel build) | 14 s |
-| dengo-grackle, `OMP_NUM_THREADS=1` | 577 s (~250 µs per cell per step) |
-| dengo-grackle, 4 threads | 169 s |
-| dengo-grackle, 24 threads | 56 s |
+| Setup | Wall time | Per cell-solve |
+|---|---|---|
+| Real Grackle 3.4.1 (gracklepy wheel build, serial) | 14 s | ~5 µs (including Enzo) |
+| dengo-grackle, 1 thread | 170 s | 70.9 µs |
+| dengo-grackle, 24 threads | 24 s | 6.5 µs |
 
-That's roughly 40× slower per core. It hasn't been profiled. The likely
-cause is the sub-stepping policy (`_advance`). Each call starts at
-`dt / max_iterations`, which with Grackle's default `max_iterations =
-10000` is `dt/10⁴`, and only doubles from there. So every cell takes at
-least ~14 implicit sub-steps per hydro step, even when a single step
-would converge. Starting at the full `dt` and halving on failure is the
-obvious thing to try. That changes how robust the solver is, so it's
-left for a separate change with its own validation.
+How these numbers were checked:
 
+- **Sub-steps match standalone.** Inside Enzo, each cell-solve takes
+  8.10 accepted + 0.13 rejected sub-steps on average. dengo's standalone
+  Cython `Solver`, run on the same states with the same `dt`, takes 8.10.
+- **The shim adds only ~4%.** Before the OpenMP fix below, standalone
+  cost 146 µs per cell-solve against 153 µs inside Enzo.
+- **Setup is not repeated in any way that matters.** Per-call setup (the
+  table copy) is 0.1% of instructions (valgrind callgrind).
+- **Caches are not a problem.** Cachegrind shows an L1-data miss rate of
+  1.0% and a last-level miss rate of 0.0%. The 2.4% instruction-cache miss
+  rate comes mostly from the long, generated Jacobian.
+
+**Fixed, 2026-11-18:** about half the cost was nested-OpenMP overhead.
+The C API parallelizes over cells, and inside that region every per-cell
+RHS, Jacobian and rate call entered its own `omp parallel` region
+(serialized by its `if` clause). libgomp still sets up, and allocates, a
+team for each of those, 5.8 M times in a 30-cycle run. The library now
+compiles the solver core without OpenMP; only the loop over cells is
+parallel. That cut the cost from 153 to 71 µs per cell-solve (2.15×),
+with identical results. Earlier fixes in the same session: the first
+sub-step now starts at `dt/200`, as dengo was tuned (it had been
+`dt/max_iterations`); before both fixes the single-thread run took 577 s.
+
+**Remaining gap: ~12× per core.** Most cells in this test are easy, low
+density and close to equilibrium. Grackle crosses those in about one
+sub-cycle, while dengo's policy always takes about 8 implicit sub-steps
+(doubling from `dt/200`), at ~8.7 µs each. Letting easy cells try larger
+first steps would close much of that. It changes the solver's
+robustness, so it hasn't been done here. The September C benchmark, where
+dengo was faster at grid scale, used a stiff n = 10¹³ cm⁻³ state, where
+Grackle needs many sub-cycles too.

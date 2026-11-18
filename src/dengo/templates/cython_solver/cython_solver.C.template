@@ -480,6 +480,8 @@ void ensure_electron_consistency(double *input, int nstrip, int nchem)
     sc->s     = (double *) malloc(dims * n * sizeof(double));
     sc->gu    = (double *) malloc(dims * n * sizeof(double));
     sc->Ju    = (double *) malloc(dims * n * n * sizeof(double));
+    sc->n_accepted = 0;
+    sc->n_rejected = 0;
     return sc;
 }
 
@@ -537,7 +539,9 @@ double {{ solver_name }}_advance({{ solver_name }}_data *data,
                at no measurable accuracy cost -- see NOTES.md. */
             if (adaptive_step && ttot < dtf) dt = fmin(dt * 2.0, dtf - ttot);
             it += 1;
+            sc->n_accepted++;
         } else {
+            sc->n_rejected++;
             dt /= 2.0;
             for (int i = 0; i < total; i++) {
                 input[i] = sc->prev[i];

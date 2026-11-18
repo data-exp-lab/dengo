@@ -355,6 +355,23 @@ static int fill_k1_k2(const chemistry_data *c, chemistry_data_storage *rates,
     return SUCCESS;
 }
 
+/* DENGO_GRACKLE_STATS=1 in the environment: at exit, report the work
+   done by solve_chemistry() through the global API (cells, sub-steps,
+   time), to check the per-cell cost inside a host code. */
+static void print_stats_at_exit(void)
+{
+    registry_entry *e = lookup_entry(&grackle_rates);
+    if (e == NULL) return;
+    long long st[3];
+    double sec;
+    primordial_get_stats(e->ctx, st, &sec);
+    fprintf(stderr, "dengo-grackle stats: %lld cell-solves, %.2f accepted + %.2f "
+            "rejected sub-steps per cell-solve, %.3f s in solve_chemistry "
+            "(%.2f us per cell-solve)\n", st[0],
+            st[0] ? (double) st[1] / st[0] : 0.0, st[0] ? (double) st[2] / st[0] : 0.0,
+            sec, st[0] ? 1e6 * sec / st[0] : 0.0);
+}
+
 int local_initialize_chemistry_data(chemistry_data *my_chemistry,
                                     chemistry_data_storage *my_rates,
                                     code_units *my_units)
@@ -423,6 +440,12 @@ int initialize_chemistry_data(code_units *my_units)
     if (grackle_data == NULL) {
         fprintf(stderr, "dengo-grackle: call set_default_chemistry_parameters() first.\n");
         return FAIL;
+    }
+    static int stats_registered = 0;
+    const char *env = getenv("DENGO_GRACKLE_STATS");
+    if (!stats_registered && env != NULL && env[0] != '\0' && env[0] != '0') {
+        atexit(print_stats_at_exit);
+        stats_registered = 1;
     }
     return local_initialize_chemistry_data(grackle_data, &grackle_rates, my_units);
 }

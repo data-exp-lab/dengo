@@ -4,10 +4,36 @@
 
 #define N_FIELDS {{ solver_name | upper }}_NFIELDS
 
+#include <time.h>
+
 struct {{ solver_name }}_context {
     double *tables;
     {{ solver_name }}_options opts;
+    long long n_cells, n_accepted, n_rejected;
+    double seconds;
 };
+
+static double wall_seconds(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec + 1e-9 * ts.tv_nsec;
+}
+
+void {{ solver_name }}_get_stats({{ solver_name }}_context *ctx, long long stats[3],
+                                 double *seconds)
+{
+    stats[0] = ctx->n_cells;
+    stats[1] = ctx->n_accepted;
+    stats[2] = ctx->n_rejected;
+    if (seconds != NULL) *seconds = ctx->seconds;
+}
+
+void {{ solver_name }}_reset_stats({{ solver_name }}_context *ctx)
+{
+    ctx->n_cells = ctx->n_accepted = ctx->n_rejected = 0;
+    ctx->seconds = 0.0;
+}
 
 void {{ solver_name }}_default_options({{ solver_name }}_options *opts)
 {
@@ -31,6 +57,7 @@ void {{ solver_name }}_default_options({{ solver_name }}_options *opts)
     memcpy(ctx->tables, tables, {{ solver_name | upper }}_TABLE_DOUBLES * sizeof(double));
     if (opts != NULL) ctx->opts = *opts;
     else {{ solver_name }}_default_options(&ctx->opts);
+    {{ solver_name }}_reset_stats(ctx);
     return ctx;
 }
 
@@ -146,8 +173,10 @@ int {{ solver_name }}_solve_grid({{ solver_name }}_context *ctx,
     cell_range r;
     if (ctx == NULL || make_range(grid, &r) != 0 || check_fields(grid) != 0 || !(dt >= 0.0)) return -1;
     long failed = 0;
+    long long accepted = 0, rejected = 0;
+    double t0 = wall_seconds();
     if (dt > 0.0 && r.ncell > 0) {
-        #pragma omp parallel reduction(+:failed)
+        #pragma omp parallel reduction(+:failed, accepted, rejected)
         {
             {{ solver_name }}_data *data = thread_data(ctx, redshift);
             {{ solver_name }}_scratch *sc = {{ solver_name }}_alloc_scratch(1);
@@ -164,10 +193,16 @@ int {{ solver_name }}_solve_grid({{ solver_name }}_context *ctx,
                 if (ttot < dt) failed++;
                 for (int f = 0; f < N_FIELDS; f++) grid->fields[f][idx] = u[f] / grid->to_cgs[f];
             }
+            accepted += sc->n_accepted;
+            rejected += sc->n_rejected;
             {{ solver_name }}_free_scratch(sc);
             {{ solver_name }}_free_data(data);
         }
     }
+    ctx->n_cells += r.ncell;
+    ctx->n_accepted += accepted;
+    ctx->n_rejected += rejected;
+    ctx->seconds += wall_seconds() - t0;
     if (n_failed != NULL) *n_failed = failed;
     return failed > 0 ? 1 : 0;
 }

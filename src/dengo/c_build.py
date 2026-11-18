@@ -54,11 +54,15 @@ def openmp_works():
 
 
 def build_library(name, sources, output_dir, include_dirs=(), defines=(),
-                  use_openmp=None, shared=True, static=True):
+                  use_openmp=None, shared=True, static=True, serial_sources=()):
     """Compile `sources` into `output_dir/lib<name>.so` and/or
     `lib<name>.a`. `use_openmp`: True/False to force, None to use it if
-    the compiler supports it. Returns a dict with the paths built and
-    whether OpenMP was used."""
+    the compiler supports it. `serial_sources` are compiled without
+    OpenMP even then -- for code that is only ever called from inside
+    another file's parallel region, where its own `omp parallel`
+    pragmas would just make libgomp set up (and allocate) a nested team
+    on every call. Returns a dict with the paths built and whether
+    OpenMP was used."""
     output_dir = os.path.abspath(output_dir)
     os.makedirs(output_dir, exist_ok=True)
     if use_openmp is None:
@@ -68,7 +72,10 @@ def build_library(name, sources, output_dir, include_dirs=(), defines=(),
                            "support -fopenmp); it will run single-threaded.", name)
     omp = ["-fopenmp"] if use_openmp else []
     obj_dir = os.path.join(output_dir, "_obj_%s" % name)
-    objects = _compile_objects(sources, obj_dir, include_dirs, defines, omp)
+    parallel = [s for s in sources if s not in serial_sources]
+    serial = [s for s in sources if s in serial_sources]
+    objects = _compile_objects(parallel, obj_dir, include_dirs, defines, omp)
+    objects += _compile_objects(serial, obj_dir, include_dirs, defines, [])
 
     result = {"openmp": bool(use_openmp)}
     if shared:

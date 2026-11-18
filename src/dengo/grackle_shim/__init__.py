@@ -197,10 +197,15 @@ def build(prefix, use_openmp=None, shared=True, static=True):
     shutil.copy(os.path.join(_VENDOR, "LICENSE"), os.path.join(share_dir, "GRACKLE_LICENSE"))
 
     sources, varying = generate_sources(src_dir)
+    # Only the C API's loop over cells is parallel; the solver core it
+    # calls once per cell is compiled serially (see build_library).
+    serial = [src for src in sources
+              if os.path.basename(src) in ("%s_solver.C" % SOLVER, "BE_chem_solve.C",
+                                           "primordial_grackle_tables.C")]
     built = c_build.build_library("grackle", sources, lib_dir,
                                   include_dirs=[include_dir, src_dir],
                                   defines=["DENGO_QUIET"], use_openmp=use_openmp,
-                                  shared=shared, static=static)
+                                  shared=shared, static=static, serial_sources=serial)
     info = {
         "dengo_version": _dengo_version(),
         "grackle_api_version": GRACKLE_API_VERSION,

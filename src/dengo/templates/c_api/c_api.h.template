@@ -86,6 +86,14 @@ int {{ solver_name }}_cooling_time_grid({{ solver_name }}_context *ctx,
                                         const {{ solver_name }}_grid *grid,
                                         double redshift, double *cooling_time);
 
+/* Running totals since create (or the last reset), for checking cost:
+   stats[0] = cells solved, stats[1] = accepted sub-steps, stats[2] =
+   rejected sub-step attempts; *seconds = wall-clock time spent inside
+   _solve_grid. */
+void {{ solver_name }}_get_stats({{ solver_name }}_context *ctx, long long stats[3],
+                                 double *seconds);
+void {{ solver_name }}_reset_stats({{ solver_name }}_context *ctx);
+
 /* Gas temperature (K) for every interior cell (negative abundances
    treated as zero). Returns 0, 1 if the
    temperature iteration failed in some cell, or -1. */
