@@ -115,6 +115,17 @@ static inline void gather(const {{ solver_name }}_grid *grid, long idx, double *
     for (int f = 0; f < N_FIELDS; f++) u[f] = grid->fields[f][idx] * grid->to_cgs[f];
 }
 
+/* For the diagnostics (cooling time, temperature), which must not modify
+   the caller's fields: treat a slightly negative abundance -- which a
+   caller's own initialization or advection can leave behind -- as zero
+   rather than failing the right-hand-side evaluation outright. */
+static inline void gather_nonnegative(const {{ solver_name }}_grid *grid, long idx, double *u)
+{
+    gather(grid, idx, u);
+    for (int f = 0; f < N_FIELDS; f++)
+        if (f != {{ solver_name | upper }}_FIELD_{{ network.energy_term.name }} && u[f] < 0.0) u[f] = 0.0;
+}
+
 /* Every cell starts its temperature iteration from the same guess, so a
    cell's result never depends on which cells a thread handled before
    it -- i.e. on the thread count or schedule. */
@@ -171,7 +182,7 @@ int {{ solver_name }}_cooling_time_grid({{ solver_name }}_context *ctx,
         #pragma omp for schedule(static)
         for (long c = 0; c < r.ncell; c++) {
             long idx = cell_index(&r, c);
-            gather(grid, idx, u);
+            gather_nonnegative(grid, idx, u);
             reset_temperature_guess(data);
             if (calculate_rhs_{{ solver_name }}(u, rhs, 1, N_FIELDS, (void *) data) != 0) {
                 cooling_time[idx] = 0.0;
@@ -201,7 +212,7 @@ int {{ solver_name }}_temperature_grid({{ solver_name }}_context *ctx,
         #pragma omp for schedule(static)
         for (long c = 0; c < r.ncell; c++) {
             long idx = cell_index(&r, c);
-            gather(grid, idx, u);
+            gather_nonnegative(grid, idx, u);
             reset_temperature_guess(data);
             if ({{ solver_name }}_calculate_temperature(data, u, 1, N_FIELDS) != 0) bad++;
             temperature[idx] = data->Ts[0];

@@ -4,7 +4,11 @@
    dengo-grackle and once against the real libgrackle, so the two can be
    compared field by field.
 
-   usage: compare_grackle OUT.json COMOVING THREE_BODY CIE H2OPT DT_SECONDS [reject PARAM VALUE]
+   usage: compare_grackle OUT.json COMOVING THREE_BODY CIE H2OPT DT_SECONDS
+                          [reject PARAM VALUE | negative]
+
+   "negative" makes HII and HeIII slightly negative in every interior cell,
+   as Enzo's own CoolingTest initializer does.
 
    (JSON goes to a file: real Grackle prints its own warnings to stdout.)
 */
@@ -71,6 +75,7 @@ int main(int argc, char **argv)
     chem->cie_cooling = cie;
     chem->h2_optical_depth_approximation = h2opt;
     chem->grackle_data_file = "";
+    chem->Gamma = (double) (float) (5.0 / 3.0);   /* as Enzo passes it */
     if (argc >= 9 && strcmp(argv[6], "reject") == 0) {
         int *ip = local_chemistry_data_access_int(chem, argv[7]);
         double *dp = local_chemistry_data_access_double(chem, argv[7]);
@@ -137,6 +142,21 @@ int main(int argc, char **argv)
         fld[10][x] = KB * T / ((5.0 / 3.0 - 1.0) * mu * MH) / (v * v);
     }
 
+    int negative = (argc >= 7 && strcmp(argv[6], "negative") == 0);
+    if (negative) {
+        for (int k = 0; k < NZ; k++) for (int j = 0; j < NY; j++) for (int i = 0; i < NX; i++) {
+            if (!interior(i, j, k)) continue;
+            int x = i + NX * (j + NY * k);
+            /* move the ionized mass back to the neutral species so the
+               species still sum to the gas density */
+            fld[1][x] += fld[2][x] + 5e-20 * fld[0][x];
+            fld[3][x] += fld[5][x] + 3e-21 * fld[0][x];
+            fld[2][x] = -5e-20 * fld[0][x];
+            fld[5][x] = -3e-21 * fld[0][x];
+            fld[9][x] = fld[4][x] / 4 - fld[6][x] + fld[8][x] / 2;
+        }
+    }
+
     double *ghost_before = (double *) malloc(NFLD * size * sizeof(double));
     for (int f = 0; f < NFLD; f++) memcpy(ghost_before + f * size, fld[f], size * sizeof(double));
 
@@ -164,6 +184,18 @@ int main(int argc, char **argv)
         snprintf(name, sizeof name, "%s0", NAMES[f]);
         print_interior(name, fld[f], 0);
     }
+
+    /* Callers may copy chemistry_data_storage by value between calls
+       (gracklepy does); the copy must work like the original. */
+    chemistry_data_storage rates_copy = grackle_rates;
+    double *tcopy = (double *) malloc(size * sizeof(double));
+    int rcopy = local_calculate_temperature(chem, &rates_copy, &u, &my, tcopy);
+    int copy_ok = (rcopy == 1);
+    for (int x = 0; x < size; x++) {
+        int i = x % NX, j = (x / NX) % NY, k = x / (NX * NY);
+        if (interior(i, j, k) && tcopy[x] != temp[x]) copy_ok = 0;
+    }
+    fprintf(out, "  \"copied_rates_ok\": %s,\n", copy_ok ? "true" : "false");
 
     int rs = solve_chemistry(&u, &my, dt_seconds / u.time_units);
     for (int x = 0; x < size; x++) temp[x] = -1;

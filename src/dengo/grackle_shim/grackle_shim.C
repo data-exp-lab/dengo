@@ -65,42 +65,40 @@ int grackle_verbose = FALSE;
 chemistry_data *grackle_data = NULL;
 chemistry_data_storage grackle_rates;
 
-/* A chemistry_data_storage initialized by us, and the dengo context it
-   stands for (the real struct has no room for our own pointer). */
-#define MAX_REGISTERED 64
-/* Two contexts per initialization: `ctx` for the chemistry solve, and
+/* Our state for an initialized chemistry_data_storage lives *inside*
+   that struct, like real Grackle's does, because callers may copy the
+   struct by value between calls (gracklepy does, before every call). It
+   goes in `gas_grain`, a pointer member real Grackle only uses for dust
+   physics, which this library refuses at initialization.
+
+   Two contexts per initialization: `ctx` for the chemistry solve, and
    `cool` -- the same tables minus the chemical-energy (H2 formation
    heating / dissociation cooling) terms -- for calculate_cooling_time,
    which in Grackle covers radiative processes only. */
+#define DENGO_HANDLE_MAGIC 0x64656e676f677231ULL  /* "dengogr1" */
 typedef struct {
-    chemistry_data_storage *rates;
+    unsigned long long magic;
     primordial_context *ctx;
     primordial_context *cool;
 } registry_entry;
-static registry_entry g_registry[MAX_REGISTERED];
 
 static registry_entry *lookup_entry(chemistry_data_storage *rates)
 {
-    for (int i = 0; i < MAX_REGISTERED; i++)
-        if (rates != NULL && g_registry[i].rates == rates) return &g_registry[i];
-    return NULL;
+    if (rates == NULL || rates->gas_grain == NULL) return NULL;
+    registry_entry *e = (registry_entry *) (void *) rates->gas_grain;
+    return e->magic == DENGO_HANDLE_MAGIC ? e : NULL;
 }
 
+/* `rates` has just been zeroed by the caller. */
 static int register_contexts(chemistry_data_storage *rates, primordial_context *ctx,
                              primordial_context *cool)
 {
-    registry_entry *e = lookup_entry(rates);
-    if (e == NULL) {
-        for (int i = 0; i < MAX_REGISTERED && e == NULL; i++)
-            if (g_registry[i].rates == NULL) e = &g_registry[i];
-        if (e == NULL) return FAIL;
-    } else {
-        primordial_destroy(e->ctx);
-        primordial_destroy(e->cool);
-    }
-    e->rates = rates;
+    registry_entry *e = (registry_entry *) malloc(sizeof(registry_entry));
+    if (e == NULL) return FAIL;
+    e->magic = DENGO_HANDLE_MAGIC;
     e->ctx = ctx;
     e->cool = cool;
+    rates->gas_grain = (double *) (void *) e;
     return SUCCESS;
 }
 
@@ -110,8 +108,9 @@ static void unregister_contexts(chemistry_data_storage *rates)
     if (e == NULL) return;
     primordial_destroy(e->ctx);
     primordial_destroy(e->cool);
-    e->rates = NULL;
-    e->ctx = e->cool = NULL;
+    e->magic = 0;
+    free(e);
+    rates->gas_grain = NULL;
 }
 
 /* ------------------------------------------------------------------ */
@@ -278,7 +277,9 @@ static int check_supported(const chemistry_data *c, const code_units *u)
                 "(no Lyman-Werner background; requires 0).\n", c->LWbackground_intensity);
         bad++;
     }
-    if (fabs(c->Gamma - 5.0 / 3.0) > 1.0e-10) {
+    /* Single-precision tolerance: Enzo stores Gamma as a float and
+       copies it in, so 5/3 arrives as 1.6666666269... */
+    if (fabs(c->Gamma - 5.0 / 3.0) > 1.0e-6) {
         fprintf(stderr, "dengo-grackle: Gamma = %.17g is not supported (dengo's "
                 "equation of state uses 5/3 for every monatomic species).\n", c->Gamma);
         bad++;
@@ -537,6 +538,36 @@ static void make_consistent(const chemistry_data *c, grackle_field_data *f)
     }
 }
 
+/* Grackle's ceiling_species_g, run at the start of every solve: floor
+   each species at tiny (1e-20, code units; HeIII at 1e-25). Enzo's own
+   initializers can leave species slightly negative (e.g. HII, HeIII in
+   the CoolingTest problem); dengo's right-hand side rejects negative
+   abundances, so without this the first solve fails in every cell. */
+static void ceiling_species(grackle_field_data *f)
+{
+    const double tiny = 1.0e-20;
+    long dim[3] = {1, 1, 1}, st[3] = {0, 0, 0}, en[3] = {0, 0, 0};
+    for (int d = 0; d < f->grid_rank; d++) {
+        dim[d] = f->grid_dimension[d];
+        st[d] = f->grid_start[d];
+        en[d] = f->grid_end[d];
+    }
+    for (long k = st[2]; k <= en[2]; k++)
+    for (long j = st[1]; j <= en[1]; j++)
+    for (long i = st[0]; i <= en[0]; i++) {
+        long x = i + dim[0] * (j + dim[1] * k);
+        f->e_density[x] = fmax(f->e_density[x], tiny);
+        f->HI_density[x] = fmax(f->HI_density[x], tiny);
+        f->HII_density[x] = fmax(f->HII_density[x], tiny);
+        f->HeI_density[x] = fmax(f->HeI_density[x], tiny);
+        f->HeII_density[x] = fmax(f->HeII_density[x], tiny);
+        f->HeIII_density[x] = fmax(f->HeIII_density[x], 1.0e-5 * tiny);
+        f->HM_density[x] = fmax(f->HM_density[x], tiny);
+        f->H2I_density[x] = fmax(f->H2I_density[x], tiny);
+        f->H2II_density[x] = fmax(f->H2II_density[x], tiny);
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /* Solve / derived quantities                                         */
 /* ------------------------------------------------------------------ */
@@ -572,6 +603,7 @@ int local_solve_chemistry(chemistry_data *my_chemistry,
     primordial_grid g;
     if (setup_grid(my_chemistry, my_units, my_fields, &g) != SUCCESS) return FAIL;
 
+    ceiling_species(my_fields);
     double dt = dt_value * my_units->time_units;
     long n_failed = 0;
     int rv = primordial_solve_grid(ctx, &g, dt, redshift_of(my_units), &n_failed);

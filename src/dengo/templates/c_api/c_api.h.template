@@ -73,14 +73,17 @@ int {{ solver_name }}_solve_grid({{ solver_name }}_context *ctx,
 /* Cooling time ge / (d ge/dt) in seconds for every interior cell,
    written into `cooling_time` (same layout as the fields; negative when
    the gas is cooling). d ge/dt is the full energy right-hand side,
-   including H2 formation heating. Cells left untouched: the ghost zones.
+   including H2 formation heating. Negative abundances are treated as
+   zero here (the fields are not modified). Cells left untouched: the
+   ghost zones.
    Returns 0, or 1 if the right-hand side could not be evaluated in some
    cell (that cell gets 0), or -1 for invalid arguments. */
 int {{ solver_name }}_cooling_time_grid({{ solver_name }}_context *ctx,
                                         const {{ solver_name }}_grid *grid,
                                         double redshift, double *cooling_time);
 
-/* Gas temperature (K) for every interior cell. Returns 0, 1 if the
+/* Gas temperature (K) for every interior cell (negative abundances
+   treated as zero). Returns 0, 1 if the
    temperature iteration failed in some cell, or -1. */
 int {{ solver_name }}_temperature_grid({{ solver_name }}_context *ctx,
                                        const {{ solver_name }}_grid *grid,

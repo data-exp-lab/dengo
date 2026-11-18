@@ -196,3 +196,23 @@ def test_against_real_grackle(shim, tmp_path):
         a, b = np.array(ours["tcool0"]), np.array(real["tcool0"])
         assert np.all(np.sign(a) == np.sign(b))
         assert np.median(np.abs(a - b) / np.abs(b)) < 0.05
+
+
+def test_rates_struct_copied_by_value(shim, tmp_path):
+    """A by-value copy of chemistry_data_storage must work like the
+    original (gracklepy copies it before every call)."""
+    res, _ = run(shim["exe"], tmp_path / "o.json", 0, 4, 1, 1, 1.0)
+    assert res["copied_rates_ok"] is True
+
+
+def test_slightly_negative_species(shim, tmp_path):
+    """Enzo's own initializers can leave species slightly negative; like
+    Grackle (ceiling_species_g) the solve floors them instead of failing."""
+    res, log = run(shim["exe"], tmp_path / "o.json", 0, 4, 1, 1, 3.15e10, "negative")
+    assert res["solve_rv"] == 1
+    assert "WARNING" not in log
+    assert all(np.isfinite(res["T1"])) and min(res["HII_density1"]) > 0
+    if shim["real_exe"]:
+        real, _ = run(shim["real_exe"], tmp_path / "r.json", 0, 4, 1, 1, 3.15e10, "negative")
+        np.testing.assert_allclose(res["T0"], real["T0"], rtol=1e-2)
+
