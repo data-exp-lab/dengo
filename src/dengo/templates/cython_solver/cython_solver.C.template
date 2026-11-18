@@ -4,9 +4,11 @@
 #include "{{ solver_name }}_solver.h"
 
 static void {{ solver_name }}_read_tables({{ solver_name }}_data *data, const char *table_file);
+static void {{ solver_name }}_load_tables({{ solver_name }}_data *data, const double *tables);
 
 {% block setup_data %}
-{{ solver_name }}_data *{{ solver_name }}_setup_data(const char *table_file, int nstrip)
+/* Everything but the tables themselves. */
+static {{ solver_name }}_data *{{ solver_name }}_alloc_data(int nstrip)
 {
     {{ solver_name }}_data *data = ({{ solver_name }}_data *) malloc(sizeof({{ solver_name }}_data));
 
@@ -14,6 +16,8 @@ static void {{ solver_name }}_read_tables({{ solver_name }}_data *data, const ch
     data->reltol = 1.0e-5;
     data->floor_value = 1.0e-20;
     data->current_z = 0.0;
+    data->use_cie_optical_depth = 1;
+    data->use_h2_optical_depth = 1;
 
     data->bounds[0] = {{ network.T_bounds[0] }};
     data->bounds[1] = {{ network.T_bounds[1] }};
@@ -50,7 +54,20 @@ static void {{ solver_name }}_read_tables({{ solver_name }}_data *data, const ch
     data->dgamma{{ sp.name }}_dT = (double *) malloc(nstrip * sizeof(double));
     {%- endfor %}
 
+    return data;
+}
+
+{{ solver_name }}_data *{{ solver_name }}_setup_data(const char *table_file, int nstrip)
+{
+    {{ solver_name }}_data *data = {{ solver_name }}_alloc_data(nstrip);
     {{ solver_name }}_read_tables(data, table_file);
+    return data;
+}
+
+{{ solver_name }}_data *{{ solver_name }}_setup_data_from_tables(const double *tables, int nstrip)
+{
+    {{ solver_name }}_data *data = {{ solver_name }}_alloc_data(nstrip);
+    {{ solver_name }}_load_tables(data, tables);
     return data;
 }
 
@@ -77,9 +94,10 @@ void {{ solver_name }}_free_data({{ solver_name }}_data *data)
 {% block read_tables %}
 /*
    Rate/cooling/gamma tables are stored as one flat binary file of
-   concatenated little-endian doubles, in exactly the order they are
-   fread() here.  Written by ChemicalNetwork._write_solver_tables_bin --
-   see that method for the matching write order.
+   concatenated little-endian doubles, in exactly the order that
+   _load_tables() copies them here.  Written by
+   ChemicalNetwork._write_solver_tables_bin -- see that method for the
+   matching write order.
 */
 static void {{ solver_name }}_read_tables({{ solver_name }}_data *data, const char *table_file)
 {
@@ -89,22 +107,35 @@ static void {{ solver_name }}_read_tables({{ solver_name }}_data *data, const ch
         fprintf(stderr, "{{ solver_name }}: could not open rate table file '%s'\n", filename);
         exit(1);
     }
-    size_t n = {{ network.T | length }};
-    size_t nread = 0;
+    double *buf = (double *) malloc({{ solver_name | upper }}_TABLE_DOUBLES * sizeof(double));
+    size_t nread = fread(buf, sizeof(double), {{ solver_name | upper }}_TABLE_DOUBLES, f);
+    fclose(f);
+    if (nread != {{ solver_name | upper }}_TABLE_DOUBLES) {
+        fprintf(stderr, "{{ solver_name }}: rate table file '%s' is truncated "
+                "(read %zu of %d doubles)\n", filename, nread,
+                {{ solver_name | upper }}_TABLE_DOUBLES);
+        exit(1);
+    }
+    {{ solver_name }}_load_tables(data, buf);
+    free(buf);
+}
+
+static void {{ solver_name }}_load_tables({{ solver_name }}_data *data, const double *tables)
+{
+    const size_t n = {{ solver_name | upper }}_NBINS;
+    const double *p = tables;
     {%- for name, rxn in network.reactions | dictsort(case_sensitive=true) %}
-    nread += fread(data->r_{{ name }}, sizeof(double), n, f);
+    memcpy(data->r_{{ name }}, p, n * sizeof(double)); p += n;
     {%- endfor %}
     {%- for name, action in network.cooling_actions | dictsort(case_sensitive=true) %}
     {%- for name2 in action.tables | sort(case_sensitive=true) %}
-    nread += fread(data->c_{{ name }}_{{ name2 }}, sizeof(double), n, f);
+    memcpy(data->c_{{ name }}_{{ name2 }}, p, n * sizeof(double)); p += n;
     {%- endfor %}
     {%- endfor %}
     {%- for sp in network.interpolate_gamma_species | sort(attribute="name", case_sensitive=true) %}
-    nread += fread(data->g_gamma{{ sp.name }}, sizeof(double), n, f);
-    nread += fread(data->g_dgamma{{ sp.name }}_dT, sizeof(double), n, f);
+    memcpy(data->g_gamma{{ sp.name }}, p, n * sizeof(double)); p += n;
+    memcpy(data->g_dgamma{{ sp.name }}_dT, p, n * sizeof(double)); p += n;
     {%- endfor %}
-    fclose(f);
-    (void) nread;
 }
 {% endblock %}
 
@@ -309,11 +340,15 @@ int calculate_rhs_{{ solver_name }}(double *input, double *rhs, int nstrip, int 
         {%- endfor %}
         mdensity = ({{ network.print_mass_density() }}) * mh;
         {%- if "cie_cooling" in network.cooling_actions %}
-        double tau = fmax(pow(mdensity / 3.3e-8, 2.8), 1.0e-5);
-        double cie_optical_depth_approx = fmin(1.0, (1.0 - exp(-tau)) / tau);
+        double cie_optical_depth_approx = 1.0;
+        if (data->use_cie_optical_depth) {
+            double tau = fmax(pow(mdensity / 3.3e-8, 2.8), 1.0e-5);
+            cie_optical_depth_approx = fmin(1.0, (1.0 - exp(-tau)) / tau);
+        }
         {%- endif %}
         {%- if "gloverabel08" in network.cooling_actions %}
-        double h2_optical_depth_approx = fmin(1.0, pow(mdensity / 1.34e-14, -0.45));
+        double h2_optical_depth_approx = data->use_h2_optical_depth
+            ? fmin(1.0, pow(mdensity / 1.34e-14, -0.45)) : 1.0;
         {%- endif %}
 
         j = i * nchem;
@@ -376,11 +411,15 @@ int calculate_jacobian_{{ solver_name }}(double *input, double *Joutput, int nst
         {%- endfor %}
         mdensity = ({{ network.print_mass_density() }}) * mh;
         {%- if "cie_cooling" in network.cooling_actions %}
-        double tau = fmax(pow(mdensity / 3.3e-8, 2.8), 1.0e-5);
-        double cie_optical_depth_approx = fmin(1.0, (1.0 - exp(-tau)) / tau);
+        double cie_optical_depth_approx = 1.0;
+        if (data->use_cie_optical_depth) {
+            double tau = fmax(pow(mdensity / 3.3e-8, 2.8), 1.0e-5);
+            cie_optical_depth_approx = fmin(1.0, (1.0 - exp(-tau)) / tau);
+        }
         {%- endif %}
         {%- if "gloverabel08" in network.cooling_actions %}
-        double h2_optical_depth_approx = fmin(1.0, pow(mdensity / 1.34e-14, -0.45));
+        double h2_optical_depth_approx = data->use_h2_optical_depth
+            ? fmin(1.0, pow(mdensity / 1.34e-14, -0.45)) : 1.0;
         {%- endif %}
 
         j = i * nchem * nchem;
@@ -424,5 +463,89 @@ void ensure_electron_consistency(double *input, int nstrip, int nchem)
         {%- endfor %}
         if (e_idx >= 0) input[e_idx] = total_e;
     }
+}
+{% endblock %}
+
+{% block advance %}
+{{ solver_name }}_scratch *{{ solver_name }}_alloc_scratch(int dims)
+{
+    int n = NSPECIES;
+    {{ solver_name }}_scratch *sc = ({{ solver_name }}_scratch *) malloc(sizeof({{ solver_name }}_scratch));
+    sc->dims  = dims;
+    sc->prev  = (double *) malloc(dims * n * sizeof(double));
+    sc->scale = (double *) malloc(dims * n * sizeof(double));
+    sc->atol  = (double *) malloc(dims * n * sizeof(double));
+    sc->rtol  = (double *) malloc(dims * n * sizeof(double));
+    sc->u0    = (double *) malloc(dims * n * sizeof(double));
+    sc->s     = (double *) malloc(dims * n * sizeof(double));
+    sc->gu    = (double *) malloc(dims * n * sizeof(double));
+    sc->Ju    = (double *) malloc(dims * n * n * sizeof(double));
+    return sc;
+}
+
+void {{ solver_name }}_free_scratch({{ solver_name }}_scratch *sc)
+{
+    if (sc == NULL) return;
+    free(sc->prev); free(sc->scale); free(sc->atol); free(sc->rtol);
+    free(sc->u0); free(sc->s); free(sc->gu); free(sc->Ju);
+    free(sc);
+}
+
+double {{ solver_name }}_advance({{ solver_name }}_data *data,
+                                 {{ solver_name }}_scratch *sc,
+                                 double *input, int dims, double dtf,
+                                 int niter, double reltol, double floor_value,
+                                 int adaptive_step, int *n_steps,
+                                 {{ solver_name }}_step_callback callback,
+                                 void *callback_ctx)
+{
+    const int n = NSPECIES;
+    const int total = dims * n;
+
+    ensure_electron_consistency(input, dims, n);
+    for (int i = 0; i < total; i++) {
+        sc->atol[i] = floor_value * reltol;
+        sc->rtol[i] = reltol;
+        /* BE_chem_solve normalizes by 1/scale internally, so scale must
+           never be zero -- an exactly-zero initial abundance (e.g. no
+           He+ / He++ / H2 yet) is the common case, not an edge case. */
+        sc->scale[i] = fmax(fabs(input[i]), floor_value);
+        sc->prev[i] = input[i];
+    }
+
+    double dt = dtf / niter;
+    double ttot = 0.0;
+    int it = 0;
+    while (it < niter && ttot < dtf) {
+        int rv = BE_chem_solve(calculate_rhs_{{ solver_name }}, calculate_jacobian_{{ solver_name }},
+                               input, dt, sc->rtol, sc->atol, dims, n, sc->scale,
+                               (void *) data, sc->u0, sc->s, sc->gu, sc->Ju);
+        for (int i = 0; i < total; i++) {
+            if (input[i] < 0) { rv = 1; break; }
+        }
+        if (rv == 0) {
+            ttot += dt;
+            for (int i = 0; i < total; i++) {
+                if (input[i] < floor_value) input[i] = floor_value;
+                sc->prev[i] = input[i];
+                sc->scale[i] = fmax(fabs(input[i]), floor_value);
+            }
+            if (callback != NULL) callback(callback_ctx, it, ttot);
+            /* Growth factor 2.0 (not 1.1): with niter=200 the ramp from
+               dtf/niter back up to dtf takes ~8 sub-steps instead of ~32,
+               at no measurable accuracy cost -- see NOTES.md. */
+            if (adaptive_step && ttot < dtf) dt = fmin(dt * 2.0, dtf - ttot);
+            it += 1;
+        } else {
+            dt /= 2.0;
+            for (int i = 0; i < total; i++) {
+                input[i] = sc->prev[i];
+                sc->scale[i] = fmax(fabs(sc->prev[i]), floor_value);
+            }
+            if (dt < 1.0e-15 * dtf) break;
+        }
+    }
+    if (n_steps != NULL) *n_steps = it;
+    return ttot;
 }
 {% endblock %}

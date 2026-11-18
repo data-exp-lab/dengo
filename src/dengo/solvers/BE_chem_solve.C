@@ -100,7 +100,10 @@ typedef struct {
   double ratio;   // |change| / (atol + rtol*|value|); reason==1 only
 } BE_chem_solve_diag;
 
-static BE_chem_solve_diag g_be_chem_solve_last_failure;
+// thread_local: a caller may run independent BE_chem_solve() calls on
+// different threads at once (e.g. the grid-level C API, one cell per
+// thread), and each needs its own record of its own last failure.
+static thread_local BE_chem_solve_diag g_be_chem_solve_last_failure;
 
 BE_chem_solve_diag BE_chem_solve_last_failure() {
   return g_be_chem_solve_last_failure;
@@ -233,7 +236,9 @@ int BE_chem_solve(rhs_f f, jac_f J,
 
       // solve for Newton update
       if (Gauss_Elim(&(Ju[ix*nchem*nchem]), &(s[ioff]), &(gu[ioff]), nchem) != 0) {
+#ifndef DENGO_QUIET
           fprintf(stderr, "There was an unsolved case in Gauss_Elim! \n");
+#endif
           #pragma omp critical
           {
             local_diag.occurred = 1;
@@ -252,10 +257,12 @@ int BE_chem_solve(rhs_f f, jac_f J,
       for (int ii=0; ii<nchem; ii++) {
           double tol = atol[ioff+ii] + rtol[ioff+ii] * fabs(u[ioff+ii]);
           if ( fabs(s[ioff+ii]) > tol) {
+#ifndef DENGO_QUIET
               if (dt < 1.0) {
 	              fprintf(stdout, "dt %0.5g, Sweep %d, Unsolved[%d]: nchem: %d change: % 0.8g sum tol: % 0.5g atol: % 0.5g rtol: % 0.5g value: % 0.5g\n",
 		                  dt, isweep, ix, ii, s[ioff+ii], atol[ioff+ii] + rtol[ioff+ii] * fabs(u[ioff+ii]), atol[ioff+ii], rtol[ioff+ii], u[ioff+ii]);
               }
+#endif
               // Record this as the current worst-known violation (by
               // normalized ratio) *within this sweep* (local_diag is
               // reset every sweep -- see above), so a caller that ends
@@ -285,8 +292,10 @@ int BE_chem_solve(rhs_f f, jac_f J,
               break;
           }
           if ( u[ioff+ii] != u[ioff+ii] ) {  // NaN encountered!!
+#ifndef DENGO_QUIET
             printf("BE_chem_solve ERROR: NaN in iteration %i (cell %i, species %i); dt = %0.5g, atol = %0.5g\n",
                    isweep,ix,ii, dt, atol[ioff+ii]);
+#endif
             #pragma omp critical
             {
               local_diag.occurred = 1;
@@ -304,10 +313,12 @@ int BE_chem_solve(rhs_f f, jac_f J,
             }
             printf("\n");
             #endif
+#ifndef DENGO_QUIET
             if (dt < 1.0) {
 	              fprintf(stdout, "dt %0.5g, Sweep %d, Unsolved[%d]: nchem: %d change: % 0.8g sum tol: % 0.5g atol: % 0.5g rtol: % 0.5g value: % 0.5g\n",
 		                  dt, isweep, ix, ii, s[ioff+ii], atol[ioff+ii] + rtol[ioff+ii] * fabs(u[ioff+ii]), atol[ioff+ii], rtol[ioff+ii], u[ioff+ii]);
             }
+#endif
             fatal_error = 1;
             break;
           }
@@ -410,7 +421,9 @@ int BE_Resid_FunJac(rhs_f f, jac_f J, double *u, double *u0, double *gu, double 
   #ifdef DENGO_DEBUG
   for (i=0; i<nstrip*nchem; i++){
     if ( gu[i] != gu[i] ) {  // NaN encountered!!
+#ifndef DENGO_QUIET
       printf("[RHS] NaN encountered at gu[%d] = %0.5g\n", i, gu[i]);
+#endif
     }
   }
   #endif
@@ -433,7 +446,9 @@ int BE_Resid_FunJac(rhs_f f, jac_f J, double *u, double *u0, double *gu, double 
   #ifdef DENGO_DEBUG
   for (ix=0; ix<nstrip*nchem*nchem; ix++){
     if ( Ju[ix] != Ju[ix] ) {  // NaN encountered!!
+#ifndef DENGO_QUIET
       printf("[JAC] NaN encountered at Jac[%d] = %0.5g\n", ix, Ju[ix]);
+#endif
     }
   }
   #endif

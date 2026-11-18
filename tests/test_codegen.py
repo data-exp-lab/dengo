@@ -106,12 +106,14 @@ def test_tables_bin_contents_match_write_order(tmp_path):
         offset += n
     assert offset == len(raw)
 
-    # Also confirm the *generated C source's* fread order textually
+    # Also confirm the *generated C source's* table-load order textually
     # matches -- not just the file bytes -- so a future template change
     # that reintroduces a case-insensitive sort is caught even if it
-    # happens to still read/write the same total byte count.
+    # happens to still read/write the same total byte count. (The file is
+    # read into one buffer and then copied table-by-table with memcpy in
+    # _load_tables, so that's the order that matters.)
     source = (tmp_path / "t_solver.C").read_text()
-    read_order = re.findall(r"fread\(data->(\w+),", source)
+    read_order = re.findall(r"memcpy\(data->(\w+),", source)
     expected_order = (
         ["r_%s" % name for name, _ in sorted(network.reactions.items())]
         + [

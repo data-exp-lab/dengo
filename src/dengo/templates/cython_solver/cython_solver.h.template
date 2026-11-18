@@ -80,11 +80,67 @@ typedef struct {{ solver_name }}_data {
 
     double reltol;
     double floor_value;
+
+    /* Runtime physics switches (both default to 1 = on, which is what
+       this network has always done). Only meaningful when the network
+       includes the corresponding cooling action; ignored otherwise.
+         use_cie_optical_depth: Ripamonti & Abel (2004)-style continuum
+           optical-depth suppression of radiative cooling at very high
+           density (only applies when "cie_cooling" is in the network).
+         use_h2_optical_depth: the (rho/rho_0)^-0.45 optical-depth
+           suppression of H2 line cooling ("gloverabel08"). */
+    int use_cie_optical_depth;
+    int use_h2_optical_depth;
 } {{ solver_name }}_data;
 {% endblock %}
 
+/* Every rate/cooling/gamma table, in the order the flat tables file
+   stores them (see ChemicalNetwork._write_solver_tables_bin) -- each is
+   {{ network.T | length }} doubles long. */
+#define {{ solver_name | upper }}_NTABLES {{ (network.reactions | length) + (network.cooling_actions.values() | map(attribute="tables") | map("length") | sum) + 2 * (network.interpolate_gamma_species | length) }}
+#define {{ solver_name | upper }}_NBINS {{ network.T | length }}
+#define {{ solver_name | upper }}_TABLE_DOUBLES ({{ solver_name | upper }}_NTABLES * {{ solver_name | upper }}_NBINS)
+
 {{ solver_name }}_data *{{ solver_name }}_setup_data(const char *table_file, int nstrip);
+/* Same as _setup_data, but from tables already in memory (laid out
+   exactly like the tables file: {{ solver_name | upper }}_TABLE_DOUBLES
+   doubles) -- e.g. tables compiled into a library, so there's no file
+   to locate at run time. */
+{{ solver_name }}_data *{{ solver_name }}_setup_data_from_tables(const double *tables, int nstrip);
 void {{ solver_name }}_free_data({{ solver_name }}_data *data);
+
+/* Scratch buffers for {{ solver_name }}_advance(), sized for `dims` cells. */
+typedef struct {{ solver_name }}_scratch {
+    int dims;
+    double *prev, *scale, *atol, *rtol, *u0, *s, *gu, *Ju;
+} {{ solver_name }}_scratch;
+
+{{ solver_name }}_scratch *{{ solver_name }}_alloc_scratch(int dims);
+void {{ solver_name }}_free_scratch({{ solver_name }}_scratch *scratch);
+
+/* Called after every accepted sub-step: `it` is the 0-based index of
+   that sub-step, `ttot` the time covered so far. */
+typedef void (*{{ solver_name }}_step_callback)(void *ctx, int it, double ttot);
+
+/* The adaptive sub-stepping loop around BE_chem_solve: evolves
+   `input` (dims*NSPECIES doubles, one cell's species contiguous, in
+   cgs: number densities in cm^-3, ge in erg/g) forward by `dtf`
+   seconds, in place. All `dims` cells share one sub-step size, so call
+   with dims=1 to step cells independently. Starts at dtf/niter, doubles
+   the sub-step after each success (when adaptive_step != 0), halves it
+   and retries on failure, and gives up below 1e-15*dtf or after niter
+   accepted sub-steps. Returns the time actually covered (== dtf when
+   converged); `*n_steps` (if non-NULL) gets the number of accepted
+   sub-steps. On return `input` holds the last accepted state. This is
+   the single implementation used by the Cython Solver, the wasm build
+   and the grid-level C API. */
+double {{ solver_name }}_advance({{ solver_name }}_data *data,
+                                 {{ solver_name }}_scratch *scratch,
+                                 double *input, int dims, double dtf,
+                                 int niter, double reltol, double floor_value,
+                                 int adaptive_step, int *n_steps,
+                                 {{ solver_name }}_step_callback callback,
+                                 void *callback_ctx);
 
 void {{ solver_name }}_interpolate_rates({{ solver_name }}_data *data, int nstrip);
 void {{ solver_name }}_interpolate_gamma({{ solver_name }}_data *data, int i);
