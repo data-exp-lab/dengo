@@ -4478,3 +4478,40 @@ is a seed-amplification case: electrons start at the 1e-20 floor (no
 k57/k58), BE over-predicts exponential growth for large steps, and the
 error norm ignores species below 1e-6 of n_tot, so the overshoot happens
 unmeasured and is then amplified. Only affects artificially seedless gas.
+
+### 2026-11-18, later — projected Newton, error control on, and what's queued
+
+- **Projected Newton** (019dd4c): clamp abundances at zero after each
+  Newton update. Fixes the hot-gas stalls (H- at -1e-45 roundoff aborting
+  every step longer than its ~1e3 s timescale); hot cases now 378/367/6927 K
+  vs reference 375/365/6678 K. Enzo CoolingTest 11.8 -> 10.0 us/cell-solve.
+- **Error control on by default, tolerance 0.1** (64dd5aa), with
+  `DENGO_GRACKLE_ERROR_TOLERANCE` to override. Re-scored against the saved
+  BDF references (all states now complete):
+
+  | states | 99th-pct T error, off -> 0.1 -> 0.01 | cost at 0.1 / 0.01 |
+  |---|---|---|
+  | free-fall n < 1e4 | 2.9% -> 3.1% -> 1.6% | 1.07x / 1.7x |
+  | free-fall n > 1e10 | 5.5% -> 1.6% -> 0.9% | 1.5x / 5x |
+  | cooling, Enzo dt 2.5e8 s | 2e-5 (unchanged) | 1.25x |
+  | cooling, 3e10 s | 2.0% -> 1.4% -> 0.6% | 1.3x / 2.3x |
+  | cooling, 3e12 s | 19% -> 8.9% -> 3.7% | 1.9x / 3.9x |
+
+  Enzo CoolingTest: 13.2 us/cell-solve at 0.1 (13.6 at 0.01); 38 s wall
+  single-threaded vs Grackle's 14 s.
+
+Queued next:
+1. **H- and H2+ as equilibrium species.** Grackle 3.4.1 sets H2+ to
+   equilibrium and integrates H- with a linearized implicit update
+   ((production*dt + old)/(1 + destruction*dt)), which is equilibrium
+   whenever H- is fast -- and positivity-preserving by construction (why
+   Grackle never hit the negative-H- failure). dengo's templates already
+   support `equilibrium_species`. Would shrink the implicit system 10 -> 8
+   (linear solve ~half) and drop the two fastest timescales that limit the
+   first-step estimate and error control. Needs reference validation.
+2. Reuse the first-step RHS evaluation as error control's f0 (~1.5 us/cell).
+3. NaN rejections in H2 for very long steps in fully ionized gas (H, H2 ~ 0):
+   harmless (retried smaller) but wasteful; likely the Jacobian.
+4. Seed amplification in seedless neutral gas: needs k57/k58 in the
+   network, or a tighter trace-species threshold in the error norm.
+5. Block-structured linear solve (see above) -- smaller payoff once (1) is in.
