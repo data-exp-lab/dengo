@@ -4381,3 +4381,42 @@ the elimination from the symbolic sparsity pattern).
 
 Not done: initial temperature guess (measured ~3% of instructions in
 the whole temperature solve; at most ~1% to gain).
+
+### 2026-11-18, later — first-sub-step evaluation (queue item 1)
+
+Each state integrated by dengo's Solver with five first-step policies and
+by a tight scipy BDF reference (rtol 1e-8) of dengo's own RHS/Jacobian.
+States: Enzo CoolingTest_Primordial cells (initial, fully neutral DD0000,
+and evolved DD0002; 150 cells each) at dt = 2.5e8 (Enzo's step), 3e10,
+3e12 s; Enzo one-zone free-fall dumps to n_H = 1e16 at 1% and 10% t_ff.
+References over 20 s were skipped (23 + 41, all in hard cases).
+
+Timescale-based start, min(dt, 0.1 x shortest e-folding time of any
+species holding > 1e-6 of H nuclei, or of the energy):
+
+| states | speedup | 99th-pct T error (now -> timescale) |
+|---|---|---|
+| CoolingTest evolved, Enzo dt, n < 10 | 5.9x | 3e-7 -> 1e-6 |
+| CoolingTest evolved, Enzo dt, n >= 10 | 3.0x | 2e-6 -> 8e-6 |
+| CoolingTest evolved, dt = 3e10, n < 10 | 2.9x | 0.2% -> 0.6% |
+| free-fall, n < 1e4 | 7.2x | 1.6% -> 2.9% |
+| free-fall, 1e4-1e10 | 4.0x | 1.0% -> 1.9% |
+| free-fall, > 1e10 | 1.2x | ~same |
+
+At least as accurate as a fixed full-dt start everywhere; never slower
+than now. On hard cases (neutral hot starts; dt = 3e12 s at n >= 10) all
+policies cost and err the same -- the chemistry, not the first step, sets
+the cost there.
+
+Bigger finding: on those hard cases dengo can be far from the reference
+under *any* first step (30-50% in T for neutral hot starts; very large
+for ~5% of dense cells at dt = 3e12 s). `_advance()` accepts a sub-step
+whenever Newton converges and always grows the step 2x -- there is no
+truncation-error estimate, so step size never adapts to accuracy (also
+why the current policy carries 1-2% errors on easy free-fall cells).
+Local error control (step doubling or a trapezoidal estimate) is the
+principled fix, for accuracy and for the speed/accuracy trade-off.
+
+Recommendation (pending decision): adopt the timescale-based first step;
+make error control the next item. Evaluation scripts/results:
+scratchpad stepeval/ (not committed).
