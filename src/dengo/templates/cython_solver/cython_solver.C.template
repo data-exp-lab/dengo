@@ -303,6 +303,10 @@ int {{ solver_name }}_calculate_temperature({{ solver_name }}_data *data,
             int cell_ok = 1;
             while (fabs(Tdiff / Tnew) > 1.0e-8) {
                 T = data->Ts[i];
+                /* interpolate_gamma reads logTs: keep it on the current
+                   iterate, or gamma stays frozen at the starting guess
+                   and the converged T depends on that guess. */
+                data->logTs[i] = log(T);
                 {{ solver_name }}_interpolate_gamma(data, i);
                 {%- for sp in network.interpolate_gamma_species | sort %}
                 gamma{{ sp.name }} = data->gamma{{ sp.name }}[i];
