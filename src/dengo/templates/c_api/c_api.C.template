@@ -41,6 +41,11 @@ void {{ solver_name }}_default_options({{ solver_name }}_options *opts)
     /* The step-size policy dengo was tuned and benchmarked with: start at
        dt/200 and double (NOTES.md, 2026-09). niter is only the cap. */
     opts->first_step_fraction = 1.0 / 200.0;
+    /* Start each cell at a tenth of its own fastest timescale instead
+       (NOTES.md, 2026-11-18: 3-7x fewer sub-steps on easy cells for ~2x
+       the existing truncation error there; same cost and accuracy on
+       hard ones). */
+    opts->first_step_timescale = 0.1;
     opts->reltol = 1.0e-5;
     opts->floor_value = 1.0e-20;
     opts->use_cie_optical_depth = 1;
@@ -140,6 +145,29 @@ static {{ solver_name }}_data *thread_data({{ solver_name }}_context *ctx, doubl
     return data;
 }
 
+/* First sub-step for one cell (state u, cgs): min(dt, factor * shortest
+   e-folding time over the energy and every species above 1e-6 of the
+   total number density), from one RHS evaluation. Returns <= 0 if the
+   RHS can't be evaluated (the caller then falls back). `rhs` is scratch
+   space for NSPECIES doubles. */
+static double timescale_first_step({{ solver_name }}_data *data, double *u, double *rhs,
+                                   double dt, double factor)
+{
+    const int ige = {{ solver_name | upper }}_FIELD_{{ network.energy_term.name }};
+    if (calculate_rhs_{{ solver_name }}(u, rhs, 1, N_FIELDS, (void *) data) != 0) return -1.0;
+    double ntot = 0.0;
+    for (int f = 0; f < N_FIELDS; f++) if (f != ige) ntot += u[f];
+    double tmin = HUGE_VAL;
+    for (int f = 0; f < N_FIELDS; f++) {
+        if (f != ige && !(u[f] > 1.0e-6 * ntot)) continue;
+        if (rhs[f] != 0.0) {
+            double t = fabs(u[f] / rhs[f]);
+            if (t < tmin) tmin = t;
+        }
+    }
+    return fmin(dt, factor * tmin);
+}
+
 static inline void gather(const {{ solver_name }}_grid *grid, long idx, double *u)
 {
     for (int f = 0; f < N_FIELDS; f++) u[f] = grid->fields[f][idx] * grid->to_cgs[f];
@@ -180,14 +208,20 @@ int {{ solver_name }}_solve_grid({{ solver_name }}_context *ctx,
         {
             {{ solver_name }}_data *data = thread_data(ctx, redshift);
             {{ solver_name }}_scratch *sc = {{ solver_name }}_alloc_scratch(1);
-            double u[N_FIELDS];
+            double u[N_FIELDS], rhs[N_FIELDS];
             #pragma omp for schedule(dynamic, 16)
             for (long c = 0; c < r.ncell; c++) {
                 long idx = cell_index(&r, c);
                 gather(grid, idx, u);
+                double first = -1.0;
+                if (ctx->opts.first_step_timescale > 0.0) {
+                    reset_temperature_guess(data);
+                    first = timescale_first_step(data, u, rhs, dt, ctx->opts.first_step_timescale);
+                }
+                if (!(first > 0.0)) first = ctx->opts.first_step_fraction * dt;
                 reset_temperature_guess(data);
                 double ttot = {{ solver_name }}_advance(data, sc, u, 1, dt, ctx->opts.niter,
-                                                        ctx->opts.first_step_fraction * dt,
+                                                        first,
                                                         ctx->opts.reltol, ctx->opts.floor_value,
                                                         1, NULL, NULL, NULL);
                 if (ttot < dt) failed++;

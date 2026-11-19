@@ -40,17 +40,22 @@ typedef struct {
 
 typedef struct {
     int niter;                  /* max accepted sub-steps per cell per call */
-    double first_step_fraction; /* first sub-step = this * dt (then doubles on
-                                   success, halves on failure); <= 0 means
-                                   dt / niter */
+    double first_step_timescale; /* first sub-step = min(dt, this * the cell's
+                                   shortest e-folding time: any species
+                                   holding > 1e-6 of the total number density,
+                                   or the energy). <= 0 disables, falling back
+                                   to first_step_fraction. */
+    double first_step_fraction; /* otherwise first sub-step = this * dt; <= 0
+                                   means dt / niter. Either way the sub-step
+                                   then doubles on success, halves on failure. */
     double reltol;              /* Newton relative tolerance */
     double floor_value;         /* abundance floor (cgs) */
     int use_cie_optical_depth;  /* see {{ solver_name }}_data */
     int use_h2_optical_depth;   /* see {{ solver_name }}_data */
 } {{ solver_name }}_options;
 
-/* niter=10000, first_step_fraction=1/200, reltol=1e-5, floor_value=1e-20,
-   both optical depths on. */
+/* niter=10000, first_step_timescale=0.1, first_step_fraction=1/200,
+   reltol=1e-5, floor_value=1e-20, both optical depths on. */
 void {{ solver_name }}_default_options({{ solver_name }}_options *opts);
 
 typedef struct {{ solver_name }}_context {{ solver_name }}_context;

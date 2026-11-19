@@ -76,3 +76,27 @@ def primordial_ics(nH=1e4, x_ion=1e-4, x_H2=1e-6, T_guess=1.0e12):
         "de": np.array([nH * x_ion]),
         "ge": np.array([T_guess]),
     }
+
+
+def timescale_first_step(mod, x, dt, factor=0.1, redshift=0.0):
+    """The C API's default first sub-step for one cell (cgs state `x`,
+    SPECIES_NAMES order), computed the same way, in the same order: one
+    RHS evaluation from a fresh temperature guess, then min(dt, factor x
+    shortest e-folding time over the energy and every species above
+    1e-6 of the total number density)."""
+    names = list(mod.SPECIES_NAMES)
+    s = mod.Solver(1, redshift=redshift)
+    r = s.evaluate_rhs(dict(zip(names, x)))
+    s.close()
+    ige = names.index("ge")
+    ntot = 0.0
+    for f, n in enumerate(names):
+        if f != ige:
+            ntot += x[f]
+    tmin = float("inf")
+    for f, n in enumerate(names):
+        if f != ige and not (x[f] > 1.0e-6 * ntot):
+            continue
+        if r[n] != 0.0:
+            tmin = min(tmin, abs(x[f] / r[n]))
+    return min(dt, factor * tmin)

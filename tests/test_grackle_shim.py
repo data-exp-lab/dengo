@@ -27,6 +27,7 @@ import numpy as np
 import pytest
 
 import dengo.grackle_shim as grackle_shim
+from conftest import timescale_first_step
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 HARNESS = os.path.join(HERE, "grackle_shim", "compare_grackle.c")
@@ -100,7 +101,8 @@ def dengo_reference(mod, res, dt, z):
         for g in FIELDS:
             s.state[0, mod.SPECIES_INDEX[DENGO[g]]] = f[g] * fac[g]
         s.state[0, mod.SPECIES_INDEX["ge"]] = f["internal_energy"] * fac["internal_energy"]
-        s.step_inplace(dt, niter=10000, first_step=dt / 200.0)
+        x = np.array(s.state[0])
+        s.step_inplace(dt, niter=10000, first_step=timescale_first_step(mod, x, dt, redshift=z))
         new = {g: s.state[0, mod.SPECIES_INDEX[DENGO[g]]] / fac[g] for g in FIELDS}
         new["internal_energy"] = s.state[0, mod.SPECIES_INDEX["ge"]] / fac["internal_energy"]
         s.close()

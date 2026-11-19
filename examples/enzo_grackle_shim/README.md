@@ -115,41 +115,41 @@ Measured on the CoolingTest: 1775 cells × 1289 cycles, about 2.29 M
 cell-solves. `DENGO_GRACKLE_STATS=1` makes the library print its own
 counters at exit.
 
-| Setup | Wall time | Per cell-solve |
+| Setup | Wall time | Per cell-solve | Sub-steps per cell-solve |
+|---|---|---|---|
+| Real Grackle 3.4.1 (gracklepy wheel build, serial) | 14 s | ~5 µs (including Enzo) | – |
+| dengo-grackle, 1 thread | 35 s | 11.8 µs | 1.20 + 0.22 rejected |
+| dengo-grackle, 24 threads | 12.6 s | 1.9 µs | same |
+
+How dengo-grackle got there, single-threaded, all on 2026-11-18:
+
+| Change | Per cell-solve | Effect on results |
 |---|---|---|
-| Real Grackle 3.4.1 (gracklepy wheel build, serial) | 14 s | ~5 µs (including Enzo) |
-| dengo-grackle, 1 thread | 170 s | 70.9 µs |
-| dengo-grackle, 24 threads | 24 s | 6.5 µs |
+| First version | ~250 µs | – |
+| First sub-step `dt/200` instead of `dt/max_iterations` | 153 µs | small (median 0.06%) |
+| Solver core compiled without OpenMP (nested teams were ~half the cost) | 71 µs | bit-identical |
+| `-fno-math-errno` | 61 µs | bit-identical |
+| Integer powers generated as products (`pow()` calls: 22 → 4) | 54 µs | ~1e-15 |
+| First sub-step = min(dt, 0.1 × the cell's shortest timescale) | **11.8 µs** | see below |
 
 How these numbers were checked:
 
-- **Sub-steps match standalone.** Inside Enzo, each cell-solve takes
-  8.10 accepted + 0.13 rejected sub-steps on average. dengo's standalone
-  Cython `Solver`, run on the same states with the same `dt`, takes 8.10.
-- **The shim adds only ~4%.** Before the OpenMP fix below, standalone
-  cost 146 µs per cell-solve against 153 µs inside Enzo.
+- **Sub-steps match standalone.** Inside Enzo, the sub-step counts match
+  dengo's standalone solver on the same states with the same `dt`.
+- **The shim adds only ~4%** on top of the standalone solver.
 - **Setup is not repeated in any way that matters.** Per-call setup (the
   table copy) is 0.1% of instructions (valgrind callgrind).
 - **Caches are not a problem.** Cachegrind shows an L1-data miss rate of
-  1.0% and a last-level miss rate of 0.0%. The 2.4% instruction-cache miss
-  rate comes mostly from the long, generated Jacobian.
+  1.0% and a last-level miss rate of 0.0%.
 
-**Fixed, 2026-11-18:** about half the cost was nested-OpenMP overhead.
-The C API parallelizes over cells, and inside that region every per-cell
-RHS, Jacobian and rate call entered its own `omp parallel` region
-(serialized by its `if` clause). libgomp still sets up, and allocates, a
-team for each of those, 5.8 M times in a 30-cycle run. The library now
-compiles the solver core without OpenMP; only the loop over cells is
-parallel. That cut the cost from 153 to 71 µs per cell-solve (2.15×),
-with identical results. Earlier fixes in the same session: the first
-sub-step now starts at `dt/200`, as dengo was tuned (it had been
-`dt/max_iterations`); before both fixes the single-thread run took 577 s.
+The timescale-based first step was chosen by checking all candidate
+policies against a tight BDF reference (NOTES.md). On easy cells it is
+3–7× cheaper, for about twice the solver's existing truncation error
+there. In this test, the outputs move by a median of ≲1% in species,
+except for electron fractions near the 10⁻²⁰ floor in cold neutral gas,
+which can't ionize at all (no k57/k58). The free-fall collapse track
+moves by <0.5% in T.
 
-**Remaining gap: ~12× per core.** Most cells in this test are easy, low
-density and close to equilibrium. Grackle crosses those in about one
-sub-cycle, while dengo's policy always takes about 8 implicit sub-steps
-(doubling from `dt/200`), at ~8.7 µs each. Letting easy cells try larger
-first steps would close much of that. It changes the solver's
-robustness, so it hasn't been done here. The September C benchmark, where
-dengo was faster at grid scale, used a stiff n = 10¹³ cm⁻³ state, where
-Grackle needs many sub-cycles too.
+What's left per sub-step: the dense 10×10 linear solve is about a third
+of the instructions (NOTES.md has the options), and dengo's sub-steps
+carry no truncation-error control, which is the next item.
