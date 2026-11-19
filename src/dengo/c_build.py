@@ -81,7 +81,9 @@ def build_library(name, sources, output_dir, include_dirs=(), defines=(),
     result = {"openmp": bool(use_openmp)}
     if shared:
         so = os.path.join(output_dir, "lib%s.so" % name)
-        _run([_cxx(), "-shared", "-o", so] + objects + omp)
+        # SONAME, so binaries record "lib<name>.so" (not this path) and
+        # LD_LIBRARY_PATH / a moved install can select the library.
+        _run([_cxx(), "-shared", "-Wl,-soname,lib%s.so" % name, "-o", so] + objects + omp)
         result["shared"] = so
     if static:
         a = os.path.join(output_dir, "lib%s.a" % name)
