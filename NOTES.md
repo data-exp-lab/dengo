@@ -4699,3 +4699,7 @@ cells, 0.01 t_ff:
   loose for long steps, the remedy is the tolerance default, not the
   filter.
 - 143 tests pass. Enzo CoolingTest and AMR cosmology not rerun.
+- **AMR cosmology (/data/dengo-test, `dengo-v5/` vs `grackle-v5/`, run
+  concurrently):** dengo 59.4 s against Grackle 49.0 s; chemistry 14.9 s,
+  3.36 µs per cell-solve, 99.8% quiet. Unchanged from before the filters.
+  z = 3 agreement unchanged: T +4.5%, e⁻ +6.1%, H2 +0.7%.
