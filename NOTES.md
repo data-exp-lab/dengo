@@ -4420,3 +4420,38 @@ principled fix, for accuracy and for the speed/accuracy trade-off.
 Recommendation (pending decision): adopt the timescale-based first step;
 make error control the next item. Evaluation scripts/results:
 scratchpad stepeval/ (not committed).
+
+### 2026-11-18, later — first step adopted; the hard-case errors are truncation error
+
+Adopted (commit 83cfa35): C API first sub-step = min(dt, 0.1 x the cell's
+shortest timescale). Enzo CoolingTest 54.3 -> 11.8 us per cell-solve
+single-threaded (1.20 + 0.22 sub-steps per cell), 35 s wall vs real
+Grackle's 14 s (12.6 s on 24 threads); free-fall track within 0.5% in T.
+
+Why dengo can be far from the BDF reference on hard cases, under any
+first-step policy (incl. the old one, and in the Cython Solver too):
+re-ran the worst cases with fixed, small sub-steps --
+
+| case | reference T | current policy | fixed dt/1e3, 1e4, 1e5 |
+|---|---|---|---|
+| n=1000, 7.7e3 K, dt 3e12 s | 5351 | 8718 | 5349, 5351, 5351 |
+| n=1, neutral 6.3e4 K, dt 3e10 s | 6.302e4 | 9.812e4 | 6.300e4, 6.301e4, 6.301e4 |
+| n=100, 3.5e6 K, dt 3e12 s | 6678 | 7.86e5 | 2.95e6, 7.3e5, 6678 |
+| n=1000, 6.5e6 K, dt 3e12 s | 375 | 1.46e6 | 5.37e6, 1.46e6, 540 |
+
+So dengo converges to the reference as the steps shrink: it's truncation
+error, of two kinds -- smooth first-order error, and, for hot dense gas,
+convergence to a *wrong root*: each BE step solves
+e_new = e_old - dt*Lambda(T_new)*n^2, which has several roots for a
+non-monotonic Lambda(T) once the step is >> t_cool, and Newton settles on
+a spurious ~1e6 K one that reports success. Grackle avoids this by
+sub-cycling on its own cooling/chemistry timescales.
+
+Next item, design for discussion: step-doubling error control in
+_advance() -- compare one step of h against two of h/2, accept/shrink on
+the difference vs a tolerance, size the next step from the estimate
+(instead of always 2x), keep the two-half-step (optionally Richardson-
+extrapolated) result. ~3 implicit solves per accepted step instead of 1,
+but larger steps become safe and wrong roots are caught (they disagree
+badly with the half-step pair). Validate with the BDF-reference harness
+including these hard cases.
