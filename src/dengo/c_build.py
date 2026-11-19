@@ -29,7 +29,8 @@ def _compile_objects(sources, obj_dir, include_dirs, defines, extra_flags):
     objects = []
     for src in sources:
         obj = os.path.join(obj_dir, os.path.splitext(os.path.basename(src))[0] + ".o")
-        cmd = [_cxx(), "-x", "c++", "-c", "-O3", "-fPIC", "-std=c++11", src, "-o", obj]
+        cmd = [_cxx(), "-x", "c++", "-c", "-O3", "-fno-math-errno", "-fPIC", "-std=c++11",
+               src, "-o", obj]
         cmd += ["-I%s" % d for d in include_dirs]
         cmd += ["-D%s" % d for d in defines]
         cmd += list(extra_flags)
