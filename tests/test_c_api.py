@@ -152,7 +152,7 @@ def test_solve_grid_matches_cython_per_cell(capi, primordial_solver):
         first = timescale_first_step(mod, x, dt, redshift=z)
         s = mod.Solver(1, redshift=z)
         s.state[0, :] = x
-        ok, _ = s.step_inplace(dt, first_step=first)
+        ok, _ = s.step_inplace(dt, first_step=first, error_tolerance=0.1)
         expected_failures += (not ok)
         # the C side divides by to_cgs on the way out; undo identically
         np.testing.assert_array_equal(got[c], (s.state[0] / pg.to_cgs) * pg.to_cgs)

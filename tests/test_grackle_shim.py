@@ -67,10 +67,11 @@ def shim(tmp_path_factory):
     return dict(prefix=prefix, built=built, exe=exe, real_exe=real_exe)
 
 
-def run(exe, out, comoving, three_body, cie, h2opt, dt, *extra):
+def run(exe, out, comoving, three_body, cie, h2opt, dt, *extra, env=None):
     proc = subprocess.run([exe, str(out), str(comoving), str(three_body), str(cie), str(h2opt),
                            repr(dt)] + [str(e) for e in extra],
-                          capture_output=True, text=True)
+                          capture_output=True, text=True,
+                          env=None if env is None else {**os.environ, **env})
     assert proc.returncode == 0, proc.stderr + proc.stdout
     with open(out) as f:
         return json.load(f), proc.stderr + proc.stdout
@@ -92,7 +93,7 @@ def to_cgs_factors(res):
     return fac
 
 
-def dengo_reference(mod, res, dt, z):
+def dengo_reference(mod, res, dt, z, error_tolerance=0.1):
     """Each cell through the Cython Solver, with Grackle's conventions."""
     fac = to_cgs_factors(res)
     out = {k: [] for k in FIELDS + ["internal_energy"]}
@@ -102,7 +103,8 @@ def dengo_reference(mod, res, dt, z):
             s.state[0, mod.SPECIES_INDEX[DENGO[g]]] = f[g] * fac[g]
         s.state[0, mod.SPECIES_INDEX["ge"]] = f["internal_energy"] * fac["internal_energy"]
         x = np.array(s.state[0])
-        s.step_inplace(dt, niter=10000, first_step=timescale_first_step(mod, x, dt, redshift=z))
+        s.step_inplace(dt, niter=10000, first_step=timescale_first_step(mod, x, dt, redshift=z),
+                       error_tolerance=error_tolerance)
         new = {g: s.state[0, mod.SPECIES_INDEX[DENGO[g]]] / fac[g] for g in FIELDS}
         new["internal_energy"] = s.state[0, mod.SPECIES_INDEX["ge"]] / fac["internal_energy"]
         s.close()
@@ -217,4 +219,16 @@ def test_slightly_negative_species(shim, tmp_path):
     if shim["real_exe"]:
         real, _ = run(shim["real_exe"], tmp_path / "r.json", 0, 4, 1, 1, 3.15e10, "negative")
         np.testing.assert_allclose(res["T0"], real["T0"], rtol=1e-2)
+
+
+def test_error_tolerance_from_environment(shim, primordial_solver, tmp_path):
+    """DENGO_GRACKLE_ERROR_TOLERANCE overrides the default (0.1); 0
+    disables error control, matching the Cython Solver run without it."""
+    _, mod = primordial_solver
+    dt = 3.15e10
+    res, _ = run(shim["exe"], tmp_path / "o.json", 0, 4, 1, 1, dt,
+                 env={"DENGO_GRACKLE_ERROR_TOLERANCE": "0"})
+    ref = dengo_reference(mod, res, dt, 0.0, error_tolerance=0.0)
+    for g in FIELDS:
+        np.testing.assert_array_equal(res["%s_density1" % g], ref[g], err_msg=g)
 

@@ -46,7 +46,12 @@ void {{ solver_name }}_default_options({{ solver_name }}_options *opts)
        the existing truncation error there; same cost and accuracy on
        hard ones). */
     opts->first_step_timescale = 0.1;
-    opts->error_tolerance = 0.0;   /* set from the evaluation below */
+    /* Local truncation-error control per sub-step, relative. 0.1 is about
+       Grackle's own limit (it sub-cycles so nothing changes by more than
+       ~10% per sub-cycle); against a tight BDF reference it cuts the worst
+       errors 2-4x on dense collapse and long steps for ~1.3x the cost on
+       easy cells (NOTES.md). */
+    opts->error_tolerance = 0.1;
     opts->reltol = 1.0e-5;
     opts->floor_value = 1.0e-20;
     opts->use_cie_optical_depth = 1;

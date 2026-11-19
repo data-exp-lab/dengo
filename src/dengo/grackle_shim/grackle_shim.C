@@ -407,6 +407,10 @@ int local_initialize_chemistry_data(chemistry_data *my_chemistry,
     primordial_options opts;
     primordial_default_options(&opts);
     opts.niter = my_chemistry->max_iterations;
+    /* Grackle has no parameter for this; tighten (or, with 0, disable)
+       dengo's per-sub-step error control from the environment. */
+    const char *tol_env = getenv("DENGO_GRACKLE_ERROR_TOLERANCE");
+    if (tol_env != NULL && tol_env[0] != '\0') opts.error_tolerance = atof(tol_env);
     /* Grackle's cie_cooling switches on both the CIE cooling term and the
        continuum optical-depth suppression that goes with it. */
     opts.use_cie_optical_depth = my_chemistry->cie_cooling ? 1 : 0;

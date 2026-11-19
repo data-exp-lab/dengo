@@ -58,7 +58,8 @@ typedef struct {
 } {{ solver_name }}_options;
 
 /* niter=10000, first_step_timescale=0.1, first_step_fraction=1/200,
-   reltol=1e-5, floor_value=1e-20, both optical depths on. */
+   error_tolerance=0.1, reltol=1e-5, floor_value=1e-20, both optical
+   depths on. */
 void {{ solver_name }}_default_options({{ solver_name }}_options *opts);
 
 typedef struct {{ solver_name }}_context {{ solver_name }}_context;
