@@ -4646,3 +4646,28 @@ scripts: /data3/PopIII-Binary/copy/chem-test/README.md.
 - **Not yet rerun:** Enzo CoolingTest and the AMR cosmology run. The
   filter can only make the quiet path more likely there.
 - **Not on `grackle-physics-align`** (that branch predates it).
+
+## 2026-11-19 (late): tracing the remaining 10²–10⁵ cost (long steps)
+
+Traced with a temporary DENGO_TRACE build (not committed) on the Pop III
+cells, 0.01 t_ff:
+- **10²–10³:** most cells never try the quiet path. It's only tried when
+  the planned first step (0.1 t_min) covers dtf, and here t_min ≈ 6 dtf,
+  so the plan is ~0.6 dtf.
+- **10⁴–10⁵:** the quiet path is tried but 80–90% declined, with err
+  only 1.1–1.7. The flagged component is always the electrons: f_e flips
+  sign within the step (+1e-15 → −1e-16).
+  - Cause: H⁻ is out of equilibrium at the start, and its detachment
+    releases electrons. H⁻ is the fast mode, but it shows up in e⁻
+    through the coupling between species, which the diagonal filter
+    can't damp. The same estimate causes the implicit-step rejections
+    there (~1/3 of steps at 10⁴).
+- **Prototype "always try quiet" (reverted):** 10² 15 → 4.7 µs and 10³
+  29 → 21 at 0.01 t_ff, but worse at 0.1 t_ff (10² 46 → 84) and at 10¹⁵.
+  It also accepted a 5.7%-error quiet step at 10⁸, 0.1 t_ff, so the quiet
+  path's acceptance test isn't reliable for very long steps, and the
+  t_min pre-filter is doing useful work.
+- **Candidate generic fix:** full (I − hJ)⁻¹ filtering of the error
+  vector, as in RADAU5. Apply it only when the diagonal-filtered estimate
+  exceeds 1 (one dense 10×10 solve), which would damp coupled fast modes
+  like H⁻ → e⁻. Not implemented.
