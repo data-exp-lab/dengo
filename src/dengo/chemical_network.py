@@ -31,10 +31,37 @@ import h5py
 import jinja2
 import numpy as np
 import sympy
-from sympy.printing import ccode
+from sympy.printing.c import C99CodePrinter
 from sympy.utilities import lambdify
 
 from .chemistry_constants import mh, tevk, tiny
+
+
+class _DengoCodePrinter(C99CodePrinter):
+    """C printer for generated solvers: integer powers with |n| <= 4
+    (including float exponents with an integral value, e.g. the -2.0 that
+    differentiating x**(-1.0) produces) become explicit products instead
+    of pow() calls. pow() is a library call costing on the order of a
+    hundred instructions; squares GCC already folds, but cubes, fourth
+    powers and negative powers it can't (without -ffast-math) because the
+    product rounds differently. That rounding difference is ~1 ulp per
+    multiplication."""
+
+    def _print_Pow(self, expr):
+        exp = expr.exp
+        # (sympy's Float(-2.0) != Integer(-2), so compare as Python floats)
+        if exp.is_Number and float(exp) == int(exp) and 2 <= abs(int(exp)) <= 4:
+            n = abs(int(exp))
+            base = self._print(expr.base)
+            if not (expr.base.is_Symbol or expr.base.is_Number):
+                base = "(%s)" % base
+            prod = "*".join([base] * n)
+            return "(%s)" % prod if float(exp) > 0 else "(1.0/(%s))" % prod
+        return super()._print_Pow(expr)
+
+
+def ccode(expr, assign_to=None, **settings):
+    return _DengoCodePrinter(settings).doprint(expr, assign_to)
 from .periodic_table import periodic_table_by_name
 
 logger = logging.getLogger("dengo")
