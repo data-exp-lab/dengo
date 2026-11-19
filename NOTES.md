@@ -4671,3 +4671,31 @@ cells, 0.01 t_ff:
   vector, as in RADAU5. Apply it only when the diagonal-filtered estimate
   exceeds 1 (one dense 10×10 solve), which would damp coupled fast modes
   like H⁻ → e⁻. Not implemented.
+
+## 2026-11-19 (late): coupled (full) error filter — branch full-error-filter
+
+- **What:** when the diagonally filtered estimate rejects a *backward
+  Euler* step, re-check it with the full filter. Solve
+  (I − hJ) w = (h/2)(f1 − f0) per cell, in tolerance-scaled variables,
+  with J taken at the end state (rates are already cached from f1); one
+  10×10 solve. Shampine/RADAU5-style.
+- **Not applied to the quiet step:** that step updates each component
+  from its own diagonal only, so a coupled fast mode genuinely puts
+  error into it.
+- **Controls:** option `coupled_error_filter` (default 1), env
+  `DENGO_GRACKLE_COUPLED_FILTER=0` to disable.
+- **Cost** (Pop III, 100-cell grids):
+  - 0.01 t_ff: 10⁴ 46 → 29 µs, 10⁵ 37 → 28;
+  - 0.1 t_ff: 10³ 62 → 51, 10⁴ 113 → 41, 10⁵ 141 → 35;
+  - neutral elsewhere.
+- **Accuracy against the exact solutions** (all 56k cells run; 5 cells
+  per decade with exact references; median and max):
+  - identical everywhere except 10⁴–10⁵ at 0.1 t_ff, where the T median
+    goes 2.4 → 3.3e-3 and 4.7 → 5.4e-3, and the max 1.8 → 2.0e-2;
+  - f_H2 essentially unchanged.
+- **Separate observation (from the diagonal filter, d15aba0):** at the
+  default tolerance 0.1 and 0.1 t_ff steps, worst-case T errors are 2–4%
+  at 10²–10¹¹ (median ~1%); at 0.01 t_ff they're ≤0.3%. If that's too
+  loose for long steps, the remedy is the tolerance default, not the
+  filter.
+- 143 tests pass. Enzo CoolingTest and AMR cosmology not rerun.

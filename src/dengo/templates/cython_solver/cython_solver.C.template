@@ -570,6 +570,7 @@ void ensure_electron_consistency(double *input, int nstrip, int nchem)
     sc->n_quiet = 0;
     sc->n_quiet_rejected = 0;
     sc->allow_quiet = 1;
+    sc->coupled_filter = 1;
     sc->f0_valid = 0;
     return sc;
 }
@@ -614,6 +615,65 @@ static double {{ solver_name }}_error_norm(const double *y, const double *f0, co
             if (jd != NULL && jd[c * n + i] < 0.0) est /= 1.0 - h * jd[c * n + i];
             double e = (denom > 0.0) ? est / denom : (est > 0.0 ? HUGE_VAL : 0.0);
             if (e > worst) worst = e;
+        }
+    }
+    return worst;
+}
+
+/* The same estimate with the full filter: per cell, solve
+       (I - h J) w = (h/2)(f1 - f0)
+   in variables scaled by each component's tolerance tol*(|y| + floor),
+   and return max |w| over all cells -- Shampine's filtered estimate, as
+   RADAU5 uses for its first/rejected steps. Backward-Euler steps only. J
+   is the Jacobian at y (the
+   end-of-step state; the caller evaluates it right after f1 there). A
+   fast mode reached through coupling -- e.g. H- relaxing to equilibrium,
+   which shows up as a jump in the electrons' rate -- is damped by (I-hJ)^-1
+   as backward Euler itself damps it; slow components are unchanged. Only
+   ever called when the diagonal estimate already exceeds 1. HUGE_VAL if
+   the system is singular (then the step is rejected as before). */
+static double {{ solver_name }}_coupled_error_norm(const double *y, const double *f0, const double *f1,
+                                                 const double *J, int dims, int n,
+                                                 double h, double tol)
+{
+    double A[NSPECIES * NSPECIES], b[NSPECIES], w[NSPECIES];
+    double worst = 0.0;
+    for (int c = 0; c < dims; c++) {
+        const double *yc = y + c * n;
+        const double *Jc = J + (size_t) c * n * n;   /* df_i/dy_j at [j*n + i] */
+        double ntot = 0.0;
+        for (int i = 0; i < n; i++) if (i != ENERGY_INDEX) ntot += yc[i];
+        for (int i = 0; i < n; i++) {
+            w[i] = tol * (fabs(yc[i]) + ((i == ENERGY_INDEX) ? 0.0 : 1.0e-6 * ntot));
+            if (!(w[i] > 0.0)) return HUGE_VAL;
+        }
+        for (int i = 0; i < n; i++) {
+            b[i] = 0.5 * h * (f1[c * n + i] - f0[c * n + i]) / w[i];
+            for (int j = 0; j < n; j++)
+                A[i * n + j] = ((i == j) ? 1.0 : 0.0) - h * Jc[j * n + i] * w[j] / w[i];
+        }
+        /* Gaussian elimination, partial pivoting */
+        for (int k = 0; k < n; k++) {
+            int p = k;
+            for (int i = k + 1; i < n; i++) if (fabs(A[i * n + k]) > fabs(A[p * n + k])) p = i;
+            if (!(fabs(A[p * n + k]) > 0.0)) return HUGE_VAL;
+            if (p != k) {
+                for (int j = 0; j < n; j++) { double t = A[k * n + j]; A[k * n + j] = A[p * n + j]; A[p * n + j] = t; }
+                double t = b[k]; b[k] = b[p]; b[p] = t;
+            }
+            for (int i = k + 1; i < n; i++) {
+                double m = A[i * n + k] / A[k * n + k];
+                if (m == 0.0) continue;
+                for (int j = k; j < n; j++) A[i * n + j] -= m * A[k * n + j];
+                b[i] -= m * b[k];
+            }
+        }
+        for (int i = n - 1; i >= 0; i--) {
+            double s = b[i];
+            for (int j = i + 1; j < n; j++) s -= A[i * n + j] * w[j];
+            w[i] = s / A[i * n + i];
+            if (!(fabs(w[i]) < HUGE_VAL)) return HUGE_VAL;
+            if (fabs(w[i]) > worst) worst = fabs(w[i]);
         }
     }
     return worst;
@@ -672,6 +732,10 @@ double {{ solver_name }}_advance({{ solver_name }}_data *data,
             if (!(input[i] >= 0.0)) quiet_ok = 0;
         }
         if (quiet_ok && calculate_rhs_{{ solver_name }}(input, sc->f1, dims, n, (void *) data) == 0) {
+            /* (No coupled filter here: the quiet step updates each component
+               from its own diagonal only, so a fast mode felt through
+               coupling really does put error into it -- unlike backward
+               Euler, which damps it. See _coupled_error_norm.) */
             double err = {{ solver_name }}_error_norm(input, sc->f0, sc->f1, sc->s, dims, n, dtf, err_tol);
             if (err <= 1.0) {
                 for (int i = 0; i < total; i++)
@@ -714,6 +778,9 @@ double {{ solver_name }}_advance({{ solver_name }}_data *data,
                 rv = 1;
             } else {
                 double err = {{ solver_name }}_error_norm(input, sc->f0, sc->f1, jd, dims, n, dt, err_tol);
+                if (err > 1.0 && sc->coupled_filter &&
+                    calculate_jacobian_{{ solver_name }}(input, sc->Ju, dims, n, (void *) data) == 0)
+                    err = {{ solver_name }}_coupled_error_norm(input, sc->f0, sc->f1, sc->Ju, dims, n, dt, err_tol);
                 growth = (err > 0.0) ? 0.9 / sqrt(err) : 5.0;
                 growth = fmin(5.0, fmax(0.2, growth));
                 if (err > 1.0) rv = 2;  /* converged, but too inaccurate */

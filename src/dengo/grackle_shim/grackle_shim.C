@@ -414,6 +414,8 @@ int local_initialize_chemistry_data(chemistry_data *my_chemistry,
     if (tol_env != NULL && tol_env[0] != '\0') opts.error_tolerance = atof(tol_env);
     const char *quiet_env = getenv("DENGO_GRACKLE_QUIET_PATH");
     if (quiet_env != NULL && quiet_env[0] != '\0') opts.quiet_path = atoi(quiet_env);
+    const char *filt_env = getenv("DENGO_GRACKLE_COUPLED_FILTER");
+    if (filt_env != NULL && filt_env[0] != '\0') opts.coupled_error_filter = atoi(filt_env);
     /* Grackle's cie_cooling switches on both the CIE cooling term and the
        continuum optical-depth suppression that goes with it. */
     opts.use_cie_optical_depth = my_chemistry->cie_cooling ? 1 : 0;

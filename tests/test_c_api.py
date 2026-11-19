@@ -46,7 +46,8 @@ def capi(tmp_path_factory):
                     ("reltol", ctypes.c_double),
                     ("floor_value", ctypes.c_double),
                     ("use_cie_optical_depth", ctypes.c_int),
-                    ("use_h2_optical_depth", ctypes.c_int)]
+                    ("use_h2_optical_depth", ctypes.c_int),
+                    ("coupled_error_filter", ctypes.c_int)]
 
     lib.capi_create_from_file.restype = ctypes.c_void_p
     lib.capi_create_from_file.argtypes = [ctypes.c_char_p, ctypes.POINTER(Options)]

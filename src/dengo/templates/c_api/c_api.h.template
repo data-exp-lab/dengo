@@ -60,11 +60,17 @@ typedef struct {
     double floor_value;         /* abundance floor (cgs) */
     int use_cie_optical_depth;  /* see {{ solver_name }}_data */
     int use_h2_optical_depth;   /* see {{ solver_name }}_data */
+    int coupled_error_filter;   /* 1: when the (diagonally filtered) error
+                                   estimate rejects a step, re-check it
+                                   with the full (I - hJ)^-1 filter, so a
+                                   fast mode felt through coupling (e.g.
+                                   H- relaxing, seen in e-) doesn't reject
+                                   an accurate step. 0: diagonal only. */
 } {{ solver_name }}_options;
 
 /* niter=10000, first_step_timescale=0.1, first_step_fraction=1/200,
    error_tolerance=0.1, quiet_path=1, reltol=1e-5, floor_value=1e-20,
-   both optical depths on. */
+   both optical depths on, coupled_error_filter=1. */
 void {{ solver_name }}_default_options({{ solver_name }}_options *opts);
 
 typedef struct {{ solver_name }}_context {{ solver_name }}_context;

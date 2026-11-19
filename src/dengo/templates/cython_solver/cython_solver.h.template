@@ -122,6 +122,9 @@ typedef struct {{ solver_name }}_scratch {
     long long n_quiet, n_quiet_rejected;  /* quiet-cell path taken / tried and declined */
     int allow_quiet;  /* 1 (default): try the quiet-cell path when error
                          control is on (see _advance) */
+    int coupled_filter; /* 1 (default): re-check a rejecting error estimate
+                           with the full (I - hJ)^-1 filter (see
+                           _coupled_error_norm) */
     int f0_valid;     /* caller already put the RHS at the (electron-
                          consistent) starting state in f0, with the solver
                          data's temperature/rate caches from that same
