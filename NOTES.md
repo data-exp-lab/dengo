@@ -4344,3 +4344,40 @@ a tight BDF reference where results are expected to move):
 Separately, the standalone Cython Solver at dims=1 still enters (if-
 serialized) OpenMP regions from every per-cell call; the same cost the
 C library just shed. Worth the same treatment for single-cell Python use.
+
+### 2026-11-18, later — working the queue: results
+
+Enzo CoolingTest, single thread, per cell-solve (identical sub-step counts
+throughout: 8.10 accepted + 0.13 rejected):
+
+| change | us/cell-solve | results |
+|---|---|---|
+| start of queue | 70.9 | |
+| `-fno-math-errno` (pow() treated as pure: Jacobian 16 -> 9 calls) | 61.2 | bit-identical |
+| codegen: integer powers \|n\|<=4 as products (22 -> 4 pow() calls) | **54.3** | <= 3.4e-9 rel. (Enzo output 3.5e-15) |
+
+Tried and reverted (no gain):
+- **Gauss_Elim at compile-time size** (template on n), with `restrict`,
+  hoisted loads, full unrolling, `-march=native`: all within ~5% of the
+  original in a microbenchmark (~950 ns per 10x10 solve on this X5650).
+  The ~4000 instructions per solve are the real cost of a dense 10x10
+  LU with partial pivoting, not loop overhead -- earlier claim that it
+  was "several times" a tight solve was wrong. Reciprocal-multiply
+  instead of 55 divisions: only 15% faster, and not bit-identical.
+- **Skipping zero multipliers** in the elimination (bit-identical):
+  slower, 54.3 -> 58.2 us; the branches cost more than the multiplies
+  saved and block vectorization.
+- **Sharing the optical-depth factors** between RHS and Jacobian
+  (bit-identical): no measurable change.
+
+Remaining option for the linear solve (not done -- needs a decision):
+block-structured elimination using the Jacobian's sparsity (64/100
+nonzeros: a dense 5x5 H block and a 3x3 He block coupled only through
+the e- and energy rows/columns). Eliminating He block, then H block,
+then the 2x2 (e-, ge) needs ~120 multiply-subtracts instead of ~285,
+but restricts pivoting to within each block -- a numerical-stability
+trade-off. Would also need generalising to arbitrary networks (generate
+the elimination from the symbolic sparsity pattern).
+
+Not done: initial temperature guess (measured ~3% of instructions in
+the whole temperature solve; at most ~1% to gain).
