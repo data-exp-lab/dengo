@@ -4621,3 +4621,28 @@ scripts: /data3/PopIII-Binary/copy/chem-test/README.md.
     (Lique 2015). That's a shim mismatch: −35% low-density H2 cooling at
     1000–2000 K.
   - Not yet fixed; these are physics choices, for the user to decide.
+
+## 2026-11-19 (late): filtered error estimate (d15aba0)
+
+- **Traced cause of the slow long low-density steps:** H⁻ (~10⁻¹² of the
+  gas) relaxing to equilibrium in the first sub-step. (h/2)|f1 − f0|
+  read that as error, rejecting 1–3 accurate first steps per cell and
+  blocking the quiet path. The first-step t_min was *not* the issue; it
+  already skips species below 10⁻⁶ n_tot.
+- **Fix:** est_k /= (1 − h J_kk) for J_kk < 0, the diagonal Shampine
+  filter. Generic; it reuses the Jacobian diagonal, taken right after an
+  RHS evaluation at each step's start.
+- **Pop III dump, 0.01 t_ff, 100-cell grids:** 10² 67 → 15 µs, 10⁸
+  82 → 4, 10¹² 42 → 13; 10¹⁵ unchanged.
+- **Accuracy now tracks the tolerance.** At the default 0.1: ≤0.2% at
+  0.01 t_ff, up to ~1.3% at 0.1 t_ff; before, it had been ~10⁻⁴.
+- **Matched-accuracy cost (1%), summed over 10²–10¹²:**
+  - 0.01 t_ff: Grackle 51 µs, dengo 155 (was 536);
+  - 0.1 t_ff: Grackle 258, dengo 686 (was 1167).
+  - From 10⁹ up, dengo is now at parity or better; at 10¹⁴–10¹⁵ it's
+    still 150–3000× cheaper.
+- **Remaining gap:** 10²–10⁵, where the quiet path is taken for only
+  ~50% of cells.
+- **Not yet rerun:** Enzo CoolingTest and the AMR cosmology run. The
+  filter can only make the quiet path more likely there.
+- **Not on `grackle-physics-align`** (that branch predates it).
