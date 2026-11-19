@@ -4570,3 +4570,27 @@ radiative terms in the RHS (affects Newton convergence, not results).
   (3.3 us/cell-solve), physics unchanged. Chemistry is now ~25% of the
   cosmology run's time; the rest (~45 s) is hydro/gravity shared with
   Grackle's run.
+
+### 2026-11-19, later — chemistry on real Pop III collapse states (PopIII-Binary DataDump0081)
+
+Restarting the 2009 dump in current Enzo failed (HDF4 boundary file, after
+a parameter-meaning change). Instead: 56k cells sampled from the dump
+(n_H 1e2 to 7e15 cm^-3, a full Pop III collapse), each advanced 0.01 or
+0.1 t_ff by real Grackle and dengo-grackle via gracklepy. Write-up and
+scripts: /data3/PopIII-Binary/copy/chem-test/README.md.
+
+- Grackle units pitfall: k57/k58 return `tiny` (1e-20) in *code units*
+  below 3000 K; with density_units = m_H and time_units = 1 s that is a
+  physical 1e-20 cm^3/s, i.e. spurious ionization ~1e-20 n_H s^-1 (1e-12
+  s^-1 at 1e8), which looked like a big Grackle/dengo physics difference
+  at 1e6-1e10. With Enzo's units the codes agree. Harmless in Enzo's own
+  cosmological units (~1e-33 cm^3/s). Possibly worth reporting upstream.
+- Cost per cell (dense cells, single thread): Grackle 46/66 us, dengo
+  129/379 us at 0.01/0.1 t_ff.
+- Self-convergence (1 vs 1000 calls): converged solutions of the two codes
+  agree (T within ~1% to 1e12, 2-4% at 1e13-1e15; f_H2 close except 1e15:
+  0.85 vs 0.70). Grackle's single-call error at 1e14-1e15 is 14-32% in T;
+  dengo's there is <= 0.2%. dengo's weak spot is 1e11-1e13 (0.5-5%).
+- Open: exact BDF reference puts dengo's 0.01 t_ff error at 1e12 at 9% (vs
+  0.5% self-convergence) -- a step-independent offset, or a reference
+  issue; unresolved.
