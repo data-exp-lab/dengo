@@ -4294,3 +4294,53 @@ protostellar-disk both show large, real species changes (H_1: 76->63.9
 and 5e11->7.3 respectively), and virial-shock's own H_1/He_1 are
 confirmed to barely move (0.237->0.237003, 0.0189->0.0189) -- exactly
 the physically-expected result, not a leftover bug. No console errors.
+
+## 2026-11-18 — dengo-grackle in Enzo: per-step cost, and the queued performance work
+
+Branch `enzo-grackle-shim` (see `examples/enzo_grackle_shim/README.md`
+for the Enzo setup and results). After removing nested-OpenMP overhead
+and starting sub-steps at dt/200, the Enzo CoolingTest costs 70.9 us per
+cell-solve single-threaded (8.10 accepted + 0.13 rejected sub-steps, the
+same count dengo's standalone Solver takes on those states; ~8.7 us per
+sub-step) against ~5 us for Grackle. Cachegrind breakdown of what's left
+(single thread, 30 cycles):
+
+| function | share of instructions |
+|---|---|
+| Gauss_Elim (10x10, per Newton sweep) | 31% |
+| pow() (+ log 1.3%) | ~20% |
+| calculate_jacobian | 14% |
+| BE_Resid_FunJac | 8% |
+| interpolate_rates | 6% |
+| calculate_rhs | 6% |
+| calculate_temperature + interpolate_gamma | ~3% |
+
+Queued, in this order; each checked against the bit-for-bit baseline (or
+a tight BDF reference where results are expected to move):
+
+1. **First sub-step for easy cells.** Being evaluated now (fixed
+   fractions dt/200, dt/20, dt/2, dt vs. min(dt, 0.1 x shortest
+   species/energy timescale)) against a scipy BDF reference on Enzo
+   CoolingTest and free-fall states. Expected: ~4-6x fewer sub-steps on
+   low-density, near-equilibrium cells.
+2. **Gauss_Elim.** ~5300 instructions per 10x10 solve: pivot search per
+   row, dense treatment of a fairly sparse Jacobian. A size-specialized or
+   sparsity-pattern-generated solve should be several times faster.
+3. **Generated-code pow()/CSE.** 75 pow calls in source (14 RHS, 61
+   Jacobian); GCC already folds squares, leaving 22 calls (6 RHS, 16
+   Jacobian): cubes (pow(H_1,3), from three-body rates -> x*x*x),
+   pow(z+1,4) (constant per call -> hoist out of the cell loop), the
+   optical-depth powers of mass density ((rho/rho0)^2.8, ^-0.45),
+   evaluated separately in RHS and Jacobian for the same state (compute
+   once per Newton sweep), pow(..,-1.0) (-> division). Plus repeated
+   denominators across Jacobian entries (Glover-Abel H2 cooling,
+   H2-formation heating) -> sympy.cse() at codegen. Try -fno-math-errno
+   first: pow can set errno, which stops GCC treating repeated calls as
+   pure.
+4. (Small) Temperature Newton initial guess from the ideal-gas estimate
+   instead of a fixed 1000 K: ~1% at most -- Ts is already reused within
+   a cell-solve, only the first call per cell starts cold.
+
+Separately, the standalone Cython Solver at dims=1 still enters (if-
+serialized) OpenMP regions from every per-cell call; the same cost the
+C library just shed. Worth the same treatment for single-cell Python use.
