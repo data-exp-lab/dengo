@@ -4455,3 +4455,26 @@ extrapolated) result. ~3 implicit solves per accepted step instead of 1,
 but larger steps become safe and wrong roots are caught (they disagree
 badly with the half-step pair). Validate with the BDF-reference harness
 including these hard cases.
+
+### 2026-11-18, later — CORRECTION to the "wrong root" diagnosis above
+
+The two hot-gas rows above (n=100-1000, 3.5e6-6.5e6 K, dt 3e12 s) are NOT
+Newton converging to a spurious root. dengo stops partway: it runs out of
+its step budget (niter = max_iterations = 10000 accepted sub-steps) at
+t ~ 3.3e11 s, T ~ 1.4e6 K -- which matches the reference *at that time*
+(1.82e6 K at 3e11 s); single steps of 1 s-1e6 s from the stalled state all
+succeed. Through the fast-cooling phase the largest step for which the
+(undamped, <= 10-sweep) Newton iteration converges is ~1e7 s, so 10000
+steps cover only ~3e11 s. The evaluation harness scored the stalled state
+against the end-of-step reference (those cells are the ok < 100% ones);
+dengo-grackle reports them with its "did not reach dt" warning. Error
+control can't fix this -- the limit is Newton convergence, not accuracy;
+a damped/line-search Newton would be the fix (separate item).
+
+The moderate rows (7.7e3 K at n=1000; the neutral 6.3e4 K start) are
+genuine truncation error. Error control fixes the first (4454 -> 5209 ->
+5312 K for tol 1e-1 -> 1e-2 -> 1e-3, reference 5351 K). The neutral start
+is a seed-amplification case: electrons start at the 1e-20 floor (no
+k57/k58), BE over-predicts exponential growth for large steps, and the
+error norm ignores species below 1e-6 of n_tot, so the overshoot happens
+unmeasured and is then amplified. Only affects artificially seedless gas.
