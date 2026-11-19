@@ -102,9 +102,10 @@ int {{ solver_name }}_cooling_time_grid({{ solver_name }}_context *ctx,
 
 /* Running totals since create (or the last reset), for checking cost:
    stats[0] = cells solved, stats[1] = accepted sub-steps, stats[2] =
-   rejected sub-step attempts, stats[3] = cells done by the quiet path;
+   rejected sub-step attempts, stats[3] = cells done by the quiet path,
+   stats[4] = _solve_grid calls;
    *seconds = wall-clock time spent inside _solve_grid. */
-void {{ solver_name }}_get_stats({{ solver_name }}_context *ctx, long long stats[4],
+void {{ solver_name }}_get_stats({{ solver_name }}_context *ctx, long long stats[5],
                                  double *seconds);
 void {{ solver_name }}_reset_stats({{ solver_name }}_context *ctx);
 

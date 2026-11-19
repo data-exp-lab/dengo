@@ -9,7 +9,7 @@
 struct {{ solver_name }}_context {
     double *tables;
     {{ solver_name }}_options opts;
-    long long n_cells, n_accepted, n_rejected, n_quiet;
+    long long n_cells, n_accepted, n_rejected, n_quiet, n_calls;
     double seconds;
 };
 
@@ -20,19 +20,20 @@ static double wall_seconds(void)
     return ts.tv_sec + 1e-9 * ts.tv_nsec;
 }
 
-void {{ solver_name }}_get_stats({{ solver_name }}_context *ctx, long long stats[4],
+void {{ solver_name }}_get_stats({{ solver_name }}_context *ctx, long long stats[5],
                                  double *seconds)
 {
     stats[0] = ctx->n_cells;
     stats[1] = ctx->n_accepted;
     stats[2] = ctx->n_rejected;
     stats[3] = ctx->n_quiet;
+    stats[4] = ctx->n_calls;
     if (seconds != NULL) *seconds = ctx->seconds;
 }
 
 void {{ solver_name }}_reset_stats({{ solver_name }}_context *ctx)
 {
-    ctx->n_cells = ctx->n_accepted = ctx->n_rejected = ctx->n_quiet = 0;
+    ctx->n_cells = ctx->n_accepted = ctx->n_rejected = ctx->n_quiet = ctx->n_calls = 0;
     ctx->seconds = 0.0;
 }
 
@@ -249,6 +250,7 @@ int {{ solver_name }}_solve_grid({{ solver_name }}_context *ctx,
         }
     }
     ctx->n_cells += r.ncell;
+    ctx->n_calls++;
     ctx->n_accepted += accepted;
     ctx->n_rejected += rejected;
     ctx->n_quiet += quiet;

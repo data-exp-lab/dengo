@@ -362,12 +362,12 @@ static void print_stats_at_exit(void)
 {
     registry_entry *e = lookup_entry(&grackle_rates);
     if (e == NULL) return;
-    long long st[4];
+    long long st[5];
     double sec;
     primordial_get_stats(e->ctx, st, &sec);
-    fprintf(stderr, "dengo-grackle stats: %lld cell-solves (%.1f%% by the quiet path), "
+    fprintf(stderr, "dengo-grackle stats: %lld calls, %lld cell-solves (%.1f%% by the quiet path), "
             "%.2f accepted + %.2f rejected sub-steps per cell-solve, %.3f s in "
-            "solve_chemistry (%.2f us per cell-solve)\n", st[0],
+            "solve_chemistry (%.2f us per cell-solve)\n", st[4], st[0],
             st[0] ? 100.0 * st[3] / st[0] : 0.0,
             st[0] ? (double) st[1] / st[0] : 0.0, st[0] ? (double) st[2] / st[0] : 0.0,
             sec, st[0] ? 1e6 * sec / st[0] : 0.0);
