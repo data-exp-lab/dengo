@@ -53,6 +53,7 @@ typedef struct {{ solver_name }}_data {
     double *Ts;
     double *Tdef;
     double *dT;
+    int *bin_id;      /* table bin chosen by the last _interpolate_rates */
     double *logTs;
     double *invTs;
     double *dTs_{{ network.energy_term.name }};
@@ -80,13 +81,100 @@ typedef struct {{ solver_name }}_data {
 
     double reltol;
     double floor_value;
+
+    /* Runtime physics switches (both default to 1 = on, which is what
+       this network has always done). Only meaningful when the network
+       includes the corresponding cooling action; ignored otherwise.
+         use_cie_optical_depth: Ripamonti & Abel (2004)-style continuum
+           optical-depth suppression of radiative cooling at very high
+           density (only applies when "cie_cooling" is in the network).
+         use_h2_optical_depth: the (rho/rho_0)^-0.45 optical-depth
+           suppression of H2 line cooling ("gloverabel08"). */
+    int use_cie_optical_depth;
+    int use_h2_optical_depth;
 } {{ solver_name }}_data;
 {% endblock %}
 
+/* Every rate/cooling/gamma table, in the order the flat tables file
+   stores them (see ChemicalNetwork._write_solver_tables_bin) -- each is
+   {{ network.T | length }} doubles long. */
+#define {{ solver_name | upper }}_NTABLES {{ (network.reactions | length) + (network.cooling_actions.values() | map(attribute="tables") | map("length") | sum) + 2 * (network.interpolate_gamma_species | length) }}
+#define {{ solver_name | upper }}_NBINS {{ network.T | length }}
+#define {{ solver_name | upper }}_TABLE_DOUBLES ({{ solver_name | upper }}_NTABLES * {{ solver_name | upper }}_NBINS)
+
 {{ solver_name }}_data *{{ solver_name }}_setup_data(const char *table_file, int nstrip);
+/* Same as _setup_data, but from tables already in memory (laid out
+   exactly like the tables file: {{ solver_name | upper }}_TABLE_DOUBLES
+   doubles) -- e.g. tables compiled into a library, so there's no file
+   to locate at run time. */
+{{ solver_name }}_data *{{ solver_name }}_setup_data_from_tables(const double *tables, int nstrip);
 void {{ solver_name }}_free_data({{ solver_name }}_data *data);
 
+/* Scratch buffers for {{ solver_name }}_advance(), sized for `dims` cells. */
+typedef struct {{ solver_name }}_scratch {
+    int dims;
+    double *prev, *scale, *atol, *rtol, *u0, *s, *gu, *Ju;
+    double *f0, *f1;  /* RHS at the start/end of a sub-step (error control) */
+    double *jd;       /* Jacobian diagonal at the start of a sub-step: filters
+                         the error estimate (see _error_norm) */
+    /* running totals over every _advance() call made with this scratch */
+    long long n_accepted, n_rejected;
+    long long n_quiet, n_quiet_rejected;  /* quiet-cell path taken / tried and declined */
+    int allow_quiet;  /* 1 (default): try the quiet-cell path when error
+                         control is on (see _advance) */
+    int coupled_filter; /* 1 (default): re-check a rejecting error estimate
+                           with the full (I - hJ)^-1 filter (see
+                           _coupled_error_norm) */
+    int f0_valid;     /* caller already put the RHS at the (electron-
+                         consistent) starting state in f0, with the solver
+                         data's temperature/rate caches from that same
+                         evaluation; _advance uses it instead of evaluating
+                         again, then clears this flag */
+} {{ solver_name }}_scratch;
+
+{{ solver_name }}_scratch *{{ solver_name }}_alloc_scratch(int dims);
+void {{ solver_name }}_free_scratch({{ solver_name }}_scratch *scratch);
+
+/* Called after every accepted sub-step: `it` is the 0-based index of
+   that sub-step, `ttot` the time covered so far. */
+typedef void (*{{ solver_name }}_step_callback)(void *ctx, int it, double ttot);
+
+/* The adaptive sub-stepping loop around BE_chem_solve: evolves
+   `input` (dims*NSPECIES doubles, one cell's species contiguous, in
+   cgs: number densities in cm^-3, ge in erg/g) forward by `dtf`
+   seconds, in place. All `dims` cells share one sub-step size, so call
+   with dims=1 to step cells independently. Starts at dt_first (or at
+   dtf/niter if dt_first <= 0), doubles
+   the sub-step after each success (when adaptive_step != 0), halves it
+   and retries on failure, and gives up below 1e-25*dtf or after niter
+   accepted sub-steps. Returns the time actually covered (== dtf when
+   converged); `*n_steps` (if non-NULL) gets the number of accepted
+   sub-steps. On return `input` holds the last accepted state. This is
+   the single implementation used by the Cython Solver, the wasm build
+   and the grid-level C API.
+
+   err_tol > 0 turns on local error control instead of the fixed
+   "double after every success" schedule: each sub-step's local
+   truncation error is estimated as (h/2)|f(y_new) - f(y_old)| (the
+   leading backward-Euler error term; one extra RHS evaluation per
+   step), normalized per variable by err_tol*(|y| + 1e-6*n_tot) for
+   species and err_tol*|e| for the energy. A step is accepted if the
+   largest normalized error is <= 1; either way the next step is
+   h * clamp(0.9/sqrt(err), 0.2, 5). This also rejects steps where
+   Newton converged to a spurious root of the implicit equation (e.g.
+   hot dense gas "stuck" near 1e6 K for a step >> t_cool): the RHS there
+   differs wildly from the RHS at the start of the step. */
+double {{ solver_name }}_advance({{ solver_name }}_data *data,
+                                 {{ solver_name }}_scratch *scratch,
+                                 double *input, int dims, double dtf,
+                                 int niter, double dt_first, double err_tol,
+                                 double reltol, double floor_value,
+                                 int adaptive_step, int *n_steps,
+                                 {{ solver_name }}_step_callback callback,
+                                 void *callback_ctx);
+
 void {{ solver_name }}_interpolate_rates({{ solver_name }}_data *data, int nstrip);
+void {{ solver_name }}_interpolate_rate_derivatives({{ solver_name }}_data *data, int nstrip);
 void {{ solver_name }}_interpolate_gamma({{ solver_name }}_data *data, int i);
 int {{ solver_name }}_calculate_temperature({{ solver_name }}_data *data,
                                             double *input, int nstrip, int nchem);
@@ -95,6 +183,8 @@ int calculate_rhs_{{ solver_name }}(double *input, double *rhs,
                                     int nstrip, int nchem, void *sdata);
 int calculate_jacobian_{{ solver_name }}(double *input, double *Joutput,
                                          int nstrip, int nchem, void *sdata);
+int calculate_jacobian_diag_{{ solver_name }}(double *input, double *Jdiag,
+                                              int nstrip, int nchem, void *sdata);
 void ensure_electron_consistency(double *input, int nstrip, int nchem);
 
 typedef int (*rhs_f)(double *, double *, int, int, void *);

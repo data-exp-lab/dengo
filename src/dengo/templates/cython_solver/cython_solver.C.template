@@ -4,9 +4,11 @@
 #include "{{ solver_name }}_solver.h"
 
 static void {{ solver_name }}_read_tables({{ solver_name }}_data *data, const char *table_file);
+static void {{ solver_name }}_load_tables({{ solver_name }}_data *data, const double *tables);
 
 {% block setup_data %}
-{{ solver_name }}_data *{{ solver_name }}_setup_data(const char *table_file, int nstrip)
+/* Everything but the tables themselves. */
+static {{ solver_name }}_data *{{ solver_name }}_alloc_data(int nstrip)
 {
     {{ solver_name }}_data *data = ({{ solver_name }}_data *) malloc(sizeof({{ solver_name }}_data));
 
@@ -14,6 +16,8 @@ static void {{ solver_name }}_read_tables({{ solver_name }}_data *data, const ch
     data->reltol = 1.0e-5;
     data->floor_value = 1.0e-20;
     data->current_z = 0.0;
+    data->use_cie_optical_depth = 1;
+    data->use_h2_optical_depth = 1;
 
     data->bounds[0] = {{ network.T_bounds[0] }};
     data->bounds[1] = {{ network.T_bounds[1] }};
@@ -24,13 +28,17 @@ static void {{ solver_name }}_read_tables({{ solver_name }}_data *data, const ch
     data->Ts    = (double *) malloc(nstrip * sizeof(double));
     data->Tdef  = (double *) malloc(nstrip * sizeof(double));
     data->dT    = (double *) malloc(nstrip * sizeof(double));
+    data->bin_id = (int *) malloc(nstrip * sizeof(int));
     data->logTs = (double *) malloc(nstrip * sizeof(double));
     data->invTs = (double *) malloc(nstrip * sizeof(double));
     data->dTs_{{ network.energy_term.name }} = (double *) malloc(nstrip * sizeof(double));
+    /* No temperature guess yet: calculate_temperature starts each cell
+       from the ideal-gas estimate (see there). */
     for (int i = 0; i < nstrip; i++) {
-        data->Ts[i] = 1000.0;
+        data->Ts[i] = -1.0;
         data->logTs[i] = log(1000.0);
         data->invTs[i] = 1.0 / 1000.0;
+        data->bin_id[i] = 0;
     }
 
     {%- for name, rxn in network.reactions | dictsort(case_sensitive=true) %}
@@ -50,13 +58,26 @@ static void {{ solver_name }}_read_tables({{ solver_name }}_data *data, const ch
     data->dgamma{{ sp.name }}_dT = (double *) malloc(nstrip * sizeof(double));
     {%- endfor %}
 
+    return data;
+}
+
+{{ solver_name }}_data *{{ solver_name }}_setup_data(const char *table_file, int nstrip)
+{
+    {{ solver_name }}_data *data = {{ solver_name }}_alloc_data(nstrip);
     {{ solver_name }}_read_tables(data, table_file);
+    return data;
+}
+
+{{ solver_name }}_data *{{ solver_name }}_setup_data_from_tables(const double *tables, int nstrip)
+{
+    {{ solver_name }}_data *data = {{ solver_name }}_alloc_data(nstrip);
+    {{ solver_name }}_load_tables(data, tables);
     return data;
 }
 
 void {{ solver_name }}_free_data({{ solver_name }}_data *data)
 {
-    free(data->Ts); free(data->Tdef); free(data->dT);
+    free(data->Ts); free(data->Tdef); free(data->dT); free(data->bin_id);
     free(data->logTs); free(data->invTs);
     free(data->dTs_{{ network.energy_term.name }});
     {%- for name, rxn in network.reactions | dictsort(case_sensitive=true) %}
@@ -77,9 +98,10 @@ void {{ solver_name }}_free_data({{ solver_name }}_data *data)
 {% block read_tables %}
 /*
    Rate/cooling/gamma tables are stored as one flat binary file of
-   concatenated little-endian doubles, in exactly the order they are
-   fread() here.  Written by ChemicalNetwork._write_solver_tables_bin --
-   see that method for the matching write order.
+   concatenated little-endian doubles, in exactly the order that
+   _load_tables() copies them here.  Written by
+   ChemicalNetwork._write_solver_tables_bin -- see that method for the
+   matching write order.
 */
 static void {{ solver_name }}_read_tables({{ solver_name }}_data *data, const char *table_file)
 {
@@ -89,22 +111,35 @@ static void {{ solver_name }}_read_tables({{ solver_name }}_data *data, const ch
         fprintf(stderr, "{{ solver_name }}: could not open rate table file '%s'\n", filename);
         exit(1);
     }
-    size_t n = {{ network.T | length }};
-    size_t nread = 0;
+    double *buf = (double *) malloc({{ solver_name | upper }}_TABLE_DOUBLES * sizeof(double));
+    size_t nread = fread(buf, sizeof(double), {{ solver_name | upper }}_TABLE_DOUBLES, f);
+    fclose(f);
+    if (nread != {{ solver_name | upper }}_TABLE_DOUBLES) {
+        fprintf(stderr, "{{ solver_name }}: rate table file '%s' is truncated "
+                "(read %zu of %d doubles)\n", filename, nread,
+                {{ solver_name | upper }}_TABLE_DOUBLES);
+        exit(1);
+    }
+    {{ solver_name }}_load_tables(data, buf);
+    free(buf);
+}
+
+static void {{ solver_name }}_load_tables({{ solver_name }}_data *data, const double *tables)
+{
+    const size_t n = {{ solver_name | upper }}_NBINS;
+    const double *p = tables;
     {%- for name, rxn in network.reactions | dictsort(case_sensitive=true) %}
-    nread += fread(data->r_{{ name }}, sizeof(double), n, f);
+    memcpy(data->r_{{ name }}, p, n * sizeof(double)); p += n;
     {%- endfor %}
     {%- for name, action in network.cooling_actions | dictsort(case_sensitive=true) %}
     {%- for name2 in action.tables | sort(case_sensitive=true) %}
-    nread += fread(data->c_{{ name }}_{{ name2 }}, sizeof(double), n, f);
+    memcpy(data->c_{{ name }}_{{ name2 }}, p, n * sizeof(double)); p += n;
     {%- endfor %}
     {%- endfor %}
     {%- for sp in network.interpolate_gamma_species | sort(attribute="name", case_sensitive=true) %}
-    nread += fread(data->g_gamma{{ sp.name }}, sizeof(double), n, f);
-    nread += fread(data->g_dgamma{{ sp.name }}_dT, sizeof(double), n, f);
+    memcpy(data->g_gamma{{ sp.name }}, p, n * sizeof(double)); p += n;
+    memcpy(data->g_dgamma{{ sp.name }}_dT, p, n * sizeof(double)); p += n;
     {%- endfor %}
-    fclose(f);
-    (void) nread;
 }
 {% endblock %}
 
@@ -113,7 +148,11 @@ static void {{ solver_name }}_read_tables({{ solver_name }}_data *data, const ch
    network), so this -- like calculate_rhs/calculate_jacobian/
    calculate_temperature/ensure_electron_consistency below -- parallelizes
    trivially over cells with OpenMP. Built without -fopenmp, the #pragma
-   lines are just ignored and this runs serially. */
+   lines are just ignored and this runs serially.
+
+   Values only: the T-derivatives of the tables are needed only by the
+   Jacobian, which calls _interpolate_rate_derivatives itself (from the
+   bins and weights cached here). */
 void {{ solver_name }}_interpolate_rates({{ solver_name }}_data *data, int nstrip)
 {
     double lb = log(data->bounds[0]);
@@ -126,20 +165,39 @@ void {{ solver_name }}_interpolate_rates({{ solver_name }}_data *data, int nstri
         double t2 = lb + (bin_id + 1) * data->dbin;
         data->Tdef[i] = (data->logTs[i] - t1) / (t2 - t1);
         data->dT[i] = t2 - t1;
+        data->bin_id[i] = bin_id;
 
         {%- for name, rxn in network.reactions | dictsort(case_sensitive=true) %}
         data->rs_{{ name }}[i] = data->r_{{ name }}[bin_id] +
             data->Tdef[i] * (data->r_{{ name }}[bin_id + 1] - data->r_{{ name }}[bin_id]);
-        data->drs_{{ name }}[i] = (data->r_{{ name }}[bin_id + 1] - data->r_{{ name }}[bin_id])
-            / data->dT[i] * data->invTs[i];
         {%- endfor %}
 
         {%- for name, action in network.cooling_actions | dictsort(case_sensitive=true) %}
         {%- for name2 in action.tables | sort(case_sensitive=true) %}
         data->cs_{{ name }}_{{ name2 }}[i] = data->c_{{ name }}_{{ name2 }}[bin_id] +
             data->Tdef[i] * (data->c_{{ name }}_{{ name2 }}[bin_id + 1] - data->c_{{ name }}_{{ name2 }}[bin_id]);
-        data->dcs_{{ name }}_{{ name2 }}[i] = (data->c_{{ name }}_{{ name2 }}[bin_id + 1] - data->c_{{ name }}_{{ name2 }}[bin_id])
-            / data->dT[i] * data->invTs[i];
+        {%- endfor %}
+        {%- endfor %}
+    }
+}
+
+/* d(table)/dT for every table, at the bins _interpolate_rates last
+   chose. One reciprocal per cell instead of a division per table (the
+   divisions were ~half the interpolation's cost). */
+void {{ solver_name }}_interpolate_rate_derivatives({{ solver_name }}_data *data, int nstrip)
+{
+    #pragma omp parallel for if(nstrip > DENGO_OMP_MIN_CELLS)
+    for (int i = 0; i < nstrip; i++) {
+        const int bin_id = data->bin_id[i];
+        const double dfac = data->invTs[i] / data->dT[i];
+
+        {%- for name, rxn in network.reactions | dictsort(case_sensitive=true) %}
+        data->drs_{{ name }}[i] = (data->r_{{ name }}[bin_id + 1] - data->r_{{ name }}[bin_id]) * dfac;
+        {%- endfor %}
+
+        {%- for name, action in network.cooling_actions | dictsort(case_sensitive=true) %}
+        {%- for name2 in action.tables | sort(case_sensitive=true) %}
+        data->dcs_{{ name }}_{{ name2 }}[i] = (data->c_{{ name }}_{{ name2 }}[bin_id + 1] - data->c_{{ name }}_{{ name2 }}[bin_id]) * dfac;
         {%- endfor %}
         {%- endfor %}
     }
@@ -223,6 +281,21 @@ int {{ solver_name }}_calculate_temperature({{ solver_name }}_data *data,
         /* gamma depends on T (H2 roto-vibrational states), so T has to be
            found by Newton iteration on the implicit ge(T) relation. */
         T = data->Ts[i];
+        if (!(T > 0.0)) {
+            /* No usable guess (cold start): the same temperature formula
+               with every species' gamma at the monatomic 5/3 -- exact but
+               for the temperature dependence of those gammas, so Newton
+               starts within a few percent instead of from a fixed value. */
+            {%- for sp in network.interpolate_gamma_species | sort %}
+            gamma{{ sp.name }} = gamma;
+            {%- endfor %}
+            T = {{ network.temperature_calculation() }};
+            if (!(T > 0.0)) T = 1000.0;
+            if (T < data->bounds[0]) T = data->bounds[0];
+            else if (T > data->bounds[1]) T = data->bounds[1];
+            data->Ts[i] = T;
+            data->logTs[i] = log(T);
+        }
         Tnew = T * 1.1;
         Tdiff = Tnew - T;
         count = 0;
@@ -230,6 +303,10 @@ int {{ solver_name }}_calculate_temperature({{ solver_name }}_data *data,
             int cell_ok = 1;
             while (fabs(Tdiff / Tnew) > 1.0e-8) {
                 T = data->Ts[i];
+                /* interpolate_gamma reads logTs: keep it on the current
+                   iterate, or gamma stays frozen at the starting guess
+                   and the converged T depends on that guess. */
+                data->logTs[i] = log(T);
                 {{ solver_name }}_interpolate_gamma(data, i);
                 {%- for sp in network.interpolate_gamma_species | sort %}
                 gamma{{ sp.name }} = data->gamma{{ sp.name }}[i];
@@ -309,11 +386,15 @@ int calculate_rhs_{{ solver_name }}(double *input, double *rhs, int nstrip, int 
         {%- endfor %}
         mdensity = ({{ network.print_mass_density() }}) * mh;
         {%- if "cie_cooling" in network.cooling_actions %}
-        double tau = fmax(pow(mdensity / 3.3e-8, 2.8), 1.0e-5);
-        double cie_optical_depth_approx = fmin(1.0, (1.0 - exp(-tau)) / tau);
+        double cie_optical_depth_approx = 1.0;
+        if (data->use_cie_optical_depth) {
+            double tau = fmax(pow(mdensity / 3.3e-8, 2.8), 1.0e-5);
+            cie_optical_depth_approx = fmin(1.0, (1.0 - exp(-tau)) / tau);
+        }
         {%- endif %}
         {%- if "gloverabel08" in network.cooling_actions %}
-        double h2_optical_depth_approx = fmin(1.0, pow(mdensity / 1.34e-14, -0.45));
+        double h2_optical_depth_approx = data->use_h2_optical_depth
+            ? fmin(1.0, pow(mdensity / 1.34e-14, -0.45)) : 1.0;
         {%- endif %}
 
         j = i * nchem;
@@ -339,9 +420,7 @@ int calculate_rhs_{{ solver_name }}(double *input, double *rhs, int nstrip, int 
 }
 {% endblock %}
 
-{% block calculate_jacobian %}
-int calculate_jacobian_{{ solver_name }}(double *input, double *Joutput, int nstrip, int nchem, void *sdata)
-{
+{% macro jacobian_cell_setup() -%}
     {{ solver_name }}_data *data = ({{ solver_name }}_data *) sdata;
 
     double *T{{ network.energy_term.name }} = data->dTs_{{ network.energy_term.name }};
@@ -356,10 +435,9 @@ int calculate_jacobian_{{ solver_name }}(double *input, double *Joutput, int nst
     {%- endfor %}
     {%- endfor %}
     double z = data->current_z;
+{%- endmacro %}
 
-    int had_error = 0;
-    #pragma omp parallel for if(nstrip > DENGO_OMP_MIN_CELLS) reduction(+:had_error)
-    for (int i = 0; i < nstrip; i++) {
+{% macro jacobian_cell_state() -%}
         {%- for species in network.required_species | sort %}
         double {{ species.name }};
         {%- endfor %}
@@ -376,12 +454,28 @@ int calculate_jacobian_{{ solver_name }}(double *input, double *Joutput, int nst
         {%- endfor %}
         mdensity = ({{ network.print_mass_density() }}) * mh;
         {%- if "cie_cooling" in network.cooling_actions %}
-        double tau = fmax(pow(mdensity / 3.3e-8, 2.8), 1.0e-5);
-        double cie_optical_depth_approx = fmin(1.0, (1.0 - exp(-tau)) / tau);
+        double cie_optical_depth_approx = 1.0;
+        if (data->use_cie_optical_depth) {
+            double tau = fmax(pow(mdensity / 3.3e-8, 2.8), 1.0e-5);
+            cie_optical_depth_approx = fmin(1.0, (1.0 - exp(-tau)) / tau);
+        }
         {%- endif %}
         {%- if "gloverabel08" in network.cooling_actions %}
-        double h2_optical_depth_approx = fmin(1.0, pow(mdensity / 1.34e-14, -0.45));
+        double h2_optical_depth_approx = data->use_h2_optical_depth
+            ? fmin(1.0, pow(mdensity / 1.34e-14, -0.45)) : 1.0;
         {%- endif %}
+{%- endmacro %}
+
+{% block calculate_jacobian %}
+int calculate_jacobian_{{ solver_name }}(double *input, double *Joutput, int nstrip, int nchem, void *sdata)
+{
+    {{ jacobian_cell_setup() }}
+    {{ solver_name }}_interpolate_rate_derivatives(data, nstrip);
+
+    int had_error = 0;
+    #pragma omp parallel for if(nstrip > DENGO_OMP_MIN_CELLS) reduction(+:had_error)
+    for (int i = 0; i < nstrip; i++) {
+        {{ jacobian_cell_state() }}
 
         j = i * nchem * nchem;
         {%- for s1 in network.required_species | sort %}
@@ -395,6 +489,33 @@ int calculate_jacobian_{{ solver_name }}(double *input, double *Joutput, int nst
         {%- endif %}
         j++;
         {%- endfor %}
+        {%- endfor %}
+    }
+    return had_error ? 1 : 0;
+}
+
+/* Just the diagonal d f_k / d y_k of the Jacobian (same expressions, same
+   per-cell setup), for the quiet-cell step in _advance(): nchem values per
+   cell. Like calculate_jacobian, uses the temperature and rates cached by
+   the last calculate_rhs at this state. */
+int calculate_jacobian_diag_{{ solver_name }}(double *input, double *Jdiag, int nstrip, int nchem, void *sdata)
+{
+    {{ jacobian_cell_setup() }}
+    {{ solver_name }}_interpolate_rate_derivatives(data, nstrip);
+
+    int had_error = 0;
+    #pragma omp parallel for if(nstrip > DENGO_OMP_MIN_CELLS) reduction(+:had_error)
+    for (int i = 0; i < nstrip; i++) {
+        {{ jacobian_cell_state() }}
+
+        j = i * nchem;
+        {%- for s1 in network.required_species | sort %}
+        {{ network.print_jacobian_component(s1, s1, assign_to="Jdiag[j]") }}
+        {%- if s1.name == network.energy_term.name %}
+        Jdiag[j] /= mdensity;
+        Jdiag[j] *= T{{ network.energy_term.name }}[i];
+        {%- endif %}
+        j++;
         {%- endfor %}
     }
     return had_error ? 1 : 0;
@@ -424,5 +545,287 @@ void ensure_electron_consistency(double *input, int nstrip, int nchem)
         {%- endfor %}
         if (e_idx >= 0) input[e_idx] = total_e;
     }
+}
+{% endblock %}
+
+{% block advance %}
+{{ solver_name }}_scratch *{{ solver_name }}_alloc_scratch(int dims)
+{
+    int n = NSPECIES;
+    {{ solver_name }}_scratch *sc = ({{ solver_name }}_scratch *) malloc(sizeof({{ solver_name }}_scratch));
+    sc->dims  = dims;
+    sc->prev  = (double *) malloc(dims * n * sizeof(double));
+    sc->scale = (double *) malloc(dims * n * sizeof(double));
+    sc->atol  = (double *) malloc(dims * n * sizeof(double));
+    sc->rtol  = (double *) malloc(dims * n * sizeof(double));
+    sc->u0    = (double *) malloc(dims * n * sizeof(double));
+    sc->s     = (double *) malloc(dims * n * sizeof(double));
+    sc->gu    = (double *) malloc(dims * n * sizeof(double));
+    sc->Ju    = (double *) malloc(dims * n * n * sizeof(double));
+    sc->f0    = (double *) malloc(dims * n * sizeof(double));
+    sc->f1    = (double *) malloc(dims * n * sizeof(double));
+    sc->jd    = (double *) malloc(dims * n * sizeof(double));
+    sc->n_accepted = 0;
+    sc->n_rejected = 0;
+    sc->n_quiet = 0;
+    sc->n_quiet_rejected = 0;
+    sc->allow_quiet = 1;
+    sc->coupled_filter = 1;
+    sc->f0_valid = 0;
+    return sc;
+}
+
+void {{ solver_name }}_free_scratch({{ solver_name }}_scratch *sc)
+{
+    if (sc == NULL) return;
+    free(sc->prev); free(sc->scale); free(sc->atol); free(sc->rtol);
+    free(sc->u0); free(sc->s); free(sc->gu); free(sc->Ju);
+    free(sc->f0); free(sc->f1); free(sc->jd);
+    free(sc);
+}
+
+/* Index of the energy variable in the state vector (sorted order). */
+#define ENERGY_INDEX {% for s in network.required_species | sort %}{% if s.name == network.energy_term.name %}{{ loop.index0 }}{% endif %}{% endfor %}
+
+/* Largest normalized local-error estimate over all cells (see the header
+   comment on _advance): (h/2)|f1 - f0| / (tol*(|y| + 1e-6 n_tot)),
+   filtered component-wise by 1/(1 - h J_kk) for J_kk < 0 (jd = the
+   Jacobian diagonal at the start of the step; NULL = unfiltered).
+
+   The filter is the diagonal form of Shampine's (I - hJ)^-1 filtering of
+   error estimates in stiff integrators. Without it, a component that is
+   fast compared with h -- e.g. a trace species relaxing to its
+   equilibrium, which backward Euler gets right -- shows |f1 - f0| ~ |f0|,
+   and h|f0|/2 can exceed tolerance by orders of magnitude, rejecting
+   steps that were accurate. For slow components (h|J_kk| << 1) the
+   filter changes nothing. */
+static double {{ solver_name }}_error_norm(const double *y, const double *f0, const double *f1,
+                                         const double *jd,
+                                         int dims, int n, double h, double tol)
+{
+    double worst = 0.0;
+    for (int c = 0; c < dims; c++) {
+        const double *yc = y + c * n;
+        double ntot = 0.0;
+        for (int i = 0; i < n; i++) if (i != ENERGY_INDEX) ntot += yc[i];
+        for (int i = 0; i < n; i++) {
+            double floor_i = (i == ENERGY_INDEX) ? 0.0 : 1.0e-6 * ntot;
+            double denom = tol * (fabs(yc[i]) + floor_i);
+            double est = 0.5 * h * fabs(f1[c * n + i] - f0[c * n + i]);
+            if (jd != NULL && jd[c * n + i] < 0.0) est /= 1.0 - h * jd[c * n + i];
+            double e = (denom > 0.0) ? est / denom : (est > 0.0 ? HUGE_VAL : 0.0);
+            if (e > worst) worst = e;
+        }
+    }
+    return worst;
+}
+
+/* The same estimate with the full filter: per cell, solve
+       (I - h J) w = (h/2)(f1 - f0)
+   in variables scaled by each component's tolerance tol*(|y| + floor),
+   and return max |w| over all cells -- Shampine's filtered estimate, as
+   RADAU5 uses for its first/rejected steps. Backward-Euler steps only. J
+   is the Jacobian at y (the
+   end-of-step state; the caller evaluates it right after f1 there). A
+   fast mode reached through coupling -- e.g. H- relaxing to equilibrium,
+   which shows up as a jump in the electrons' rate -- is damped by (I-hJ)^-1
+   as backward Euler itself damps it; slow components are unchanged. Only
+   ever called when the diagonal estimate already exceeds 1. HUGE_VAL if
+   the system is singular (then the step is rejected as before). */
+static double {{ solver_name }}_coupled_error_norm(const double *y, const double *f0, const double *f1,
+                                                 const double *J, int dims, int n,
+                                                 double h, double tol)
+{
+    double A[NSPECIES * NSPECIES], b[NSPECIES], w[NSPECIES];
+    double worst = 0.0;
+    for (int c = 0; c < dims; c++) {
+        const double *yc = y + c * n;
+        const double *Jc = J + (size_t) c * n * n;   /* df_i/dy_j at [j*n + i] */
+        double ntot = 0.0;
+        for (int i = 0; i < n; i++) if (i != ENERGY_INDEX) ntot += yc[i];
+        for (int i = 0; i < n; i++) {
+            w[i] = tol * (fabs(yc[i]) + ((i == ENERGY_INDEX) ? 0.0 : 1.0e-6 * ntot));
+            if (!(w[i] > 0.0)) return HUGE_VAL;
+        }
+        for (int i = 0; i < n; i++) {
+            b[i] = 0.5 * h * (f1[c * n + i] - f0[c * n + i]) / w[i];
+            for (int j = 0; j < n; j++)
+                A[i * n + j] = ((i == j) ? 1.0 : 0.0) - h * Jc[j * n + i] * w[j] / w[i];
+        }
+        /* Gaussian elimination, partial pivoting */
+        for (int k = 0; k < n; k++) {
+            int p = k;
+            for (int i = k + 1; i < n; i++) if (fabs(A[i * n + k]) > fabs(A[p * n + k])) p = i;
+            if (!(fabs(A[p * n + k]) > 0.0)) return HUGE_VAL;
+            if (p != k) {
+                for (int j = 0; j < n; j++) { double t = A[k * n + j]; A[k * n + j] = A[p * n + j]; A[p * n + j] = t; }
+                double t = b[k]; b[k] = b[p]; b[p] = t;
+            }
+            for (int i = k + 1; i < n; i++) {
+                double m = A[i * n + k] / A[k * n + k];
+                if (m == 0.0) continue;
+                for (int j = k; j < n; j++) A[i * n + j] -= m * A[k * n + j];
+                b[i] -= m * b[k];
+            }
+        }
+        for (int i = n - 1; i >= 0; i--) {
+            double s = b[i];
+            for (int j = i + 1; j < n; j++) s -= A[i * n + j] * w[j];
+            w[i] = s / A[i * n + i];
+            if (!(fabs(w[i]) < HUGE_VAL)) return HUGE_VAL;
+            if (fabs(w[i]) > worst) worst = fabs(w[i]);
+        }
+    }
+    return worst;
+}
+
+double {{ solver_name }}_advance({{ solver_name }}_data *data,
+                                 {{ solver_name }}_scratch *sc,
+                                 double *input, int dims, double dtf,
+                                 int niter, double dt_first, double err_tol,
+                                 double reltol, double floor_value,
+                                 int adaptive_step, int *n_steps,
+                                 {{ solver_name }}_step_callback callback,
+                                 void *callback_ctx)
+{
+    const int n = NSPECIES;
+    const int total = dims * n;
+    const int control = (err_tol > 0.0);
+
+    ensure_electron_consistency(input, dims, n);
+    for (int i = 0; i < total; i++) {
+        sc->atol[i] = floor_value * reltol;
+        sc->rtol[i] = reltol;
+        /* BE_chem_solve normalizes by 1/scale internally, so scale must
+           never be zero -- an exactly-zero initial abundance (e.g. no
+           He+ / He++ / H2 yet) is the common case, not an edge case. */
+        sc->scale[i] = fmax(fabs(input[i]), floor_value);
+        sc->prev[i] = input[i];
+    }
+    /* With error control, the RHS at the start of the first step; after
+       that, each accepted step's end-of-step RHS is the next one's start.
+       If it can't be evaluated, fall back to the uncontrolled schedule. */
+    int have_f0 = control && (sc->f0_valid ||
+        calculate_rhs_{{ solver_name }}(input, sc->f0, dims, n, (void *) data) == 0);
+    sc->f0_valid = 0;
+
+    double dt = (dt_first > 0.0) ? fmin(dt_first, dtf) : dtf / niter;
+    double ttot = 0.0;
+    int it = 0;
+
+    /* Quiet-cell path (needs error control): when the planned first
+       sub-step already covers all of dtf -- dtf is short compared with the
+       cells' own timescales -- try one step of
+           y1 = y0 + dt f(y0) / (1 - dt df_k/dy_k)
+       using only the Jacobian's diagonal: for a species with production P
+       and destruction D*y it is (y0 + dt P)/(1 + dt D) (positive, and the
+       equilibrium value for fast trace species), with no linear solve or
+       Newton iteration. Accepted under the same error estimate and
+       tolerance as the implicit path; otherwise fall through to it, with
+       the first step sized by that estimate. */
+    if (have_f0 && sc->allow_quiet && dt >= dtf) {
+        int quiet_ok = (calculate_jacobian_diag_{{ solver_name }}(input, sc->s, dims, n, (void *) data) == 0);
+        for (int i = 0; quiet_ok && i < total; i++) {
+            double denom = 1.0 - dtf * sc->s[i];
+            if (!(denom > 0.0)) { quiet_ok = 0; break; }
+            input[i] = sc->prev[i] + dtf * sc->f0[i] / denom;
+            if (!(input[i] >= 0.0)) quiet_ok = 0;
+        }
+        if (quiet_ok && calculate_rhs_{{ solver_name }}(input, sc->f1, dims, n, (void *) data) == 0) {
+            /* (No coupled filter here: the quiet step updates each component
+               from its own diagonal only, so a fast mode felt through
+               coupling really does put error into it -- unlike backward
+               Euler, which damps it. See _coupled_error_norm.) */
+            double err = {{ solver_name }}_error_norm(input, sc->f0, sc->f1, sc->s, dims, n, dtf, err_tol);
+            if (err <= 1.0) {
+                for (int i = 0; i < total; i++)
+                    if (input[i] < floor_value) input[i] = floor_value;
+                if (callback != NULL) callback(callback_ctx, 0, dtf);
+                sc->n_accepted++;
+                sc->n_quiet++;
+                if (n_steps != NULL) *n_steps = 1;
+                return dtf;
+            }
+            dt = dtf * fmin(1.0, fmax(0.2, 0.9 / sqrt(err)));
+        }
+        /* not quiet after all: back to the starting state */
+        for (int i = 0; i < total; i++) input[i] = sc->prev[i];
+        sc->n_quiet_rejected++;
+        /* f0 is still the RHS at the starting state, but calculate_rhs at
+           the trial state overwrote the cached temperature/rates; refresh. */
+        have_f0 = (calculate_rhs_{{ solver_name }}(input, sc->f0, dims, n, (void *) data) == 0);
+    }
+
+    /* Jacobian diagonal at each implicit step's starting state, for the
+       error-estimate filter. calculate_jacobian_diag uses the rates cached
+       by the last RHS evaluation, so it is taken right after one at that
+       state: here (f0), and after each accepted step (f1). NULL if it
+       can't be evaluated: the unfiltered estimate is the safe side. */
+    const double *jd = NULL;
+    if (have_f0 && calculate_jacobian_diag_{{ solver_name }}(input, sc->jd, dims, n, (void *) data) == 0)
+        jd = sc->jd;
+
+    while (it < niter && ttot < dtf) {
+        int rv = BE_chem_solve(calculate_rhs_{{ solver_name }}, calculate_jacobian_{{ solver_name }},
+                               input, dt, sc->rtol, sc->atol, dims, n, sc->scale,
+                               (void *) data, sc->u0, sc->s, sc->gu, sc->Ju);
+        for (int i = 0; i < total; i++) {
+            if (input[i] < 0) { rv = 1; break; }
+        }
+        double growth = 2.0;
+        if (rv == 0 && have_f0) {
+            if (calculate_rhs_{{ solver_name }}(input, sc->f1, dims, n, (void *) data) != 0) {
+                rv = 1;
+            } else {
+                double err = {{ solver_name }}_error_norm(input, sc->f0, sc->f1, jd, dims, n, dt, err_tol);
+                if (err > 1.0 && sc->coupled_filter &&
+                    calculate_jacobian_{{ solver_name }}(input, sc->Ju, dims, n, (void *) data) == 0)
+                    err = {{ solver_name }}_coupled_error_norm(input, sc->f0, sc->f1, sc->Ju, dims, n, dt, err_tol);
+                growth = (err > 0.0) ? 0.9 / sqrt(err) : 5.0;
+                growth = fmin(5.0, fmax(0.2, growth));
+                if (err > 1.0) rv = 2;  /* converged, but too inaccurate */
+            }
+        }
+        if (rv == 0) {
+            ttot += dt;
+            for (int i = 0; i < total; i++) {
+                if (input[i] < floor_value) input[i] = floor_value;
+                sc->prev[i] = input[i];
+                sc->scale[i] = fmax(fabs(input[i]), floor_value);
+            }
+            if (have_f0) {
+                double *tmp = sc->f0; sc->f0 = sc->f1; sc->f1 = tmp;
+                jd = (calculate_jacobian_diag_{{ solver_name }}(input, sc->jd, dims, n, (void *) data) == 0)
+                     ? sc->jd : NULL;
+            }
+            if (callback != NULL) callback(callback_ctx, it, ttot);
+            /* Without error control: growth factor 2.0 (not 1.1): with
+               niter=200 the ramp from dtf/niter back up to dtf takes ~8
+               sub-steps instead of ~32, at no measurable accuracy cost --
+               see NOTES.md. With it: from the error estimate. */
+            if (adaptive_step && ttot < dtf) dt = fmin(dt * growth, dtf - ttot);
+            it += 1;
+            sc->n_accepted++;
+        } else {
+            sc->n_rejected++;
+            /* Newton failure: halve. Accuracy rejection: shrink by the
+               error estimate (at most 5x). */
+            dt *= (rv == 2) ? growth : 0.5;
+            for (int i = 0; i < total; i++) {
+                input[i] = sc->prev[i];
+                sc->scale[i] = fmax(fabs(sc->prev[i]), floor_value);
+            }
+            /* Give up only once the sub-step is absurdly small relative
+               to dtf. This used to be 1e-15*dtf, which for a long dtf
+               (~1e12-1e13 s, e.g. a hydro step) is ~ms -- and a strongly
+               out-of-equilibrium dense cell can legitimately need
+               sub-ms first steps, so it failed or not depending on where
+               the halvings happened to land. Only affects paths that
+               would otherwise have given up. */
+            if (dt < 1.0e-25 * dtf) break;
+        }
+    }
+    if (n_steps != NULL) *n_steps = it;
+    return ttot;
 }
 {% endblock %}

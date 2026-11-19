@@ -4294,3 +4294,412 @@ protostellar-disk both show large, real species changes (H_1: 76->63.9
 and 5e11->7.3 respectively), and virial-shock's own H_1/He_1 are
 confirmed to barely move (0.237->0.237003, 0.0189->0.0189) -- exactly
 the physically-expected result, not a leftover bug. No console errors.
+
+## 2026-11-18 — dengo-grackle in Enzo: per-step cost, and the queued performance work
+
+Branch `enzo-grackle-shim` (see `examples/enzo_grackle_shim/README.md`
+for the Enzo setup and results). After removing nested-OpenMP overhead
+and starting sub-steps at dt/200, the Enzo CoolingTest costs 70.9 us per
+cell-solve single-threaded (8.10 accepted + 0.13 rejected sub-steps, the
+same count dengo's standalone Solver takes on those states; ~8.7 us per
+sub-step) against ~5 us for Grackle. Cachegrind breakdown of what's left
+(single thread, 30 cycles):
+
+| function | share of instructions |
+|---|---|
+| Gauss_Elim (10x10, per Newton sweep) | 31% |
+| pow() (+ log 1.3%) | ~20% |
+| calculate_jacobian | 14% |
+| BE_Resid_FunJac | 8% |
+| interpolate_rates | 6% |
+| calculate_rhs | 6% |
+| calculate_temperature + interpolate_gamma | ~3% |
+
+Queued, in this order; each checked against the bit-for-bit baseline (or
+a tight BDF reference where results are expected to move):
+
+1. **First sub-step for easy cells.** Being evaluated now (fixed
+   fractions dt/200, dt/20, dt/2, dt vs. min(dt, 0.1 x shortest
+   species/energy timescale)) against a scipy BDF reference on Enzo
+   CoolingTest and free-fall states. Expected: ~4-6x fewer sub-steps on
+   low-density, near-equilibrium cells.
+2. **Gauss_Elim.** ~5300 instructions per 10x10 solve: pivot search per
+   row, dense treatment of a fairly sparse Jacobian. A size-specialized or
+   sparsity-pattern-generated solve should be several times faster.
+3. **Generated-code pow()/CSE.** 75 pow calls in source (14 RHS, 61
+   Jacobian); GCC already folds squares, leaving 22 calls (6 RHS, 16
+   Jacobian): cubes (pow(H_1,3), from three-body rates -> x*x*x),
+   pow(z+1,4) (constant per call -> hoist out of the cell loop), the
+   optical-depth powers of mass density ((rho/rho0)^2.8, ^-0.45),
+   evaluated separately in RHS and Jacobian for the same state (compute
+   once per Newton sweep), pow(..,-1.0) (-> division). Plus repeated
+   denominators across Jacobian entries (Glover-Abel H2 cooling,
+   H2-formation heating) -> sympy.cse() at codegen. Try -fno-math-errno
+   first: pow can set errno, which stops GCC treating repeated calls as
+   pure.
+4. (Small) Temperature Newton initial guess from the ideal-gas estimate
+   instead of a fixed 1000 K: ~1% at most -- Ts is already reused within
+   a cell-solve, only the first call per cell starts cold.
+
+Separately, the standalone Cython Solver at dims=1 still enters (if-
+serialized) OpenMP regions from every per-cell call; the same cost the
+C library just shed. Worth the same treatment for single-cell Python use.
+
+### 2026-11-18, later — working the queue: results
+
+Enzo CoolingTest, single thread, per cell-solve (identical sub-step counts
+throughout: 8.10 accepted + 0.13 rejected):
+
+| change | us/cell-solve | results |
+|---|---|---|
+| start of queue | 70.9 | |
+| `-fno-math-errno` (pow() treated as pure: Jacobian 16 -> 9 calls) | 61.2 | bit-identical |
+| codegen: integer powers \|n\|<=4 as products (22 -> 4 pow() calls) | **54.3** | <= 3.4e-9 rel. (Enzo output 3.5e-15) |
+
+Tried and reverted (no gain):
+- **Gauss_Elim at compile-time size** (template on n), with `restrict`,
+  hoisted loads, full unrolling, `-march=native`: all within ~5% of the
+  original in a microbenchmark (~950 ns per 10x10 solve on this X5650).
+  The ~4000 instructions per solve are the real cost of a dense 10x10
+  LU with partial pivoting, not loop overhead -- earlier claim that it
+  was "several times" a tight solve was wrong. Reciprocal-multiply
+  instead of 55 divisions: only 15% faster, and not bit-identical.
+- **Skipping zero multipliers** in the elimination (bit-identical):
+  slower, 54.3 -> 58.2 us; the branches cost more than the multiplies
+  saved and block vectorization.
+- **Sharing the optical-depth factors** between RHS and Jacobian
+  (bit-identical): no measurable change.
+
+Remaining option for the linear solve (not done -- needs a decision):
+block-structured elimination using the Jacobian's sparsity (64/100
+nonzeros: a dense 5x5 H block and a 3x3 He block coupled only through
+the e- and energy rows/columns). Eliminating He block, then H block,
+then the 2x2 (e-, ge) needs ~120 multiply-subtracts instead of ~285,
+but restricts pivoting to within each block -- a numerical-stability
+trade-off. Would also need generalising to arbitrary networks (generate
+the elimination from the symbolic sparsity pattern).
+
+Not done: initial temperature guess (measured ~3% of instructions in
+the whole temperature solve; at most ~1% to gain).
+
+### 2026-11-18, later — first-sub-step evaluation (queue item 1)
+
+Each state integrated by dengo's Solver with five first-step policies and
+by a tight scipy BDF reference (rtol 1e-8) of dengo's own RHS/Jacobian.
+States: Enzo CoolingTest_Primordial cells (initial, fully neutral DD0000,
+and evolved DD0002; 150 cells each) at dt = 2.5e8 (Enzo's step), 3e10,
+3e12 s; Enzo one-zone free-fall dumps to n_H = 1e16 at 1% and 10% t_ff.
+References over 20 s were skipped (23 + 41, all in hard cases).
+
+Timescale-based start, min(dt, 0.1 x shortest e-folding time of any
+species holding > 1e-6 of H nuclei, or of the energy):
+
+| states | speedup | 99th-pct T error (now -> timescale) |
+|---|---|---|
+| CoolingTest evolved, Enzo dt, n < 10 | 5.9x | 3e-7 -> 1e-6 |
+| CoolingTest evolved, Enzo dt, n >= 10 | 3.0x | 2e-6 -> 8e-6 |
+| CoolingTest evolved, dt = 3e10, n < 10 | 2.9x | 0.2% -> 0.6% |
+| free-fall, n < 1e4 | 7.2x | 1.6% -> 2.9% |
+| free-fall, 1e4-1e10 | 4.0x | 1.0% -> 1.9% |
+| free-fall, > 1e10 | 1.2x | ~same |
+
+At least as accurate as a fixed full-dt start everywhere; never slower
+than now. On hard cases (neutral hot starts; dt = 3e12 s at n >= 10) all
+policies cost and err the same -- the chemistry, not the first step, sets
+the cost there.
+
+Bigger finding: on those hard cases dengo can be far from the reference
+under *any* first step (30-50% in T for neutral hot starts; very large
+for ~5% of dense cells at dt = 3e12 s). `_advance()` accepts a sub-step
+whenever Newton converges and always grows the step 2x -- there is no
+truncation-error estimate, so step size never adapts to accuracy (also
+why the current policy carries 1-2% errors on easy free-fall cells).
+Local error control (step doubling or a trapezoidal estimate) is the
+principled fix, for accuracy and for the speed/accuracy trade-off.
+
+Recommendation (pending decision): adopt the timescale-based first step;
+make error control the next item. Evaluation scripts/results:
+scratchpad stepeval/ (not committed).
+
+### 2026-11-18, later — first step adopted; the hard-case errors are truncation error
+
+Adopted (commit 83cfa35): C API first sub-step = min(dt, 0.1 x the cell's
+shortest timescale). Enzo CoolingTest 54.3 -> 11.8 us per cell-solve
+single-threaded (1.20 + 0.22 sub-steps per cell), 35 s wall vs real
+Grackle's 14 s (12.6 s on 24 threads); free-fall track within 0.5% in T.
+
+Why dengo can be far from the BDF reference on hard cases, under any
+first-step policy (incl. the old one, and in the Cython Solver too):
+re-ran the worst cases with fixed, small sub-steps --
+
+| case | reference T | current policy | fixed dt/1e3, 1e4, 1e5 |
+|---|---|---|---|
+| n=1000, 7.7e3 K, dt 3e12 s | 5351 | 8718 | 5349, 5351, 5351 |
+| n=1, neutral 6.3e4 K, dt 3e10 s | 6.302e4 | 9.812e4 | 6.300e4, 6.301e4, 6.301e4 |
+| n=100, 3.5e6 K, dt 3e12 s | 6678 | 7.86e5 | 2.95e6, 7.3e5, 6678 |
+| n=1000, 6.5e6 K, dt 3e12 s | 375 | 1.46e6 | 5.37e6, 1.46e6, 540 |
+
+So dengo converges to the reference as the steps shrink: it's truncation
+error, of two kinds -- smooth first-order error, and, for hot dense gas,
+convergence to a *wrong root*: each BE step solves
+e_new = e_old - dt*Lambda(T_new)*n^2, which has several roots for a
+non-monotonic Lambda(T) once the step is >> t_cool, and Newton settles on
+a spurious ~1e6 K one that reports success. Grackle avoids this by
+sub-cycling on its own cooling/chemistry timescales.
+
+Next item, design for discussion: step-doubling error control in
+_advance() -- compare one step of h against two of h/2, accept/shrink on
+the difference vs a tolerance, size the next step from the estimate
+(instead of always 2x), keep the two-half-step (optionally Richardson-
+extrapolated) result. ~3 implicit solves per accepted step instead of 1,
+but larger steps become safe and wrong roots are caught (they disagree
+badly with the half-step pair). Validate with the BDF-reference harness
+including these hard cases.
+
+### 2026-11-18, later — CORRECTION to the "wrong root" diagnosis above
+
+The two hot-gas rows above (n=100-1000, 3.5e6-6.5e6 K, dt 3e12 s) are NOT
+Newton converging to a spurious root. dengo stops partway: it runs out of
+its step budget (niter = max_iterations = 10000 accepted sub-steps) at
+t ~ 3.3e11 s, T ~ 1.4e6 K -- which matches the reference *at that time*
+(1.82e6 K at 3e11 s); single steps of 1 s-1e6 s from the stalled state all
+succeed. Through the fast-cooling phase the largest step for which the
+(undamped, <= 10-sweep) Newton iteration converges is ~1e7 s, so 10000
+steps cover only ~3e11 s. The evaluation harness scored the stalled state
+against the end-of-step reference (those cells are the ok < 100% ones);
+dengo-grackle reports them with its "did not reach dt" warning. Error
+control can't fix this -- the limit is Newton convergence, not accuracy;
+a damped/line-search Newton would be the fix (separate item).
+
+The moderate rows (7.7e3 K at n=1000; the neutral 6.3e4 K start) are
+genuine truncation error. Error control fixes the first (4454 -> 5209 ->
+5312 K for tol 1e-1 -> 1e-2 -> 1e-3, reference 5351 K). The neutral start
+is a seed-amplification case: electrons start at the 1e-20 floor (no
+k57/k58), BE over-predicts exponential growth for large steps, and the
+error norm ignores species below 1e-6 of n_tot, so the overshoot happens
+unmeasured and is then amplified. Only affects artificially seedless gas.
+
+### 2026-11-18, later — projected Newton, error control on, and what's queued
+
+- **Projected Newton** (019dd4c): clamp abundances at zero after each
+  Newton update. Fixes the hot-gas stalls (H- at -1e-45 roundoff aborting
+  every step longer than its ~1e3 s timescale); hot cases now 378/367/6927 K
+  vs reference 375/365/6678 K. Enzo CoolingTest 11.8 -> 10.0 us/cell-solve.
+- **Error control on by default, tolerance 0.1** (64dd5aa), with
+  `DENGO_GRACKLE_ERROR_TOLERANCE` to override. Re-scored against the saved
+  BDF references (all states now complete):
+
+  | states | 99th-pct T error, off -> 0.1 -> 0.01 | cost at 0.1 / 0.01 |
+  |---|---|---|
+  | free-fall n < 1e4 | 2.9% -> 3.1% -> 1.6% | 1.07x / 1.7x |
+  | free-fall n > 1e10 | 5.5% -> 1.6% -> 0.9% | 1.5x / 5x |
+  | cooling, Enzo dt 2.5e8 s | 2e-5 (unchanged) | 1.25x |
+  | cooling, 3e10 s | 2.0% -> 1.4% -> 0.6% | 1.3x / 2.3x |
+  | cooling, 3e12 s | 19% -> 8.9% -> 3.7% | 1.9x / 3.9x |
+
+  Enzo CoolingTest: 13.2 us/cell-solve at 0.1 (13.6 at 0.01); 38 s wall
+  single-threaded vs Grackle's 14 s.
+
+Queued next:
+1. **H- and H2+ as equilibrium species.** Grackle 3.4.1 sets H2+ to
+   equilibrium and integrates H- with a linearized implicit update
+   ((production*dt + old)/(1 + destruction*dt)), which is equilibrium
+   whenever H- is fast -- and positivity-preserving by construction (why
+   Grackle never hit the negative-H- failure). dengo's templates already
+   support `equilibrium_species`. Would shrink the implicit system 10 -> 8
+   (linear solve ~half) and drop the two fastest timescales that limit the
+   first-step estimate and error control. Needs reference validation.
+2. Reuse the first-step RHS evaluation as error control's f0 (~1.5 us/cell).
+3. NaN rejections in H2 for very long steps in fully ionized gas (H, H2 ~ 0):
+   harmless (retried smaller) but wasteful; likely the Jacobian.
+4. Seed amplification in seedless neutral gas: needs k57/k58 in the
+   network, or a tighter trace-species threshold in the error norm.
+5. Block-structured linear solve (see above) -- smaller payoff once (1) is in.
+
+### 2026-11-19 — AMR cosmology comparison, and the next item
+
+Small AMR cosmology (Enzo amr_cosmology adapted to primordial chemistry,
+32^3 in 32 Mpc/h, z 50 -> 3; /data/dengo-test, README there): unmodified
+Enzo completes on both libraries with identical AMR and timestep history;
+mass-weighted T/H2/e- agree to <=1-2% at z = 6-10 and 4-6% at z = 3.
+Wall time 50 s (Grackle) vs 102 s (dengo): ~45 s shared hydro/gravity, so
+chemistry is ~5 s vs 57 s, ~1 vs 12.8 us per cell-solve -- ~10x per core,
+because nearly every cell is cold near-equilibrium IGM that Grackle crosses
+in one cheap sub-cycle while dengo pays a full implicit Newton step.
+
+**Next, top of the queue: explicit fast path for quiet cells** (generic,
+uses only the generated RHS): the first-step logic already evaluates f(y)
+per cell; when dt <= ~0.1 x the shortest timescale, take y + dt*f(y) and
+accept it if the existing error estimate (h/2)|f(y1) - f(y0)| passes,
+else fall back to the implicit path. ~2 RHS evaluations (~2-3 us) instead
+of RHS + Jacobian + linear solve + error RHS (~12 us). Estimated: this run's
+chemistry ~57 s -> ~15 s (total ~60 s vs Grackle's 50 s) -- to be validated
+against the BDF harness and re-timed. Then the generic items below it
+(reuse duplicated RHS; H-/H2+ equilibrium via dengo's machinery with
+packing inside the core; auto-generated sparse solve), then a minihalo
+box (<=1 Mpc/h, z_init ~100 -> z ~15-20) where the chemistry matters.
+
+### 2026-11-19, later — quiet-cell path landed (ca04e58)
+
+Diagonal-implicit single step for quiet cells + reuse of the first-step
+RHS as error control's f0. Enzo CoolingTest 13.2 -> 4.87 us/cell-solve
+(19 s wall vs Grackle 14 s); AMR cosmology 102 -> 61 s total vs Grackle's
+50 s (chemistry 57 -> 17 s, 3.8 us/cell-solve, 99.7% quiet), same
+agreement with Grackle. Microbenchmark of a quiet cell's pieces: RHS
+1.2-1.3 us, Jacobian diagonal 0.31 us (full Jacobian 0.77, 10x10 solve
+1.13) -- a plain explicit step without the diagonal would save ~7% but
+lose positivity for fast trace species, so kept. The RHS (temperature
+iteration + interpolating ~58 tables) is now the dominant cost.
+
+Noticed, not fixed: the energy row of the generated Jacobian omits the
+CIE continuum optical-depth factor that print_cooling() applies to
+radiative terms in the RHS (affects Newton convergence, not results).
+
+### 2026-11-19, later — interpolation divisions; interleaving experiment
+
+- Interleaved (bin-major) rate tables, tried as an experiment on branch
+  `experiment/interleaved-tables` (checkpoint `checkpoint/before-interleaved-
+  tables`): bit-identical, no speedup -- tables stay in cache either way.
+- The interpolation's real cost was 54 divisions per cell per RHS
+  ((hi-lo)/dT*invT per table, dT constant). Fixed (f5f4467): one reciprocal
+  per cell; derivatives interpolated only when the Jacobian needs them;
+  cold-start temperature guess from the generated formula with gamma=5/3
+  instead of 1000 K. Microbenchmark RHS 1.17 -> ~0.9 us.
+- Enzo CoolingTest 4.87 -> 4.13 us/cell-solve (17.2 s vs Grackle 14 s);
+  AMR cosmology 61 -> 60 s total vs Grackle 50 s, chemistry 17 -> 14.7 s
+  (3.3 us/cell-solve), physics unchanged. Chemistry is now ~25% of the
+  cosmology run's time; the rest (~45 s) is hydro/gravity shared with
+  Grackle's run.
+
+### 2026-11-19, later — chemistry on real Pop III collapse states (PopIII-Binary DataDump0081)
+
+Restarting the 2009 dump in current Enzo failed (HDF4 boundary file, after
+a parameter-meaning change). Instead: 56k cells sampled from the dump
+(n_H 1e2 to 7e15 cm^-3, a full Pop III collapse), each advanced 0.01 or
+0.1 t_ff by real Grackle and dengo-grackle via gracklepy. Write-up and
+scripts: /data3/PopIII-Binary/copy/chem-test/README.md.
+
+- Grackle units pitfall: k57/k58 return `tiny` (1e-20) in *code units*
+  below 3000 K; with density_units = m_H and time_units = 1 s that is a
+  physical 1e-20 cm^3/s, i.e. spurious ionization ~1e-20 n_H s^-1 (1e-12
+  s^-1 at 1e8), which looked like a big Grackle/dengo physics difference
+  at 1e6-1e10. With Enzo's units the codes agree. Harmless in Enzo's own
+  cosmological units (~1e-33 cm^3/s). Possibly worth reporting upstream.
+- Cost per cell (dense cells, single thread): Grackle 46/66 us, dengo
+  129/379 us at 0.01/0.1 t_ff.
+- Self-convergence (1 vs 1000 calls): converged solutions of the two codes
+  agree (T within ~1% to 1e12, 2-4% at 1e13-1e15; f_H2 close except 1e15:
+  0.85 vs 0.70). Grackle's single-call error at 1e14-1e15 is 14-32% in T;
+  dengo's there is <= 0.2%. dengo's weak spot is 1e11-1e13 (0.5-5%).
+- Open: exact BDF reference puts dengo's 0.01 t_ff error at 1e12 at 9% (vs
+  0.5% self-convergence) -- a step-independent offset, or a reference
+  issue; unresolved.
+
+## 2026-11-19 (late): temperature-solve bug; Pop III reference discrepancy resolved
+
+- **Bug:** `calculate_temperature`'s Newton loop updated `Ts` but not
+  `logTs`, while `interpolate_gamma` reads `logTs`. So the H2 gamma
+  stayed at the starting guess, and the converged T depended on that
+  guess (up to ~15% in H2-rich gas). The bug is also on `main`. Fixed in
+  d572b4d by setting `logTs = log(T)` each iterate.
+- **This was the 9% "BDF reference discrepancy" at 10¹².** An inner
+  tolerance of 10⁻⁴ didn't move dengo at all.
+- **After the fix,** dengo-grackle on the DataDump0081 cells:
+  - one call is within ≤0.2% of the exact BDF solution in T and ≤0.1% in
+    f_H2 (10¹⁰–10¹⁴);
+  - self-convergence is ≲4×10⁻⁴ through 10¹³;
+  - cost is 73/182 µs per cell (was 129/379).
+- **Converged T is now 4–9% above Grackle's at 10¹¹–10¹².** That's
+  mostly Grackle's one-pass H2-gamma temperature (`cool1d_multi_g.F`,
+  "not quite self-consistent").
+- **Table differences vs Grackle 3.4.1** (details in
+  /data3/PopIII-Binary/copy/chem-test/README.md):
+  - CIE cooling is 2× Grackle's;
+  - the H2 optical depth uses ρ where Grackle uses n_H (0.76 factor);
+  - Grackle applies its CIE optical-depth factor to all of edot;
+  - GAHI is GA08, but the shim accepts only `h2_h_cooling_rate = 1`
+    (Lique 2015). That's a shim mismatch: −35% low-density H2 cooling at
+    1000–2000 K.
+  - Not yet fixed; these are physics choices, for the user to decide.
+
+## 2026-11-19 (late): filtered error estimate (d15aba0)
+
+- **Traced cause of the slow long low-density steps:** H⁻ (~10⁻¹² of the
+  gas) relaxing to equilibrium in the first sub-step. (h/2)|f1 − f0|
+  read that as error, rejecting 1–3 accurate first steps per cell and
+  blocking the quiet path. The first-step t_min was *not* the issue; it
+  already skips species below 10⁻⁶ n_tot.
+- **Fix:** est_k /= (1 − h J_kk) for J_kk < 0, the diagonal Shampine
+  filter. Generic; it reuses the Jacobian diagonal, taken right after an
+  RHS evaluation at each step's start.
+- **Pop III dump, 0.01 t_ff, 100-cell grids:** 10² 67 → 15 µs, 10⁸
+  82 → 4, 10¹² 42 → 13; 10¹⁵ unchanged.
+- **Accuracy now tracks the tolerance.** At the default 0.1: ≤0.2% at
+  0.01 t_ff, up to ~1.3% at 0.1 t_ff; before, it had been ~10⁻⁴.
+- **Matched-accuracy cost (1%), summed over 10²–10¹²:**
+  - 0.01 t_ff: Grackle 51 µs, dengo 155 (was 536);
+  - 0.1 t_ff: Grackle 258, dengo 686 (was 1167).
+  - From 10⁹ up, dengo is now at parity or better; at 10¹⁴–10¹⁵ it's
+    still 150–3000× cheaper.
+- **Remaining gap:** 10²–10⁵, where the quiet path is taken for only
+  ~50% of cells.
+- **Not yet rerun:** Enzo CoolingTest and the AMR cosmology run. The
+  filter can only make the quiet path more likely there.
+- **Not on `grackle-physics-align`** (that branch predates it).
+
+## 2026-11-19 (late): tracing the remaining 10²–10⁵ cost (long steps)
+
+Traced with a temporary DENGO_TRACE build (not committed) on the Pop III
+cells, 0.01 t_ff:
+- **10²–10³:** most cells never try the quiet path. It's only tried when
+  the planned first step (0.1 t_min) covers dtf, and here t_min ≈ 6 dtf,
+  so the plan is ~0.6 dtf.
+- **10⁴–10⁵:** the quiet path is tried but 80–90% declined, with err
+  only 1.1–1.7. The flagged component is always the electrons: f_e flips
+  sign within the step (+1e-15 → −1e-16).
+  - Cause: H⁻ is out of equilibrium at the start, and its detachment
+    releases electrons. H⁻ is the fast mode, but it shows up in e⁻
+    through the coupling between species, which the diagonal filter
+    can't damp. The same estimate causes the implicit-step rejections
+    there (~1/3 of steps at 10⁴).
+- **Prototype "always try quiet" (reverted):** 10² 15 → 4.7 µs and 10³
+  29 → 21 at 0.01 t_ff, but worse at 0.1 t_ff (10² 46 → 84) and at 10¹⁵.
+  It also accepted a 5.7%-error quiet step at 10⁸, 0.1 t_ff, so the quiet
+  path's acceptance test isn't reliable for very long steps, and the
+  t_min pre-filter is doing useful work.
+- **Candidate generic fix:** full (I − hJ)⁻¹ filtering of the error
+  vector, as in RADAU5. Apply it only when the diagonal-filtered estimate
+  exceeds 1 (one dense 10×10 solve), which would damp coupled fast modes
+  like H⁻ → e⁻. Not implemented.
+
+## 2026-11-19 (late): coupled (full) error filter — branch full-error-filter
+
+- **What:** when the diagonally filtered estimate rejects a *backward
+  Euler* step, re-check it with the full filter. Solve
+  (I − hJ) w = (h/2)(f1 − f0) per cell, in tolerance-scaled variables,
+  with J taken at the end state (rates are already cached from f1); one
+  10×10 solve. Shampine/RADAU5-style.
+- **Not applied to the quiet step:** that step updates each component
+  from its own diagonal only, so a coupled fast mode genuinely puts
+  error into it.
+- **Controls:** option `coupled_error_filter` (default 1), env
+  `DENGO_GRACKLE_COUPLED_FILTER=0` to disable.
+- **Cost** (Pop III, 100-cell grids):
+  - 0.01 t_ff: 10⁴ 46 → 29 µs, 10⁵ 37 → 28;
+  - 0.1 t_ff: 10³ 62 → 51, 10⁴ 113 → 41, 10⁵ 141 → 35;
+  - neutral elsewhere.
+- **Accuracy against the exact solutions** (all 56k cells run; 5 cells
+  per decade with exact references; median and max):
+  - identical everywhere except 10⁴–10⁵ at 0.1 t_ff, where the T median
+    goes 2.4 → 3.3e-3 and 4.7 → 5.4e-3, and the max 1.8 → 2.0e-2;
+  - f_H2 essentially unchanged.
+- **Separate observation (from the diagonal filter, d15aba0):** at the
+  default tolerance 0.1 and 0.1 t_ff steps, worst-case T errors are 2–4%
+  at 10²–10¹¹ (median ~1%); at 0.01 t_ff they're ≤0.3%. If that's too
+  loose for long steps, the remedy is the tolerance default, not the
+  filter.
+- 143 tests pass. Enzo CoolingTest and AMR cosmology not rerun.
+- **AMR cosmology (/data/dengo-test, `dengo-v5/` vs `grackle-v5/`, run
+  concurrently):** dengo 59.4 s against Grackle 49.0 s; chemistry 14.9 s,
+  3.36 µs per cell-solve, 99.8% quiet. Unchanged from before the filters.
+  z = 3 agreement unchanged: T +4.5%, e⁻ +6.1%, H2 +0.7%.

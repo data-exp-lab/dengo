@@ -1,0 +1,44 @@
+# Enzo's run/Cooling/OneZoneFreefallTest, primordial: one zone (per cell)
+# compressed on the free-fall time while Grackle (or dengo-grackle) does
+# the chemistry and cooling. Same initial density/energy in all 3x3 cells.
+ProblemType =  63
+TopGridRank = 2
+TopGridDimensions = 3 3
+OneZoneFreefallTestInitialDensity = 1.0
+OneZoneFreefallTestMinimumEnergy = 2.0
+OneZoneFreefallTestMaximumEnergy = 2.0
+OneZoneFreefallTestMinimumMetallicity = 0.0
+OneZoneFreefallTestMaximumMetallicity = 0.0
+OneZoneFreefallTimestepFraction = 1e-2
+OneZoneFreefallUseEffectiveGamma = 1
+Gamma = 1.6666667
+StopTime                  = 100
+StopCycle                 = 5000
+CycleSkipDataDump         = 50
+DataDumpDir               = DD
+DataDumpName              = DD
+HydroMethod               = 0
+UseHydro                  = 0
+PressureFree              = 1
+DualEnergyFormalism       = 1
+SelfGravity               = 0
+FluxCorrection            = 0
+StaticHierarchy           = 1
+OutputCoolingTime         = 1
+OutputTemperature         = 1
+DensityUnits              = 1.67e-24
+LengthUnits               = 3.0857e+18
+TimeUnits                 = 3.1557e+13
+GravitationalConstant     = 1.394833e-3
+RadiativeCooling          = 1
+use_grackle               = 1
+MultiSpecies              = 2
+MetalCooling              = 0
+H2FormationOnDust         = 0
+CMBTemperatureFloor       = 0
+ThreeBodyRate             = 4
+CIECooling                = 1
+H2OpticalDepthApproximation = 1
+TestProblemUseMetallicityField = 0
+TestProblemInitialHIFraction      = 0.999
+TestProblemInitialH2IFraction     = 1.e-5

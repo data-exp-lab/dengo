@@ -61,6 +61,20 @@ cdef extern from "{{ solver_name }}_solver.h":
 
     BE_chem_solve_diag BE_chem_solve_last_failure()
 
+    ctypedef struct {{ solver_name }}_scratch:
+        int dims
+    ctypedef void (*{{ solver_name }}_step_callback)(void *ctx, int it, double ttot) noexcept
+    {{ solver_name }}_scratch *{{ solver_name }}_alloc_scratch(int dims)
+    void {{ solver_name }}_free_scratch({{ solver_name }}_scratch *scratch)
+    double {{ solver_name }}_advance({{ solver_name }}_data *data,
+                                     {{ solver_name }}_scratch *scratch,
+                                     double *input, int dims, double dtf,
+                                     int niter, double dt_first, double err_tol,
+                                     double reltol, double floor_value,
+                                     int adaptive_step, int *n_steps,
+                                     {{ solver_name }}_step_callback callback,
+                                     void *callback_ctx)
+
 
 SPECIES_NAMES = [
     {%- for s in network.required_species | sort %}
@@ -68,6 +82,22 @@ SPECIES_NAMES = [
     {%- endfor %}
 ]
 SPECIES_INDEX = {name: i for i, name in enumerate(SPECIES_NAMES)}
+
+
+cdef void _record_step(void *ctx, int it, double ttot) noexcept:
+    """{{ solver_name }}_advance() callback: copy the just-accepted
+    sub-step into the trajectory arrays `step()` preallocated."""
+    rec = <tuple> ctx
+    cdef Solver solver = <Solver> rec[0]
+    traj_dict, T_traj, t_traj, ok_traj = rec[1], rec[2], rec[3], rec[4]
+    cdef int n = NSPECIES
+    cdef int i, s_idx
+    for i in range(solver.dims):
+        for s_idx, name in enumerate(SPECIES_NAMES):
+            traj_dict[name][i, it] = solver._input[i * n + s_idx]
+        T_traj[i, it] = solver._data.Ts[i]
+    t_traj[it] = ttot
+    ok_traj[it] = True
 
 
 cdef class Solver:
@@ -92,15 +122,8 @@ cdef class Solver:
         Only used for the CMB temperature floor in Compton cooling.
     """
     cdef {{ solver_name }}_data *_data
+    cdef {{ solver_name }}_scratch *_scratch
     cdef double *_input
-    cdef double *_prev
-    cdef double *_scale
-    cdef double *_atol
-    cdef double *_rtol
-    cdef double *_u0
-    cdef double *_s
-    cdef double *_gu
-    cdef double *_Ju
     cdef double *_diag_input
     cdef double *_diag_rhs
     cdef double *_diag_jac
@@ -126,14 +149,7 @@ cdef class Solver:
         self._data.current_z = redshift
 
         self._input = <double *> malloc(dims * n * sizeof(double))
-        self._prev   = <double *> malloc(dims * n * sizeof(double))
-        self._scale  = <double *> malloc(dims * n * sizeof(double))
-        self._atol   = <double *> malloc(dims * n * sizeof(double))
-        self._rtol   = <double *> malloc(dims * n * sizeof(double))
-        self._u0     = <double *> malloc(dims * n * sizeof(double))
-        self._s      = <double *> malloc(dims * n * sizeof(double))
-        self._gu     = <double *> malloc(dims * n * sizeof(double))
-        self._Ju     = <double *> malloc(dims * n * n * sizeof(double))
+        self._scratch = {{ solver_name }}_alloc_scratch(dims)
         self._diag_input = <double *> malloc(n * sizeof(double))
         self._diag_rhs   = <double *> malloc(n * sizeof(double))
         self._diag_jac   = <double *> malloc(n * n * sizeof(double))
@@ -180,9 +196,8 @@ cdef class Solver:
             return
         self._closed = True
         {{ solver_name }}_free_data(self._data)
-        free(self._input); free(self._prev); free(self._scale)
-        free(self._atol); free(self._rtol)
-        free(self._u0); free(self._s); free(self._gu); free(self._Ju)
+        free(self._input)
+        {{ solver_name }}_free_scratch(self._scratch)
         free(self._diag_input); free(self._diag_rhs); free(self._diag_jac)
         free(self._rhs_bulk)
 
@@ -261,87 +276,35 @@ cdef class Solver:
     cdef (double, int) _advance(self, double dtf, int niter, double reltol,
                                  double floor_value, bint adaptive_step,
                                  bint intermediate, dict traj_dict,
-                                 object T_traj, object t_traj, object ok_traj):
-        """Shared core of `step()`/`step_inplace()`: run BE_chem_solve
-        adaptively, from whatever is currently in `self._input`, until
-        `dtf` is covered or `niter` is exhausted. Neither reads nor
-        writes any Python dict for the state itself -- callers are
-        responsible for getting the input into `self._input` (via
-        `self.state`) beforehand and reading the result back out the
-        same way; `intermediate=True` still records a trajectory (that
-        needs `traj_dict`/`T_traj`/`t_traj`/`ok_traj` preallocated by the
-        caller), since only `step()` ever asks for one.
+                                 object T_traj, object t_traj, object ok_traj,
+                                 double first_step=0.0, double error_tolerance=0.0):
+        """Shared core of `step()`/`step_inplace()`: evolve whatever is
+        currently in `self._input` forward by `dtf` (or until `niter`
+        sub-steps are used up) via the generated C
+        `{{ solver_name }}_advance()` -- the same sub-stepping loop the
+        wasm build and the grid-level C API use. Neither reads nor writes
+        any Python dict for the state itself -- callers put the input in
+        `self.state` beforehand and read the result back out the same
+        way; `intermediate=True` records each accepted sub-step into the
+        caller-preallocated `traj_dict`/`T_traj`/`t_traj`/`ok_traj`.
         """
-        cdef int dims = self.dims
-        cdef int n = NSPECIES
-        cdef int i, s_idx, it
-        cdef double dt, ttot
-        cdef int rv
-
-        ensure_electron_consistency(self._input, dims, n)
-        for i in range(dims * n):
-            self._atol[i] = floor_value * reltol
-            self._rtol[i] = reltol
-            # BE_chem_solve normalizes by 1/scale internally, so scale
-            # must never be zero -- an exactly-zero initial abundance
-            # (e.g. no He+ / He++ / H2 yet) is the common case, not an
-            # edge case.
-            self._scale[i] = max(abs(self._input[i]), floor_value)
-            self._prev[i] = self._input[i]
-
-        dt = dtf / niter
-        ttot = 0.0
-        it = 0
-        while it < niter and ttot < dtf:
-            rv = BE_chem_solve(calculate_rhs_{{ solver_name }}, calculate_jacobian_{{ solver_name }},
-                                self._input, dt, self._rtol, self._atol, dims, n, self._scale,
-                                <void *> self._data, self._u0, self._s, self._gu, self._Ju)
-            for i in range(dims * n):
-                if self._input[i] < 0:
-                    rv = 1
-                    break
-            if rv == 0:
-                ttot += dt
-                for i in range(dims * n):
-                    if self._input[i] < floor_value:
-                        self._input[i] = floor_value
-                    self._prev[i] = self._input[i]
-                    self._scale[i] = max(abs(self._input[i]), floor_value)
-                if intermediate:
-                    for i in range(dims):
-                        for s_idx, name in enumerate(SPECIES_NAMES):
-                            traj_dict[name][i, it] = self._input[i * n + s_idx]
-                        T_traj[i, it] = self._data.Ts[i]
-                    t_traj[it] = ttot
-                    ok_traj[it] = True
-                if adaptive_step and ttot < dtf:
-                    # Growth factor here (not the Newton-convergence
-                    # tolerance) sets how many internal sub-steps a call
-                    # takes to ramp from dtf/niter back up to dtf: with
-                    # niter=200, log(200)/log(growth) sub-steps -- 1.1x
-                    # (the original choice) took ~32 regardless of how
-                    # trivially the state converges, since that's a pure
-                    # function of niter/growth, not of the physics.
-                    # Checked directly (see NOTES.md): growing at 2.0x
-                    # instead cuts that to ~8 with no meaningful accuracy
-                    # cost (full free-fall collapse trajectory matches
-                    # the 1.1x version to ~0.05-0.1% at every checkpoint)
-                    # -- this was a step-size *policy* bug, not evidence
-                    # the underlying chemistry needed 32 sub-steps.
-                    dt = min(dt * 2.0, dtf - ttot)
-                it += 1
-            else:
-                dt /= 2.0
-                for i in range(dims * n):
-                    self._input[i] = self._prev[i]
-                    self._scale[i] = max(abs(self._prev[i]), floor_value)
-                if dt < 1.0e-15 * dtf:
-                    break
-
+        cdef int it = 0
+        cdef double ttot
+        cdef tuple rec
+        if intermediate:
+            rec = (self, traj_dict, T_traj, t_traj, ok_traj)
+            ttot = {{ solver_name }}_advance(self._data, self._scratch, self._input,
+                                             self.dims, dtf, niter, first_step, error_tolerance, reltol, floor_value,
+                                             adaptive_step, &it, _record_step, <void *> rec)
+        else:
+            ttot = {{ solver_name }}_advance(self._data, self._scratch, self._input,
+                                             self.dims, dtf, niter, first_step, error_tolerance, reltol, floor_value,
+                                             adaptive_step, &it, NULL, NULL)
         return ttot, it
 
     def step_inplace(self, double dtf, int niter=10000, double reltol=1.0e-5,
-                      double floor_value=1.0e-20, bint adaptive_step=True):
+                      double floor_value=1.0e-20, bint adaptive_step=True,
+                      double first_step=0.0, double error_tolerance=0.0):
         """Evolve `self.state` forward by `dtf` seconds, in place -- zero
         Python-object marshaling in either direction, unlike `step()`.
         Write the current abundances into `self.state` (shape
@@ -363,13 +326,21 @@ cdef class Solver:
         trajectory recording here (see `step()` for that); returns just
         `(converged, t)` -- if `converged` is False, `self.last_error`
         has details on which species/cell/tolerance was the problem.
+
+        `first_step` (seconds): size of the first internal sub-step; 0
+        (default) means dtf/niter. With it set, `niter` is purely the cap
+        on accepted sub-steps.
+
+        `error_tolerance` > 0 turns on local truncation-error control
+        (see `_advance()` in the generated header); 0 (default) keeps
+        the fixed doubling schedule.
         """
         if self._closed:
             raise RuntimeError("this Solver has already been closed")
         cdef double ttot
         cdef int it
         ttot, it = self._advance(dtf, niter, reltol, floor_value, adaptive_step,
-                                  False, {}, None, None, None)
+                                  False, {}, None, None, None, first_step, error_tolerance)
         return (ttot >= dtf), ttot
 
     def step(self, state, double dtf, int niter=10000,
@@ -544,7 +515,7 @@ def run_{{ solver_name }}(ics, double dtf, int niter=10000,
         Relative tolerance and abundance floor used by the Newton solver.
     adaptive_step : bool
         Grow the internal step by 2x after each success, halve it on
-        failure (down to 1e-15 of dtf, at which point integration stops).
+        failure (down to 1e-25 of dtf, at which point integration stops).
     intermediate : bool
         If True, also return the full (cell, niter) trajectory.
     redshift : float

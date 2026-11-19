@@ -39,7 +39,7 @@ def _build_extension(output_dir, module_name, pyx_path, solver_name, openmp_args
         ],
         include_dirs=[output_dir, np.get_include()],
         language="c++",
-        extra_compile_args=["-O3", "-w"] + openmp_args,
+        extra_compile_args=["-O3", "-w", "-fno-math-errno"] + openmp_args,
         extra_link_args=list(openmp_args),
     )
     build_tmp = os.path.join(output_dir, "_build")
