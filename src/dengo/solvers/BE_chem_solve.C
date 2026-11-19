@@ -250,8 +250,19 @@ int BE_chem_solve(rhs_f f, jac_f J,
           continue;
       }
 
-      // update solution in this cell
-      for (int ii=0; ii<nchem; ii++)  u[ioff+ii] -= lam*s[ioff+ii];
+      // update solution in this cell. Projected Newton: abundances are
+      // clamped at zero. A trace species whose true value is ~0 (e.g. H-
+      // at the floor in fully ionized gas, destroyed on a ~1e3 s timescale)
+      // otherwise lands at -1e-45 from roundoff, the next sweep's RHS
+      // rejects the negative abundance, and the whole step fails -- at any
+      // step size above that species' timescale, so the sub-step collapses
+      // and the integration runs out of steps. Before this, any negative
+      // value aborted the solve, so paths that already converged are
+      // unaffected; convergence is still judged on the Newton update.
+      for (int ii=0; ii<nchem; ii++) {
+        u[ioff+ii] -= lam*s[ioff+ii];
+        if (u[ioff+ii] < 0.0) u[ioff+ii] = 0.0;
+      }
 
       // check error in this cell (max norm)
       for (int ii=0; ii<nchem; ii++) {
