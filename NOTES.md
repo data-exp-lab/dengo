@@ -4538,3 +4538,19 @@ against the BDF harness and re-timed. Then the generic items below it
 (reuse duplicated RHS; H-/H2+ equilibrium via dengo's machinery with
 packing inside the core; auto-generated sparse solve), then a minihalo
 box (<=1 Mpc/h, z_init ~100 -> z ~15-20) where the chemistry matters.
+
+### 2026-11-19, later — quiet-cell path landed (ca04e58)
+
+Diagonal-implicit single step for quiet cells + reuse of the first-step
+RHS as error control's f0. Enzo CoolingTest 13.2 -> 4.87 us/cell-solve
+(19 s wall vs Grackle 14 s); AMR cosmology 102 -> 61 s total vs Grackle's
+50 s (chemistry 57 -> 17 s, 3.8 us/cell-solve, 99.7% quiet), same
+agreement with Grackle. Microbenchmark of a quiet cell's pieces: RHS
+1.2-1.3 us, Jacobian diagonal 0.31 us (full Jacobian 0.77, 10x10 solve
+1.13) -- a plain explicit step without the diagonal would save ~7% but
+lose positivity for fast trace species, so kept. The RHS (temperature
+iteration + interpolating ~58 tables) is now the dominant cost.
+
+Noticed, not fixed: the energy row of the generated Jacobian omits the
+CIE continuum optical-depth factor that print_cooling() applies to
+radiative terms in the RHS (affects Newton convergence, not results).
