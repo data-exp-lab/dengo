@@ -192,14 +192,13 @@ static inline void gather_nonnegative(const {{ solver_name }}_grid *grid, long i
         if (f != {{ solver_name | upper }}_FIELD_{{ network.energy_term.name }} && u[f] < 0.0) u[f] = 0.0;
 }
 
-/* Every cell starts its temperature iteration from the same guess, so a
-   cell's result never depends on which cells a thread handled before
-   it -- i.e. on the thread count or schedule. */
+/* Every cell starts its temperature iteration cold (from its own
+   ideal-gas estimate; see calculate_temperature), so a cell's result
+   never depends on which cells a thread handled before it -- i.e. on
+   the thread count or schedule. */
 static inline void reset_temperature_guess({{ solver_name }}_data *data)
 {
-    data->Ts[0] = 1000.0;
-    data->logTs[0] = log(1000.0);
-    data->invTs[0] = 1.0 / 1000.0;
+    data->Ts[0] = -1.0;
 }
 
 int {{ solver_name }}_solve_grid({{ solver_name }}_context *ctx,

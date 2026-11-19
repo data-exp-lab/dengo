@@ -53,6 +53,7 @@ typedef struct {{ solver_name }}_data {
     double *Ts;
     double *Tdef;
     double *dT;
+    int *bin_id;      /* table bin chosen by the last _interpolate_rates */
     double *logTs;
     double *invTs;
     double *dTs_{{ network.energy_term.name }};
@@ -168,6 +169,7 @@ double {{ solver_name }}_advance({{ solver_name }}_data *data,
                                  void *callback_ctx);
 
 void {{ solver_name }}_interpolate_rates({{ solver_name }}_data *data, int nstrip);
+void {{ solver_name }}_interpolate_rate_derivatives({{ solver_name }}_data *data, int nstrip);
 void {{ solver_name }}_interpolate_gamma({{ solver_name }}_data *data, int i);
 int {{ solver_name }}_calculate_temperature({{ solver_name }}_data *data,
                                             double *input, int nstrip, int nchem);

@@ -28,13 +28,17 @@ static {{ solver_name }}_data *{{ solver_name }}_alloc_data(int nstrip)
     data->Ts    = (double *) malloc(nstrip * sizeof(double));
     data->Tdef  = (double *) malloc(nstrip * sizeof(double));
     data->dT    = (double *) malloc(nstrip * sizeof(double));
+    data->bin_id = (int *) malloc(nstrip * sizeof(int));
     data->logTs = (double *) malloc(nstrip * sizeof(double));
     data->invTs = (double *) malloc(nstrip * sizeof(double));
     data->dTs_{{ network.energy_term.name }} = (double *) malloc(nstrip * sizeof(double));
+    /* No temperature guess yet: calculate_temperature starts each cell
+       from the ideal-gas estimate (see there). */
     for (int i = 0; i < nstrip; i++) {
-        data->Ts[i] = 1000.0;
+        data->Ts[i] = -1.0;
         data->logTs[i] = log(1000.0);
         data->invTs[i] = 1.0 / 1000.0;
+        data->bin_id[i] = 0;
     }
 
     {%- for name, rxn in network.reactions | dictsort(case_sensitive=true) %}
@@ -73,7 +77,7 @@ static {{ solver_name }}_data *{{ solver_name }}_alloc_data(int nstrip)
 
 void {{ solver_name }}_free_data({{ solver_name }}_data *data)
 {
-    free(data->Ts); free(data->Tdef); free(data->dT);
+    free(data->Ts); free(data->Tdef); free(data->dT); free(data->bin_id);
     free(data->logTs); free(data->invTs);
     free(data->dTs_{{ network.energy_term.name }});
     {%- for name, rxn in network.reactions | dictsort(case_sensitive=true) %}
@@ -144,7 +148,11 @@ static void {{ solver_name }}_load_tables({{ solver_name }}_data *data, const do
    network), so this -- like calculate_rhs/calculate_jacobian/
    calculate_temperature/ensure_electron_consistency below -- parallelizes
    trivially over cells with OpenMP. Built without -fopenmp, the #pragma
-   lines are just ignored and this runs serially. */
+   lines are just ignored and this runs serially.
+
+   Values only: the T-derivatives of the tables are needed only by the
+   Jacobian, which calls _interpolate_rate_derivatives itself (from the
+   bins and weights cached here). */
 void {{ solver_name }}_interpolate_rates({{ solver_name }}_data *data, int nstrip)
 {
     double lb = log(data->bounds[0]);
@@ -157,20 +165,39 @@ void {{ solver_name }}_interpolate_rates({{ solver_name }}_data *data, int nstri
         double t2 = lb + (bin_id + 1) * data->dbin;
         data->Tdef[i] = (data->logTs[i] - t1) / (t2 - t1);
         data->dT[i] = t2 - t1;
+        data->bin_id[i] = bin_id;
 
         {%- for name, rxn in network.reactions | dictsort(case_sensitive=true) %}
         data->rs_{{ name }}[i] = data->r_{{ name }}[bin_id] +
             data->Tdef[i] * (data->r_{{ name }}[bin_id + 1] - data->r_{{ name }}[bin_id]);
-        data->drs_{{ name }}[i] = (data->r_{{ name }}[bin_id + 1] - data->r_{{ name }}[bin_id])
-            / data->dT[i] * data->invTs[i];
         {%- endfor %}
 
         {%- for name, action in network.cooling_actions | dictsort(case_sensitive=true) %}
         {%- for name2 in action.tables | sort(case_sensitive=true) %}
         data->cs_{{ name }}_{{ name2 }}[i] = data->c_{{ name }}_{{ name2 }}[bin_id] +
             data->Tdef[i] * (data->c_{{ name }}_{{ name2 }}[bin_id + 1] - data->c_{{ name }}_{{ name2 }}[bin_id]);
-        data->dcs_{{ name }}_{{ name2 }}[i] = (data->c_{{ name }}_{{ name2 }}[bin_id + 1] - data->c_{{ name }}_{{ name2 }}[bin_id])
-            / data->dT[i] * data->invTs[i];
+        {%- endfor %}
+        {%- endfor %}
+    }
+}
+
+/* d(table)/dT for every table, at the bins _interpolate_rates last
+   chose. One reciprocal per cell instead of a division per table (the
+   divisions were ~half the interpolation's cost). */
+void {{ solver_name }}_interpolate_rate_derivatives({{ solver_name }}_data *data, int nstrip)
+{
+    #pragma omp parallel for if(nstrip > DENGO_OMP_MIN_CELLS)
+    for (int i = 0; i < nstrip; i++) {
+        const int bin_id = data->bin_id[i];
+        const double dfac = data->invTs[i] / data->dT[i];
+
+        {%- for name, rxn in network.reactions | dictsort(case_sensitive=true) %}
+        data->drs_{{ name }}[i] = (data->r_{{ name }}[bin_id + 1] - data->r_{{ name }}[bin_id]) * dfac;
+        {%- endfor %}
+
+        {%- for name, action in network.cooling_actions | dictsort(case_sensitive=true) %}
+        {%- for name2 in action.tables | sort(case_sensitive=true) %}
+        data->dcs_{{ name }}_{{ name2 }}[i] = (data->c_{{ name }}_{{ name2 }}[bin_id + 1] - data->c_{{ name }}_{{ name2 }}[bin_id]) * dfac;
         {%- endfor %}
         {%- endfor %}
     }
@@ -254,6 +281,21 @@ int {{ solver_name }}_calculate_temperature({{ solver_name }}_data *data,
         /* gamma depends on T (H2 roto-vibrational states), so T has to be
            found by Newton iteration on the implicit ge(T) relation. */
         T = data->Ts[i];
+        if (!(T > 0.0)) {
+            /* No usable guess (cold start): the same temperature formula
+               with every species' gamma at the monatomic 5/3 -- exact but
+               for the temperature dependence of those gammas, so Newton
+               starts within a few percent instead of from a fixed value. */
+            {%- for sp in network.interpolate_gamma_species | sort %}
+            gamma{{ sp.name }} = gamma;
+            {%- endfor %}
+            T = {{ network.temperature_calculation() }};
+            if (!(T > 0.0)) T = 1000.0;
+            if (T < data->bounds[0]) T = data->bounds[0];
+            else if (T > data->bounds[1]) T = data->bounds[1];
+            data->Ts[i] = T;
+            data->logTs[i] = log(T);
+        }
         Tnew = T * 1.1;
         Tdiff = Tnew - T;
         count = 0;
@@ -424,6 +466,7 @@ int calculate_rhs_{{ solver_name }}(double *input, double *rhs, int nstrip, int 
 int calculate_jacobian_{{ solver_name }}(double *input, double *Joutput, int nstrip, int nchem, void *sdata)
 {
     {{ jacobian_cell_setup() }}
+    {{ solver_name }}_interpolate_rate_derivatives(data, nstrip);
 
     int had_error = 0;
     #pragma omp parallel for if(nstrip > DENGO_OMP_MIN_CELLS) reduction(+:had_error)
@@ -454,6 +497,7 @@ int calculate_jacobian_{{ solver_name }}(double *input, double *Joutput, int nst
 int calculate_jacobian_diag_{{ solver_name }}(double *input, double *Jdiag, int nstrip, int nchem, void *sdata)
 {
     {{ jacobian_cell_setup() }}
+    {{ solver_name }}_interpolate_rate_derivatives(data, nstrip);
 
     int had_error = 0;
     #pragma omp parallel for if(nstrip > DENGO_OMP_MIN_CELLS) reduction(+:had_error)
