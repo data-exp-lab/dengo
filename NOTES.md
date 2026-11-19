@@ -4515,3 +4515,26 @@ Queued next:
 4. Seed amplification in seedless neutral gas: needs k57/k58 in the
    network, or a tighter trace-species threshold in the error norm.
 5. Block-structured linear solve (see above) -- smaller payoff once (1) is in.
+
+### 2026-11-19 — AMR cosmology comparison, and the next item
+
+Small AMR cosmology (Enzo amr_cosmology adapted to primordial chemistry,
+32^3 in 32 Mpc/h, z 50 -> 3; /data/dengo-test, README there): unmodified
+Enzo completes on both libraries with identical AMR and timestep history;
+mass-weighted T/H2/e- agree to <=1-2% at z = 6-10 and 4-6% at z = 3.
+Wall time 50 s (Grackle) vs 102 s (dengo): ~45 s shared hydro/gravity, so
+chemistry is ~5 s vs 57 s, ~1 vs 12.8 us per cell-solve -- ~10x per core,
+because nearly every cell is cold near-equilibrium IGM that Grackle crosses
+in one cheap sub-cycle while dengo pays a full implicit Newton step.
+
+**Next, top of the queue: explicit fast path for quiet cells** (generic,
+uses only the generated RHS): the first-step logic already evaluates f(y)
+per cell; when dt <= ~0.1 x the shortest timescale, take y + dt*f(y) and
+accept it if the existing error estimate (h/2)|f(y1) - f(y0)| passes,
+else fall back to the implicit path. ~2 RHS evaluations (~2-3 us) instead
+of RHS + Jacobian + linear solve + error RHS (~12 us). Estimated: this run's
+chemistry ~57 s -> ~15 s (total ~60 s vs Grackle's 50 s) -- to be validated
+against the BDF harness and re-timed. Then the generic items below it
+(reuse duplicated RHS; H-/H2+ equilibrium via dengo's machinery with
+packing inside the core; auto-generated sparse solve), then a minihalo
+box (<=1 Mpc/h, z_init ~100 -> z ~15-20) where the chemistry matters.
