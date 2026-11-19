@@ -48,6 +48,9 @@ typedef struct {
     double first_step_fraction; /* otherwise first sub-step = this * dt; <= 0
                                    means dt / niter. Either way the sub-step
                                    then doubles on success, halves on failure. */
+    double error_tolerance;     /* local truncation-error tolerance per
+                                   sub-step (relative); <= 0 disables
+                                   error control */
     double reltol;              /* Newton relative tolerance */
     double floor_value;         /* abundance floor (cgs) */
     int use_cie_optical_depth;  /* see {{ solver_name }}_data */

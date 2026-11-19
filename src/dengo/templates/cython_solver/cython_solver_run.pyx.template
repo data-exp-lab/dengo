@@ -69,7 +69,7 @@ cdef extern from "{{ solver_name }}_solver.h":
     double {{ solver_name }}_advance({{ solver_name }}_data *data,
                                      {{ solver_name }}_scratch *scratch,
                                      double *input, int dims, double dtf,
-                                     int niter, double dt_first,
+                                     int niter, double dt_first, double err_tol,
                                      double reltol, double floor_value,
                                      int adaptive_step, int *n_steps,
                                      {{ solver_name }}_step_callback callback,
@@ -277,7 +277,7 @@ cdef class Solver:
                                  double floor_value, bint adaptive_step,
                                  bint intermediate, dict traj_dict,
                                  object T_traj, object t_traj, object ok_traj,
-                                 double first_step=0.0):
+                                 double first_step=0.0, double error_tolerance=0.0):
         """Shared core of `step()`/`step_inplace()`: evolve whatever is
         currently in `self._input` forward by `dtf` (or until `niter`
         sub-steps are used up) via the generated C
@@ -294,17 +294,17 @@ cdef class Solver:
         if intermediate:
             rec = (self, traj_dict, T_traj, t_traj, ok_traj)
             ttot = {{ solver_name }}_advance(self._data, self._scratch, self._input,
-                                             self.dims, dtf, niter, first_step, reltol, floor_value,
+                                             self.dims, dtf, niter, first_step, error_tolerance, reltol, floor_value,
                                              adaptive_step, &it, _record_step, <void *> rec)
         else:
             ttot = {{ solver_name }}_advance(self._data, self._scratch, self._input,
-                                             self.dims, dtf, niter, first_step, reltol, floor_value,
+                                             self.dims, dtf, niter, first_step, error_tolerance, reltol, floor_value,
                                              adaptive_step, &it, NULL, NULL)
         return ttot, it
 
     def step_inplace(self, double dtf, int niter=10000, double reltol=1.0e-5,
                       double floor_value=1.0e-20, bint adaptive_step=True,
-                      double first_step=0.0):
+                      double first_step=0.0, double error_tolerance=0.0):
         """Evolve `self.state` forward by `dtf` seconds, in place -- zero
         Python-object marshaling in either direction, unlike `step()`.
         Write the current abundances into `self.state` (shape
@@ -330,13 +330,17 @@ cdef class Solver:
         `first_step` (seconds): size of the first internal sub-step; 0
         (default) means dtf/niter. With it set, `niter` is purely the cap
         on accepted sub-steps.
+
+        `error_tolerance` > 0 turns on local truncation-error control
+        (see `_advance()` in the generated header); 0 (default) keeps
+        the fixed doubling schedule.
         """
         if self._closed:
             raise RuntimeError("this Solver has already been closed")
         cdef double ttot
         cdef int it
         ttot, it = self._advance(dtf, niter, reltol, floor_value, adaptive_step,
-                                  False, {}, None, None, None, first_step)
+                                  False, {}, None, None, None, first_step, error_tolerance)
         return (ttot >= dtf), ttot
 
     def step(self, state, double dtf, int niter=10000,

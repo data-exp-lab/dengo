@@ -113,6 +113,7 @@ void {{ solver_name }}_free_data({{ solver_name }}_data *data);
 typedef struct {{ solver_name }}_scratch {
     int dims;
     double *prev, *scale, *atol, *rtol, *u0, *s, *gu, *Ju;
+    double *f0, *f1;  /* RHS at the start/end of a sub-step (error control) */
     /* running totals over every _advance() call made with this scratch */
     long long n_accepted, n_rejected;
 } {{ solver_name }}_scratch;
@@ -136,11 +137,23 @@ typedef void (*{{ solver_name }}_step_callback)(void *ctx, int it, double ttot);
    converged); `*n_steps` (if non-NULL) gets the number of accepted
    sub-steps. On return `input` holds the last accepted state. This is
    the single implementation used by the Cython Solver, the wasm build
-   and the grid-level C API. */
+   and the grid-level C API.
+
+   err_tol > 0 turns on local error control instead of the fixed
+   "double after every success" schedule: each sub-step's local
+   truncation error is estimated as (h/2)|f(y_new) - f(y_old)| (the
+   leading backward-Euler error term; one extra RHS evaluation per
+   step), normalized per variable by err_tol*(|y| + 1e-6*n_tot) for
+   species and err_tol*|e| for the energy. A step is accepted if the
+   largest normalized error is <= 1; either way the next step is
+   h * clamp(0.9/sqrt(err), 0.2, 5). This also rejects steps where
+   Newton converged to a spurious root of the implicit equation (e.g.
+   hot dense gas "stuck" near 1e6 K for a step >> t_cool): the RHS there
+   differs wildly from the RHS at the start of the step. */
 double {{ solver_name }}_advance({{ solver_name }}_data *data,
                                  {{ solver_name }}_scratch *scratch,
                                  double *input, int dims, double dtf,
-                                 int niter, double dt_first,
+                                 int niter, double dt_first, double err_tol,
                                  double reltol, double floor_value,
                                  int adaptive_step, int *n_steps,
                                  {{ solver_name }}_step_callback callback,

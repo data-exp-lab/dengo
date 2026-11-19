@@ -46,6 +46,7 @@ void {{ solver_name }}_default_options({{ solver_name }}_options *opts)
        the existing truncation error there; same cost and accuracy on
        hard ones). */
     opts->first_step_timescale = 0.1;
+    opts->error_tolerance = 0.0;   /* set from the evaluation below */
     opts->reltol = 1.0e-5;
     opts->floor_value = 1.0e-20;
     opts->use_cie_optical_depth = 1;
@@ -221,7 +222,7 @@ int {{ solver_name }}_solve_grid({{ solver_name }}_context *ctx,
                 if (!(first > 0.0)) first = ctx->opts.first_step_fraction * dt;
                 reset_temperature_guess(data);
                 double ttot = {{ solver_name }}_advance(data, sc, u, 1, dt, ctx->opts.niter,
-                                                        first,
+                                                        first, ctx->opts.error_tolerance,
                                                         ctx->opts.reltol, ctx->opts.floor_value,
                                                         1, NULL, NULL, NULL);
                 if (ttot < dt) failed++;
