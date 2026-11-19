@@ -4594,3 +4594,30 @@ scripts: /data3/PopIII-Binary/copy/chem-test/README.md.
 - Open: exact BDF reference puts dengo's 0.01 t_ff error at 1e12 at 9% (vs
   0.5% self-convergence) -- a step-independent offset, or a reference
   issue; unresolved.
+
+## 2026-11-19 (late): temperature-solve bug; Pop III reference discrepancy resolved
+
+- **Bug:** `calculate_temperature`'s Newton loop updated `Ts` but not
+  `logTs`, while `interpolate_gamma` reads `logTs`. So the H2 gamma
+  stayed at the starting guess, and the converged T depended on that
+  guess (up to ~15% in H2-rich gas). The bug is also on `main`. Fixed in
+  d572b4d by setting `logTs = log(T)` each iterate.
+- **This was the 9% "BDF reference discrepancy" at 10¹².** An inner
+  tolerance of 10⁻⁴ didn't move dengo at all.
+- **After the fix,** dengo-grackle on the DataDump0081 cells:
+  - one call is within ≤0.2% of the exact BDF solution in T and ≤0.1% in
+    f_H2 (10¹⁰–10¹⁴);
+  - self-convergence is ≲4×10⁻⁴ through 10¹³;
+  - cost is 73/182 µs per cell (was 129/379).
+- **Converged T is now 4–9% above Grackle's at 10¹¹–10¹².** That's
+  mostly Grackle's one-pass H2-gamma temperature (`cool1d_multi_g.F`,
+  "not quite self-consistent").
+- **Table differences vs Grackle 3.4.1** (details in
+  /data3/PopIII-Binary/copy/chem-test/README.md):
+  - CIE cooling is 2× Grackle's;
+  - the H2 optical depth uses ρ where Grackle uses n_H (0.76 factor);
+  - Grackle applies its CIE optical-depth factor to all of edot;
+  - GAHI is GA08, but the shim accepts only `h2_h_cooling_rate = 1`
+    (Lique 2015). That's a shim mismatch: −35% low-density H2 cooling at
+    1000–2000 K.
+  - Not yet fixed; these are physics choices, for the user to decide.
