@@ -4554,3 +4554,19 @@ iteration + interpolating ~58 tables) is now the dominant cost.
 Noticed, not fixed: the energy row of the generated Jacobian omits the
 CIE continuum optical-depth factor that print_cooling() applies to
 radiative terms in the RHS (affects Newton convergence, not results).
+
+### 2026-11-19, later — interpolation divisions; interleaving experiment
+
+- Interleaved (bin-major) rate tables, tried as an experiment on branch
+  `experiment/interleaved-tables` (checkpoint `checkpoint/before-interleaved-
+  tables`): bit-identical, no speedup -- tables stay in cache either way.
+- The interpolation's real cost was 54 divisions per cell per RHS
+  ((hi-lo)/dT*invT per table, dT constant). Fixed (f5f4467): one reciprocal
+  per cell; derivatives interpolated only when the Jacobian needs them;
+  cold-start temperature guess from the generated formula with gamma=5/3
+  instead of 1000 K. Microbenchmark RHS 1.17 -> ~0.9 us.
+- Enzo CoolingTest 4.87 -> 4.13 us/cell-solve (17.2 s vs Grackle 14 s);
+  AMR cosmology 61 -> 60 s total vs Grackle 50 s, chemistry 17 -> 14.7 s
+  (3.3 us/cell-solve), physics unchanged. Chemistry is now ~25% of the
+  cosmology run's time; the rest (~45 s) is hydro/gravity shared with
+  Grackle's run.
