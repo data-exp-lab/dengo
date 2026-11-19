@@ -51,6 +51,11 @@ typedef struct {
     double error_tolerance;     /* local truncation-error tolerance per
                                    sub-step (relative); <= 0 disables
                                    error control */
+    int quiet_path;             /* 1: cells whose own timescales are long
+                                   compared with dt first try one cheap
+                                   diagonal-implicit step (needs error
+                                   control; see _advance). 0: always the
+                                   full implicit solver. */
     double reltol;              /* Newton relative tolerance */
     double floor_value;         /* abundance floor (cgs) */
     int use_cie_optical_depth;  /* see {{ solver_name }}_data */
@@ -58,8 +63,8 @@ typedef struct {
 } {{ solver_name }}_options;
 
 /* niter=10000, first_step_timescale=0.1, first_step_fraction=1/200,
-   error_tolerance=0.1, reltol=1e-5, floor_value=1e-20, both optical
-   depths on. */
+   error_tolerance=0.1, quiet_path=1, reltol=1e-5, floor_value=1e-20,
+   both optical depths on. */
 void {{ solver_name }}_default_options({{ solver_name }}_options *opts);
 
 typedef struct {{ solver_name }}_context {{ solver_name }}_context;
@@ -97,9 +102,9 @@ int {{ solver_name }}_cooling_time_grid({{ solver_name }}_context *ctx,
 
 /* Running totals since create (or the last reset), for checking cost:
    stats[0] = cells solved, stats[1] = accepted sub-steps, stats[2] =
-   rejected sub-step attempts; *seconds = wall-clock time spent inside
-   _solve_grid. */
-void {{ solver_name }}_get_stats({{ solver_name }}_context *ctx, long long stats[3],
+   rejected sub-step attempts, stats[3] = cells done by the quiet path;
+   *seconds = wall-clock time spent inside _solve_grid. */
+void {{ solver_name }}_get_stats({{ solver_name }}_context *ctx, long long stats[4],
                                  double *seconds);
 void {{ solver_name }}_reset_stats({{ solver_name }}_context *ctx);
 

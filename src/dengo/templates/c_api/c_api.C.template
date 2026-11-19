@@ -9,7 +9,7 @@
 struct {{ solver_name }}_context {
     double *tables;
     {{ solver_name }}_options opts;
-    long long n_cells, n_accepted, n_rejected;
+    long long n_cells, n_accepted, n_rejected, n_quiet;
     double seconds;
 };
 
@@ -20,18 +20,19 @@ static double wall_seconds(void)
     return ts.tv_sec + 1e-9 * ts.tv_nsec;
 }
 
-void {{ solver_name }}_get_stats({{ solver_name }}_context *ctx, long long stats[3],
+void {{ solver_name }}_get_stats({{ solver_name }}_context *ctx, long long stats[4],
                                  double *seconds)
 {
     stats[0] = ctx->n_cells;
     stats[1] = ctx->n_accepted;
     stats[2] = ctx->n_rejected;
+    stats[3] = ctx->n_quiet;
     if (seconds != NULL) *seconds = ctx->seconds;
 }
 
 void {{ solver_name }}_reset_stats({{ solver_name }}_context *ctx)
 {
-    ctx->n_cells = ctx->n_accepted = ctx->n_rejected = 0;
+    ctx->n_cells = ctx->n_accepted = ctx->n_rejected = ctx->n_quiet = 0;
     ctx->seconds = 0.0;
 }
 
@@ -52,6 +53,7 @@ void {{ solver_name }}_default_options({{ solver_name }}_options *opts)
        errors 2-4x on dense collapse and long steps for ~1.3x the cost on
        easy cells (NOTES.md). */
     opts->error_tolerance = 0.1;
+    opts->quiet_path = 1;
     opts->reltol = 1.0e-5;
     opts->floor_value = 1.0e-20;
     opts->use_cie_optical_depth = 1;
@@ -207,25 +209,32 @@ int {{ solver_name }}_solve_grid({{ solver_name }}_context *ctx,
     cell_range r;
     if (ctx == NULL || make_range(grid, &r) != 0 || check_fields(grid) != 0 || !(dt >= 0.0)) return -1;
     long failed = 0;
-    long long accepted = 0, rejected = 0;
+    long long accepted = 0, rejected = 0, quiet = 0;
     double t0 = wall_seconds();
     if (dt > 0.0 && r.ncell > 0) {
-        #pragma omp parallel reduction(+:failed, accepted, rejected)
+        #pragma omp parallel reduction(+:failed, accepted, rejected, quiet)
         {
             {{ solver_name }}_data *data = thread_data(ctx, redshift);
             {{ solver_name }}_scratch *sc = {{ solver_name }}_alloc_scratch(1);
-            double u[N_FIELDS], rhs[N_FIELDS];
+            sc->allow_quiet = ctx->opts.quiet_path;
+            double u[N_FIELDS];
             #pragma omp for schedule(dynamic, 16)
             for (long c = 0; c < r.ncell; c++) {
                 long idx = cell_index(&r, c);
                 gather(grid, idx, u);
+                /* _advance starts by making e- consistent; do it first so
+                   the first-step probe's RHS is the RHS at the state
+                   _advance integrates from, and hand it over (one RHS
+                   evaluation per cell instead of two). */
+                ensure_electron_consistency(u, 1, N_FIELDS);
                 double first = -1.0;
+                reset_temperature_guess(data);
                 if (ctx->opts.first_step_timescale > 0.0) {
-                    reset_temperature_guess(data);
-                    first = timescale_first_step(data, u, rhs, dt, ctx->opts.first_step_timescale);
+                    first = timescale_first_step(data, u, sc->f0, dt, ctx->opts.first_step_timescale);
+                    if (first > 0.0 && ctx->opts.error_tolerance > 0.0) sc->f0_valid = 1;
                 }
                 if (!(first > 0.0)) first = ctx->opts.first_step_fraction * dt;
-                reset_temperature_guess(data);
+                if (!sc->f0_valid) reset_temperature_guess(data);
                 double ttot = {{ solver_name }}_advance(data, sc, u, 1, dt, ctx->opts.niter,
                                                         first, ctx->opts.error_tolerance,
                                                         ctx->opts.reltol, ctx->opts.floor_value,
@@ -235,6 +244,7 @@ int {{ solver_name }}_solve_grid({{ solver_name }}_context *ctx,
             }
             accepted += sc->n_accepted;
             rejected += sc->n_rejected;
+            quiet += sc->n_quiet;
             {{ solver_name }}_free_scratch(sc);
             {{ solver_name }}_free_data(data);
         }
@@ -242,6 +252,7 @@ int {{ solver_name }}_solve_grid({{ solver_name }}_context *ctx,
     ctx->n_cells += r.ncell;
     ctx->n_accepted += accepted;
     ctx->n_rejected += rejected;
+    ctx->n_quiet += quiet;
     ctx->seconds += wall_seconds() - t0;
     if (n_failed != NULL) *n_failed = failed;
     return failed > 0 ? 1 : 0;

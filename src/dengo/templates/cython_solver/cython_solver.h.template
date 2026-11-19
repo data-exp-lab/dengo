@@ -116,6 +116,14 @@ typedef struct {{ solver_name }}_scratch {
     double *f0, *f1;  /* RHS at the start/end of a sub-step (error control) */
     /* running totals over every _advance() call made with this scratch */
     long long n_accepted, n_rejected;
+    long long n_quiet, n_quiet_rejected;  /* quiet-cell path taken / tried and declined */
+    int allow_quiet;  /* 1 (default): try the quiet-cell path when error
+                         control is on (see _advance) */
+    int f0_valid;     /* caller already put the RHS at the (electron-
+                         consistent) starting state in f0, with the solver
+                         data's temperature/rate caches from that same
+                         evaluation; _advance uses it instead of evaluating
+                         again, then clears this flag */
 } {{ solver_name }}_scratch;
 
 {{ solver_name }}_scratch *{{ solver_name }}_alloc_scratch(int dims);
@@ -168,6 +176,8 @@ int calculate_rhs_{{ solver_name }}(double *input, double *rhs,
                                     int nstrip, int nchem, void *sdata);
 int calculate_jacobian_{{ solver_name }}(double *input, double *Joutput,
                                          int nstrip, int nchem, void *sdata);
+int calculate_jacobian_diag_{{ solver_name }}(double *input, double *Jdiag,
+                                              int nstrip, int nchem, void *sdata);
 void ensure_electron_consistency(double *input, int nstrip, int nchem);
 
 typedef int (*rhs_f)(double *, double *, int, int, void *);

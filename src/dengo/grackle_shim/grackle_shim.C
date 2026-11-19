@@ -362,12 +362,13 @@ static void print_stats_at_exit(void)
 {
     registry_entry *e = lookup_entry(&grackle_rates);
     if (e == NULL) return;
-    long long st[3];
+    long long st[4];
     double sec;
     primordial_get_stats(e->ctx, st, &sec);
-    fprintf(stderr, "dengo-grackle stats: %lld cell-solves, %.2f accepted + %.2f "
-            "rejected sub-steps per cell-solve, %.3f s in solve_chemistry "
-            "(%.2f us per cell-solve)\n", st[0],
+    fprintf(stderr, "dengo-grackle stats: %lld cell-solves (%.1f%% by the quiet path), "
+            "%.2f accepted + %.2f rejected sub-steps per cell-solve, %.3f s in "
+            "solve_chemistry (%.2f us per cell-solve)\n", st[0],
+            st[0] ? 100.0 * st[3] / st[0] : 0.0,
             st[0] ? (double) st[1] / st[0] : 0.0, st[0] ? (double) st[2] / st[0] : 0.0,
             sec, st[0] ? 1e6 * sec / st[0] : 0.0);
 }
@@ -411,6 +412,8 @@ int local_initialize_chemistry_data(chemistry_data *my_chemistry,
        dengo's per-sub-step error control from the environment. */
     const char *tol_env = getenv("DENGO_GRACKLE_ERROR_TOLERANCE");
     if (tol_env != NULL && tol_env[0] != '\0') opts.error_tolerance = atof(tol_env);
+    const char *quiet_env = getenv("DENGO_GRACKLE_QUIET_PATH");
+    if (quiet_env != NULL && quiet_env[0] != '\0') opts.quiet_path = atoi(quiet_env);
     /* Grackle's cie_cooling switches on both the CIE cooling term and the
        continuum optical-depth suppression that goes with it. */
     opts.use_cie_optical_depth = my_chemistry->cie_cooling ? 1 : 0;

@@ -78,6 +78,22 @@ def primordial_ics(nH=1e4, x_ion=1e-4, x_H2=1e-6, T_guess=1.0e12):
     }
 
 
+def electron_consistent(mod, x):
+    """The generated ensure_electron_consistency(), in the same order:
+    e- = sum of (species * free electrons) over the other species."""
+    import numpy as _np
+    from dengo.reaction_classes import species_registry
+    x = _np.array(x, dtype=float)
+    names = list(mod.SPECIES_NAMES)
+    total = 0.0
+    for f, n in enumerate(names):
+        if n in ("ge", "de"):
+            continue
+        total += x[f] * species_registry[n].free_electrons
+    x[names.index("de")] = total
+    return x
+
+
 def timescale_first_step(mod, x, dt, factor=0.1, redshift=0.0):
     """The C API's default first sub-step for one cell (cgs state `x`,
     SPECIES_NAMES order), computed the same way, in the same order: one
@@ -85,6 +101,7 @@ def timescale_first_step(mod, x, dt, factor=0.1, redshift=0.0):
     shortest e-folding time over the energy and every species above
     1e-6 of the total number density)."""
     names = list(mod.SPECIES_NAMES)
+    x = electron_consistent(mod, x)
     s = mod.Solver(1, redshift=redshift)
     r = s.evaluate_rhs(dict(zip(names, x)))
     s.close()

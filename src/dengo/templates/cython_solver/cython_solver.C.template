@@ -374,9 +374,7 @@ int calculate_rhs_{{ solver_name }}(double *input, double *rhs, int nstrip, int 
 }
 {% endblock %}
 
-{% block calculate_jacobian %}
-int calculate_jacobian_{{ solver_name }}(double *input, double *Joutput, int nstrip, int nchem, void *sdata)
-{
+{% macro jacobian_cell_setup() -%}
     {{ solver_name }}_data *data = ({{ solver_name }}_data *) sdata;
 
     double *T{{ network.energy_term.name }} = data->dTs_{{ network.energy_term.name }};
@@ -391,10 +389,9 @@ int calculate_jacobian_{{ solver_name }}(double *input, double *Joutput, int nst
     {%- endfor %}
     {%- endfor %}
     double z = data->current_z;
+{%- endmacro %}
 
-    int had_error = 0;
-    #pragma omp parallel for if(nstrip > DENGO_OMP_MIN_CELLS) reduction(+:had_error)
-    for (int i = 0; i < nstrip; i++) {
+{% macro jacobian_cell_state() -%}
         {%- for species in network.required_species | sort %}
         double {{ species.name }};
         {%- endfor %}
@@ -421,6 +418,17 @@ int calculate_jacobian_{{ solver_name }}(double *input, double *Joutput, int nst
         double h2_optical_depth_approx = data->use_h2_optical_depth
             ? fmin(1.0, pow(mdensity / 1.34e-14, -0.45)) : 1.0;
         {%- endif %}
+{%- endmacro %}
+
+{% block calculate_jacobian %}
+int calculate_jacobian_{{ solver_name }}(double *input, double *Joutput, int nstrip, int nchem, void *sdata)
+{
+    {{ jacobian_cell_setup() }}
+
+    int had_error = 0;
+    #pragma omp parallel for if(nstrip > DENGO_OMP_MIN_CELLS) reduction(+:had_error)
+    for (int i = 0; i < nstrip; i++) {
+        {{ jacobian_cell_state() }}
 
         j = i * nchem * nchem;
         {%- for s1 in network.required_species | sort %}
@@ -434,6 +442,32 @@ int calculate_jacobian_{{ solver_name }}(double *input, double *Joutput, int nst
         {%- endif %}
         j++;
         {%- endfor %}
+        {%- endfor %}
+    }
+    return had_error ? 1 : 0;
+}
+
+/* Just the diagonal d f_k / d y_k of the Jacobian (same expressions, same
+   per-cell setup), for the quiet-cell step in _advance(): nchem values per
+   cell. Like calculate_jacobian, uses the temperature and rates cached by
+   the last calculate_rhs at this state. */
+int calculate_jacobian_diag_{{ solver_name }}(double *input, double *Jdiag, int nstrip, int nchem, void *sdata)
+{
+    {{ jacobian_cell_setup() }}
+
+    int had_error = 0;
+    #pragma omp parallel for if(nstrip > DENGO_OMP_MIN_CELLS) reduction(+:had_error)
+    for (int i = 0; i < nstrip; i++) {
+        {{ jacobian_cell_state() }}
+
+        j = i * nchem;
+        {%- for s1 in network.required_species | sort %}
+        {{ network.print_jacobian_component(s1, s1, assign_to="Jdiag[j]") }}
+        {%- if s1.name == network.energy_term.name %}
+        Jdiag[j] /= mdensity;
+        Jdiag[j] *= T{{ network.energy_term.name }}[i];
+        {%- endif %}
+        j++;
         {%- endfor %}
     }
     return had_error ? 1 : 0;
@@ -484,6 +518,10 @@ void ensure_electron_consistency(double *input, int nstrip, int nchem)
     sc->f1    = (double *) malloc(dims * n * sizeof(double));
     sc->n_accepted = 0;
     sc->n_rejected = 0;
+    sc->n_quiet = 0;
+    sc->n_quiet_rejected = 0;
+    sc->allow_quiet = 1;
+    sc->f0_valid = 0;
     return sc;
 }
 
@@ -546,12 +584,53 @@ double {{ solver_name }}_advance({{ solver_name }}_data *data,
     /* With error control, the RHS at the start of the first step; after
        that, each accepted step's end-of-step RHS is the next one's start.
        If it can't be evaluated, fall back to the uncontrolled schedule. */
-    int have_f0 = control &&
-        calculate_rhs_{{ solver_name }}(input, sc->f0, dims, n, (void *) data) == 0;
+    int have_f0 = control && (sc->f0_valid ||
+        calculate_rhs_{{ solver_name }}(input, sc->f0, dims, n, (void *) data) == 0);
+    sc->f0_valid = 0;
 
     double dt = (dt_first > 0.0) ? fmin(dt_first, dtf) : dtf / niter;
     double ttot = 0.0;
     int it = 0;
+
+    /* Quiet-cell path (needs error control): when the planned first
+       sub-step already covers all of dtf -- dtf is short compared with the
+       cells' own timescales -- try one step of
+           y1 = y0 + dt f(y0) / (1 - dt df_k/dy_k)
+       using only the Jacobian's diagonal: for a species with production P
+       and destruction D*y it is (y0 + dt P)/(1 + dt D) (positive, and the
+       equilibrium value for fast trace species), with no linear solve or
+       Newton iteration. Accepted under the same error estimate and
+       tolerance as the implicit path; otherwise fall through to it, with
+       the first step sized by that estimate. */
+    if (have_f0 && sc->allow_quiet && dt >= dtf) {
+        int quiet_ok = (calculate_jacobian_diag_{{ solver_name }}(input, sc->s, dims, n, (void *) data) == 0);
+        for (int i = 0; quiet_ok && i < total; i++) {
+            double denom = 1.0 - dtf * sc->s[i];
+            if (!(denom > 0.0)) { quiet_ok = 0; break; }
+            input[i] = sc->prev[i] + dtf * sc->f0[i] / denom;
+            if (!(input[i] >= 0.0)) quiet_ok = 0;
+        }
+        if (quiet_ok && calculate_rhs_{{ solver_name }}(input, sc->f1, dims, n, (void *) data) == 0) {
+            double err = {{ solver_name }}_error_norm(input, sc->f0, sc->f1, dims, n, dtf, err_tol);
+            if (err <= 1.0) {
+                for (int i = 0; i < total; i++)
+                    if (input[i] < floor_value) input[i] = floor_value;
+                if (callback != NULL) callback(callback_ctx, 0, dtf);
+                sc->n_accepted++;
+                sc->n_quiet++;
+                if (n_steps != NULL) *n_steps = 1;
+                return dtf;
+            }
+            dt = dtf * fmin(1.0, fmax(0.2, 0.9 / sqrt(err)));
+        }
+        /* not quiet after all: back to the starting state */
+        for (int i = 0; i < total; i++) input[i] = sc->prev[i];
+        sc->n_quiet_rejected++;
+        /* f0 is still the RHS at the starting state, but calculate_rhs at
+           the trial state overwrote the cached temperature/rates; refresh. */
+        have_f0 = (calculate_rhs_{{ solver_name }}(input, sc->f0, dims, n, (void *) data) == 0);
+    }
+
     while (it < niter && ttot < dtf) {
         int rv = BE_chem_solve(calculate_rhs_{{ solver_name }}, calculate_jacobian_{{ solver_name }},
                                input, dt, sc->rtol, sc->atol, dims, n, sc->scale,

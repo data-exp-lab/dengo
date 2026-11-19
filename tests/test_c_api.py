@@ -42,6 +42,7 @@ def capi(tmp_path_factory):
         _fields_ = [("niter", ctypes.c_int), ("first_step_timescale", ctypes.c_double),
                     ("first_step_fraction", ctypes.c_double),
                     ("error_tolerance", ctypes.c_double),
+                    ("quiet_path", ctypes.c_int),
                     ("reltol", ctypes.c_double),
                     ("floor_value", ctypes.c_double),
                     ("use_cie_optical_depth", ctypes.c_int),
