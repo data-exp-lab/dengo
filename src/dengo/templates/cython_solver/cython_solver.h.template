@@ -115,6 +115,8 @@ typedef struct {{ solver_name }}_scratch {
     int dims;
     double *prev, *scale, *atol, *rtol, *u0, *s, *gu, *Ju;
     double *f0, *f1;  /* RHS at the start/end of a sub-step (error control) */
+    double *jd;       /* Jacobian diagonal at the start of a sub-step: filters
+                         the error estimate (see _error_norm) */
     /* running totals over every _advance() call made with this scratch */
     long long n_accepted, n_rejected;
     long long n_quiet, n_quiet_rejected;  /* quiet-cell path taken / tried and declined */

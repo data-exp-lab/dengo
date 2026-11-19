@@ -564,6 +564,7 @@ void ensure_electron_consistency(double *input, int nstrip, int nchem)
     sc->Ju    = (double *) malloc(dims * n * n * sizeof(double));
     sc->f0    = (double *) malloc(dims * n * sizeof(double));
     sc->f1    = (double *) malloc(dims * n * sizeof(double));
+    sc->jd    = (double *) malloc(dims * n * sizeof(double));
     sc->n_accepted = 0;
     sc->n_rejected = 0;
     sc->n_quiet = 0;
@@ -578,7 +579,7 @@ void {{ solver_name }}_free_scratch({{ solver_name }}_scratch *sc)
     if (sc == NULL) return;
     free(sc->prev); free(sc->scale); free(sc->atol); free(sc->rtol);
     free(sc->u0); free(sc->s); free(sc->gu); free(sc->Ju);
-    free(sc->f0); free(sc->f1);
+    free(sc->f0); free(sc->f1); free(sc->jd);
     free(sc);
 }
 
@@ -586,8 +587,19 @@ void {{ solver_name }}_free_scratch({{ solver_name }}_scratch *sc)
 #define ENERGY_INDEX {% for s in network.required_species | sort %}{% if s.name == network.energy_term.name %}{{ loop.index0 }}{% endif %}{% endfor %}
 
 /* Largest normalized local-error estimate over all cells (see the header
-   comment on _advance): (h/2)|f1 - f0| / (tol*(|y| + 1e-6 n_tot)). */
+   comment on _advance): (h/2)|f1 - f0| / (tol*(|y| + 1e-6 n_tot)),
+   filtered component-wise by 1/(1 - h J_kk) for J_kk < 0 (jd = the
+   Jacobian diagonal at the start of the step; NULL = unfiltered).
+
+   The filter is the diagonal form of Shampine's (I - hJ)^-1 filtering of
+   error estimates in stiff integrators. Without it, a component that is
+   fast compared with h -- e.g. a trace species relaxing to its
+   equilibrium, which backward Euler gets right -- shows |f1 - f0| ~ |f0|,
+   and h|f0|/2 can exceed tolerance by orders of magnitude, rejecting
+   steps that were accurate. For slow components (h|J_kk| << 1) the
+   filter changes nothing. */
 static double {{ solver_name }}_error_norm(const double *y, const double *f0, const double *f1,
+                                         const double *jd,
                                          int dims, int n, double h, double tol)
 {
     double worst = 0.0;
@@ -599,6 +611,7 @@ static double {{ solver_name }}_error_norm(const double *y, const double *f0, co
             double floor_i = (i == ENERGY_INDEX) ? 0.0 : 1.0e-6 * ntot;
             double denom = tol * (fabs(yc[i]) + floor_i);
             double est = 0.5 * h * fabs(f1[c * n + i] - f0[c * n + i]);
+            if (jd != NULL && jd[c * n + i] < 0.0) est /= 1.0 - h * jd[c * n + i];
             double e = (denom > 0.0) ? est / denom : (est > 0.0 ? HUGE_VAL : 0.0);
             if (e > worst) worst = e;
         }
@@ -659,7 +672,7 @@ double {{ solver_name }}_advance({{ solver_name }}_data *data,
             if (!(input[i] >= 0.0)) quiet_ok = 0;
         }
         if (quiet_ok && calculate_rhs_{{ solver_name }}(input, sc->f1, dims, n, (void *) data) == 0) {
-            double err = {{ solver_name }}_error_norm(input, sc->f0, sc->f1, dims, n, dtf, err_tol);
+            double err = {{ solver_name }}_error_norm(input, sc->f0, sc->f1, sc->s, dims, n, dtf, err_tol);
             if (err <= 1.0) {
                 for (int i = 0; i < total; i++)
                     if (input[i] < floor_value) input[i] = floor_value;
@@ -679,6 +692,15 @@ double {{ solver_name }}_advance({{ solver_name }}_data *data,
         have_f0 = (calculate_rhs_{{ solver_name }}(input, sc->f0, dims, n, (void *) data) == 0);
     }
 
+    /* Jacobian diagonal at each implicit step's starting state, for the
+       error-estimate filter. calculate_jacobian_diag uses the rates cached
+       by the last RHS evaluation, so it is taken right after one at that
+       state: here (f0), and after each accepted step (f1). NULL if it
+       can't be evaluated: the unfiltered estimate is the safe side. */
+    const double *jd = NULL;
+    if (have_f0 && calculate_jacobian_diag_{{ solver_name }}(input, sc->jd, dims, n, (void *) data) == 0)
+        jd = sc->jd;
+
     while (it < niter && ttot < dtf) {
         int rv = BE_chem_solve(calculate_rhs_{{ solver_name }}, calculate_jacobian_{{ solver_name }},
                                input, dt, sc->rtol, sc->atol, dims, n, sc->scale,
@@ -691,7 +713,7 @@ double {{ solver_name }}_advance({{ solver_name }}_data *data,
             if (calculate_rhs_{{ solver_name }}(input, sc->f1, dims, n, (void *) data) != 0) {
                 rv = 1;
             } else {
-                double err = {{ solver_name }}_error_norm(input, sc->f0, sc->f1, dims, n, dt, err_tol);
+                double err = {{ solver_name }}_error_norm(input, sc->f0, sc->f1, jd, dims, n, dt, err_tol);
                 growth = (err > 0.0) ? 0.9 / sqrt(err) : 5.0;
                 growth = fmin(5.0, fmax(0.2, growth));
                 if (err > 1.0) rv = 2;  /* converged, but too inaccurate */
@@ -706,6 +728,8 @@ double {{ solver_name }}_advance({{ solver_name }}_data *data,
             }
             if (have_f0) {
                 double *tmp = sc->f0; sc->f0 = sc->f1; sc->f1 = tmp;
+                jd = (calculate_jacobian_diag_{{ solver_name }}(input, sc->jd, dims, n, (void *) data) == 0)
+                     ? sc->jd : NULL;
             }
             if (callback != NULL) callback(callback_ctx, it, ttot);
             /* Without error control: growth factor 2.0 (not 1.1): with
